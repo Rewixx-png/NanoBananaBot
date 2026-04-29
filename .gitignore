@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+bot_data.db
+r.txt
+test_*.py
+.opencode/
