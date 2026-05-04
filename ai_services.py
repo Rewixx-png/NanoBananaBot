@@ -6,15 +6,32 @@ import tempfile
 import os
 import subprocess
 import logging
+from typing import Tuple, Optional
 
-from config import SYSTEM_PROMPT
+from config import (
+    SYSTEM_PROMPT, 
+    GEMINI_TEXT_TIMEOUT, 
+    GEMINI_VIDEO_TIMEOUT, 
+    GEMINI_IMAGE_TIMEOUT,
+    OPENAI_TIMEOUT,
+    NVIDIA_TIMEOUT,
+    MAX_HISTORY_MESSAGES,
+    MAX_VIDEO_FRAMES,
+    VIDEO_FPS,
+    VIDEO_FRAME_SIZE,
+    MAX_API_RETRIES,
+    RETRY_DELAY_SECONDS
+)
 from database import get_history, save_history
 from keys_manager import load_keys, load_openai_key, load_openai_keys, load_nvidia_keys, remove_key
+
+logger = logging.getLogger(__name__)
 
 # ==========================================
 # Генерация текста (обращение к Gemini Flash Lite)
 # ==========================================
-async def generate_text_with_gemini(prompt: str, chat_id: int):
+async def generate_text_with_gemini(prompt: str, chat_id: int) -> str:
+    """Генерация текста через Gemini Flash Lite с историей чата"""
     keys = load_keys()
     
     if not keys:
@@ -46,7 +63,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int):
 
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=30) as resp:
+                async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=GEMINI_TEXT_TIMEOUT) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         try:
@@ -55,9 +72,9 @@ async def generate_text_with_gemini(prompt: str, chat_id: int):
                             # Сохраняем в историю
                             history.append({"role": "user", "text": prompt})
                             history.append({"role": "model", "text": reply_text})
-                            # Храним только 10 последних сообщений (5 пар)
-                            if len(history) > 10:
-                                history = history[-10:]
+                            # Храним только последние сообщения
+                            if len(history) > MAX_HISTORY_MESSAGES:
+                                history = history[-MAX_HISTORY_MESSAGES:]
                             await save_history(chat_id, history)
                                 
                             return reply_text
@@ -82,16 +99,17 @@ async def generate_text_with_gemini(prompt: str, chat_id: int):
 # ==========================================
 # Анализ видео (обращение к Gemini)
 # ==========================================
-async def generate_video_with_gemini(prompt: str, video_path: str):
+async def generate_video_with_gemini(prompt: str, video_path: str) -> str:
+    """Анализ видео через Gemini с извлечением кадров и аудио"""
     keys = load_keys()
     if not keys:
         return "Блять, ключи закончились, иди нахуй."
 
     temp_dir = tempfile.mkdtemp()
     
-    # Extract frames using ffmpeg at 24fps, scale down to 256x256 to save payload size
+    # Extract frames using ffmpeg
     cmd = [
-        "ffmpeg", "-i", video_path, "-vf", "fps=24,scale=256:-1", 
+        "ffmpeg", "-i", video_path, "-vf", f"fps={VIDEO_FPS},scale={VIDEO_FRAME_SIZE}:-1", 
         "-q:v", "10", os.path.join(temp_dir, "frame_%04d.jpg")
     ]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -103,10 +121,8 @@ async def generate_video_with_gemini(prompt: str, video_path: str):
         os.system(f"rm -rf {temp_dir}")
         return "Не смог извлечь кадры из твоего уебищного видео. Может формат дерьмо?"
         
-    # Limit frames to prevent payload from exceeding limits. 
-    # 24fps * 12 seconds = ~288 frames
-    max_frames = 300
-    for frame in frames[:max_frames]:
+    # Limit frames to prevent payload from exceeding limits
+    for frame in frames[:MAX_VIDEO_FRAMES]:
         with open(os.path.join(temp_dir, frame), "rb") as f:
             b64 = base64.b64encode(f.read()).decode("utf-8")
             parts.append({
@@ -160,8 +176,7 @@ async def generate_video_with_gemini(prompt: str, video_path: str):
 
         async with aiohttp.ClientSession() as session:
             try:
-                # Payload could be a few MBs so we wait up to 60s
-                async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=60) as resp:
+                async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=GEMINI_VIDEO_TIMEOUT) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         try:
@@ -189,7 +204,8 @@ async def generate_video_with_gemini(prompt: str, video_path: str):
 # ==========================================
 # Генерация изображения (обращение к Gemini)
 # ==========================================
-async def generate_image_with_gemini(prompt: str, image_bytes: bytes = None, model: str = "gemini-3.1-flash-image-preview"):
+async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes] = None, model: str = "gemini-3.1-flash-image-preview") -> Tuple[Optional[bytes], Optional[str]]:
+    """Генерация изображения через Gemini"""
     keys = load_keys()
     
     if not keys:
@@ -220,7 +236,7 @@ async def generate_image_with_gemini(prompt: str, image_bytes: bytes = None, mod
 
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=60) as resp:
+                async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=GEMINI_IMAGE_TIMEOUT) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         try:
@@ -249,7 +265,8 @@ async def generate_image_with_gemini(prompt: str, image_bytes: bytes = None, mod
 
     return None, "Все API ключи исчерпали лимит или недействительны."
 
-async def parse_openai_image_response(resp):
+async def parse_openai_image_response(resp) -> Tuple[Optional[bytes], Optional[str]]:
+    """Парсинг ответа от OpenAI API"""
     resp_text = await resp.text()
 
     if resp.status != 200:
@@ -279,14 +296,15 @@ async def parse_openai_image_response(resp):
     except Exception as e:
         return None, f"Не удалось разобрать ответ OpenAI: {e}\n\n> Сырой ответ API:\n> {resp_text}"
 
-async def generate_image_with_gpt(prompt: str, image_bytes: bytes = None, model: str = "gpt-image-2"):
+async def generate_image_with_gpt(prompt: str, image_bytes: Optional[bytes] = None, model: str = "gpt-image-2") -> Tuple[Optional[bytes], Optional[str]]:
+    """Генерация изображения через OpenAI GPT"""
     api_keys = load_openai_keys()
 
     if not api_keys:
         return None, "Не найден OPENAI API ключ. Добавьте ключи в r.txt."
 
     prompt_text = prompt if prompt else "A highly detailed beautiful picture"
-    request_timeout = aiohttp.ClientTimeout(total=180)
+    request_timeout = aiohttp.ClientTimeout(total=OPENAI_TIMEOUT)
     last_error = None
 
     for api_key in api_keys:
@@ -318,13 +336,13 @@ async def generate_image_with_gpt(prompt: str, image_bytes: bytes = None, model:
                 return None, error
 
             except asyncio.TimeoutError:
-                logging.error("Таймаут запроса OpenAI: ожидание превысило 180 секунд.")
-                return None, "Таймаут OpenAI: модель не ответила за 180 секунд. Попробуйте еще раз или выберите Gemini."
+                logger.error(f"Таймаут запроса OpenAI: ожидание превысило {OPENAI_TIMEOUT} секунд.")
+                return None, f"Таймаут OpenAI: модель не ответила за {OPENAI_TIMEOUT} секунд. Попробуйте еще раз или выберите Gemini."
             except aiohttp.ClientError as e:
-                logging.error(f"Сетевая ошибка OpenAI: {type(e).__name__}: {e}")
+                logger.error(f"Сетевая ошибка OpenAI: {type(e).__name__}: {e}")
                 return None, f"Сетевая ошибка OpenAI: {type(e).__name__}: {e}"
             except Exception as e:
-                logging.exception("Неожиданная ошибка OpenAI")
+                logger.exception("Неожиданная ошибка OpenAI")
                 return None, f"Ошибка OpenAI: {type(e).__name__}: {e}"
 
     return None, last_error
@@ -348,6 +366,7 @@ def is_openai_timeout_error(error_msg: str) -> bool:
     return "таймаут openai" in lowered or "timeout" in lowered
 
 async def translate_to_english(prompt: str) -> str:
+    """Перевод промпта на английский для NVIDIA"""
     import re
     if not re.search(r'[а-яёА-ЯЁ]', prompt):
         return prompt
@@ -379,7 +398,8 @@ async def translate_to_english(prompt: str) -> str:
 
     return prompt
 
-async def generate_image_with_nvidia(prompt: str, model: str = "black-forest-labs/flux.1-schnell"):
+async def generate_image_with_nvidia(prompt: str, model: str = "black-forest-labs/flux.1-schnell") -> Tuple[Optional[bytes], Optional[str]]:
+    """Генерация изображения через NVIDIA NIM"""
     api_keys = load_nvidia_keys()
 
     if not api_keys:
@@ -403,7 +423,7 @@ async def generate_image_with_nvidia(prompt: str, model: str = "black-forest-lab
         "seed": 0,
         "cfg_scale": cfg_scale,
     }
-    request_timeout = aiohttp.ClientTimeout(total=120)
+    request_timeout = aiohttp.ClientTimeout(total=NVIDIA_TIMEOUT)
     last_error = None
 
     for api_key in api_keys:
@@ -426,11 +446,11 @@ async def generate_image_with_nvidia(prompt: str, model: str = "black-forest-lab
                     logging.warning(f"NVIDIA NIM {resp.status} на ключе {api_key[:12]}..., пробую следующий.")
                     continue
             except asyncio.TimeoutError:
-                return None, "Таймаут NVIDIA NIM: модель не ответила за 120 секунд."
+                return None, f"Таймаут NVIDIA NIM: модель не ответила за {NVIDIA_TIMEOUT} секунд."
             except aiohttp.ClientError as e:
                 return None, f"Сетевая ошибка NVIDIA NIM: {type(e).__name__}: {e}"
             except Exception as e:
-                logging.exception("Неожиданная ошибка NVIDIA NIM")
+                logger.exception("Неожиданная ошибка NVIDIA NIM")
                 return None, f"Ошибка NVIDIA NIM: {type(e).__name__}: {e}"
 
     return None, last_error
