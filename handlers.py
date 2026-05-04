@@ -13,8 +13,20 @@ from state import pending_image_requests, user_image_cooldowns, user_text_cooldo
 from database import save_history
 from utils import check_membership
 from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini
+from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = Router()
+
+async def delete_message_after_delay(bot, chat_id: int, message_id: int, delay: int = DELETE_MESSAGE_DELAY_SECONDS):
+    """Удалить сообщение после задержки"""
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {message_id}: {e}")
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -51,11 +63,11 @@ async def cmd_image(message: types.Message):
         await message.reply("Доступ запрещен. Вы не состоите в обязательной беседе.")
         return
 
-    # Анти-спам проверка (15 секунд)
+    # Анти-спам проверка
     current_time = time.time()
     last_time = user_image_cooldowns.get(message.from_user.id, 0)
-    if current_time - last_time < 15:
-        await message.reply(f"Не спамь блять картинками, подожди еще {int(15 - (current_time - last_time))} сек.")
+    if current_time - last_time < IMAGE_COOLDOWN_SECONDS:
+        await message.reply(f"Не спамь блять картинками, подожди еще {int(IMAGE_COOLDOWN_SECONDS - (current_time - last_time))} сек.")
         return
     user_image_cooldowns[message.from_user.id] = current_time
 
@@ -249,14 +261,11 @@ async def handle_image_model_select(callback: types.CallbackQuery):
         try:
             await callback.message.edit_text("⏳ Ваше фото готовится...")
 
-            async def delete_msg(chat_id, msg_id):
-                await asyncio.sleep(5)
-                try:
-                    await callback.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                except Exception:
-                    pass
-
-            asyncio.create_task(delete_msg(callback.message.chat.id, callback.message.message_id))
+            asyncio.create_task(delete_message_after_delay(
+                callback.bot, 
+                callback.message.chat.id, 
+                callback.message.message_id
+            ))
         except Exception:
             pass
 
@@ -449,11 +458,11 @@ async def handle_text_messages(message: types.Message):
     is_private = message.chat.type == "private"
 
     if is_reply_to_bot or is_mentioned or is_private:
-        # Анти-спам проверка (5 секунд)
+        # Анти-спам проверка
         current_time = time.time()
         last_time = user_text_cooldowns.get(message.from_user.id, 0)
-        if current_time - last_time < 5:
-            await message.reply(f"Заебал строчить, подожди еще {int(5 - (current_time - last_time))} сек.")
+        if current_time - last_time < TEXT_COOLDOWN_SECONDS:
+            await message.reply(f"Заебал строчить, подожди еще {int(TEXT_COOLDOWN_SECONDS - (current_time - last_time))} сек.")
             return
         user_text_cooldowns[message.from_user.id] = current_time
 
