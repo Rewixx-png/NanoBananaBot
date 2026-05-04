@@ -12,7 +12,7 @@ from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboar
 from state import pending_image_requests, user_image_cooldowns, user_text_cooldowns
 from database import save_history
 from utils import check_membership
-from ai_services import generate_image_with_gpt, generate_image_with_gemini, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini
+from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini
 
 router = Router()
 
@@ -88,8 +88,9 @@ async def cmd_image(message: types.Message):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Gemini", callback_data=f"imgsel:{request_id}:gemini"),
-                InlineKeyboardButton(text="GPT", callback_data=f"imgsel:{request_id}:gpt"),
+                InlineKeyboardButton(text="Gemini", callback_data=f"imgprov:{request_id}:gemini"),
+                InlineKeyboardButton(text="GPT", callback_data=f"imgprov:{request_id}:gpt"),
+                InlineKeyboardButton(text="FLUX", callback_data=f"imgprov:{request_id}:flux"),
             ]
         ]
     )
@@ -104,6 +105,109 @@ async def cmd_image(message: types.Message):
         **reply_kwargs
     )
 
+PROVIDER_MODELS = {
+    "gemini": [
+        ("Flash 3.1 Image", "g31flash"),
+        ("Flash 2.0 Image", "g20flash"),
+    ],
+    "gpt": [
+        ("GPT-Image-2", "gpt2"),
+        ("DALL-E 3", "dalle3"),
+    ],
+    "flux": [
+        ("FLUX Schnell (быстро)", "schnell"),
+        ("FLUX Dev (качество)", "fluxdev"),
+        ("FLUX Klein 4B", "klein"),
+    ],
+}
+
+MODEL_TO_REAL = {
+    "g31flash": ("gemini", "gemini-3.1-flash-image-preview"),
+    "g20flash": ("gemini", "gemini-2.0-flash-preview-image-generation"),
+    "gpt2":     ("gpt",    "gpt-image-2"),
+    "dalle3":   ("gpt",    "dall-e-3"),
+    "schnell":  ("flux",   "black-forest-labs/flux.1-schnell"),
+    "fluxdev":  ("flux",   "black-forest-labs/flux.1-dev"),
+    "klein":    ("flux",   "black-forest-labs/flux_2-klein-4b"),
+}
+
+
+@router.callback_query(F.data.startswith("imgprov:"))
+async def handle_provider_select(callback: types.CallbackQuery):
+    if not callback.data:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    _, request_id, provider = parts
+    request_data = pending_image_requests.get(request_id)
+
+    if not request_data:
+        await callback.answer("Запрос устарел. Отправьте /image заново.", show_alert=True)
+        if callback.message:
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        return
+
+    if callback.from_user.id != request_data["user_id"]:
+        await callback.answer("Только автор запроса может выбирать.", show_alert=True)
+        return
+
+    models = PROVIDER_MODELS.get(provider, [])
+    if not models:
+        await callback.answer("Неизвестный провайдер.", show_alert=True)
+        return
+
+    rows = []
+    for label, mid in models:
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"imgsel:{request_id}:{mid}")])
+
+    rows.append([InlineKeyboardButton(text="← Назад", callback_data=f"imgback:{request_id}")])
+
+    provider_names = {"gemini": "Gemini", "gpt": "GPT", "flux": "FLUX (NVIDIA)"}
+    await callback.answer()
+    try:
+        await callback.message.edit_text(
+            f"Выберите модель {provider_names.get(provider, provider)}:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+        )
+    except Exception:
+        pass
+
+@router.callback_query(F.data.startswith("imgback:"))
+async def handle_provider_back(callback: types.CallbackQuery):
+    if not callback.data:
+        return
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        return
+    _, request_id = parts
+    request_data = pending_image_requests.get(request_id)
+    if not request_data:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != request_data["user_id"]:
+        await callback.answer("Только автор запроса.", show_alert=True)
+        return
+    await callback.answer()
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="Gemini", callback_data=f"imgprov:{request_id}:gemini"),
+            InlineKeyboardButton(text="GPT",    callback_data=f"imgprov:{request_id}:gpt"),
+            InlineKeyboardButton(text="FLUX",   callback_data=f"imgprov:{request_id}:flux"),
+        ]]
+    )
+    try:
+        await callback.message.edit_text("Через какую модель хотите сгенерировать фото?", reply_markup=keyboard)
+    except Exception:
+        pass
+
 @router.callback_query(F.data.startswith("imgsel:"))
 async def handle_image_model_select(callback: types.CallbackQuery):
     if not callback.data:
@@ -115,7 +219,7 @@ async def handle_image_model_select(callback: types.CallbackQuery):
         await callback.answer("Некорректные данные кнопки.", show_alert=True)
         return
 
-    _, request_id, model_name = parts
+    _, request_id, model_id = parts
     request_data = pending_image_requests.get(request_id)
 
     if not request_data:
@@ -131,6 +235,12 @@ async def handle_image_model_select(callback: types.CallbackQuery):
         await callback.answer("Эту кнопку может нажать только тот, кто отправил /image.", show_alert=True)
         return
 
+    model_info = MODEL_TO_REAL.get(model_id)
+    if not model_info:
+        await callback.answer("Неизвестная модель.", show_alert=True)
+        return
+
+    provider, real_model = model_info
     pending_image_requests.pop(request_id, None)
 
     await callback.answer()
@@ -138,20 +248,19 @@ async def handle_image_model_select(callback: types.CallbackQuery):
     if callback.message:
         try:
             await callback.message.edit_text("⏳ Ваше фото готовится...")
-            
+
             async def delete_msg(chat_id, msg_id):
                 await asyncio.sleep(5)
                 try:
                     await callback.bot.delete_message(chat_id=chat_id, message_id=msg_id)
                 except Exception:
                     pass
-                    
+
             asyncio.create_task(delete_msg(callback.message.chat.id, callback.message.message_id))
         except Exception:
             pass
 
     message_thread_id = request_data["message_thread_id"]
-
     reply_kwargs = {}
     if message_thread_id:
         reply_kwargs["message_thread_id"] = message_thread_id
@@ -162,29 +271,32 @@ async def handle_image_model_select(callback: types.CallbackQuery):
         message_thread_id=message_thread_id
     )
 
-    selected_model = model_name
-    if model_name == "gpt":
-        result_img, error_msg = await generate_image_with_gpt(request_data["prompt"], request_data["image_bytes"])
+    selected_label = next((l for lst in PROVIDER_MODELS.values() for l, m in lst if next((k for k, (p, rm) in MODEL_TO_REAL.items() if rm == m and p == provider), None) == model_id), real_model)
+
+    if provider == "gpt":
+        result_img, error_msg = await generate_image_with_gpt(request_data["prompt"], request_data["image_bytes"], model=real_model)
         if error_msg and is_openai_verification_error(error_msg):
             await callback.bot.send_message(
                 chat_id=request_data["chat_id"],
-                text="⚠️ GPT (gpt-image-2) сейчас недоступен: организация OpenAI не верифицирована. Переключаюсь на Gemini.",
+                text="⚠️ GPT сейчас недоступен: организация OpenAI не верифицирована. Переключаюсь на Gemini.",
                 reply_to_message_id=request_data["source_message_id"],
                 **reply_kwargs
             )
-            selected_model = "gemini"
+            selected_label = "Gemini Flash 3.1"
             result_img, error_msg = await generate_image_with_gemini(request_data["prompt"], request_data["image_bytes"])
         elif error_msg and is_openai_timeout_error(error_msg):
             await callback.bot.send_message(
                 chat_id=request_data["chat_id"],
-                text="⚠️ GPT (gpt-image-2) не ответил вовремя. Переключаюсь на Gemini.",
+                text="⚠️ GPT не ответил вовремя. Переключаюсь на Gemini.",
                 reply_to_message_id=request_data["source_message_id"],
                 **reply_kwargs
             )
-            selected_model = "gemini"
+            selected_label = "Gemini Flash 3.1"
             result_img, error_msg = await generate_image_with_gemini(request_data["prompt"], request_data["image_bytes"])
+    elif provider == "flux":
+        result_img, error_msg = await generate_image_with_nvidia(request_data["prompt"], model=real_model)
     else:
-        result_img, error_msg = await generate_image_with_gemini(request_data["prompt"], request_data["image_bytes"])
+        result_img, error_msg = await generate_image_with_gemini(request_data["prompt"], request_data["image_bytes"], model=real_model)
 
     if error_msg:
         error_sent_msg = await callback.bot.send_message(
@@ -216,7 +328,7 @@ async def handle_image_model_select(callback: types.CallbackQuery):
 
     if result_img:
         photo_file = BufferedInputFile(result_img, filename="generated.jpg")
-        model_label = "GPT" if selected_model == "gpt" else "Gemini"
+        model_label = selected_label
         caption = (
             f"🎨 Ваш результат ({model_label}) по запросу: {request_data['prompt']}"
             if request_data["prompt"]

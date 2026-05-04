@@ -9,7 +9,7 @@ import logging
 
 from config import SYSTEM_PROMPT
 from database import get_history, save_history
-from keys_manager import load_keys, load_openai_key, remove_key
+from keys_manager import load_keys, load_openai_key, load_openai_keys, load_nvidia_keys, remove_key
 
 # ==========================================
 # Генерация текста (обращение к Gemini Flash Lite)
@@ -189,14 +189,14 @@ async def generate_video_with_gemini(prompt: str, video_path: str):
 # ==========================================
 # Генерация изображения (обращение к Gemini)
 # ==========================================
-async def generate_image_with_gemini(prompt: str, image_bytes: bytes = None):
+async def generate_image_with_gemini(prompt: str, image_bytes: bytes = None, model: str = "gemini-3.1-flash-image-preview"):
     keys = load_keys()
     
     if not keys:
         return None, "Нет доступных API ключей."
 
     for key in keys.copy():
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent?key={key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
         
         # Формируем запрос
         parts = []
@@ -234,9 +234,12 @@ async def generate_image_with_gemini(prompt: str, image_bytes: bytes = None):
                     elif resp.status in [429, 403, 400]:
                         resp_text = await resp.text()
                         logging.warning(f"Ошибка ключа (фото) {key[:10]}... Код: {resp.status}. Текст: {resp_text}")
-                        # Квота или ключ сдох
                         remove_key(key)
-                        continue # Пробуем следующий ключ
+                        continue
+                    elif resp.status in [500, 502, 503, 504]:
+                        resp_text = await resp.text()
+                        logging.warning(f"Gemini временно недоступен (фото) {key[:10]}... Код: {resp.status}. Пробую следующий ключ.")
+                        continue
                     else:
                         resp_text = await resp.text()
                         return None, f"Неизвестная ошибка API: {resp.status} - {resp_text}"
@@ -276,61 +279,55 @@ async def parse_openai_image_response(resp):
     except Exception as e:
         return None, f"Не удалось разобрать ответ OpenAI: {e}\n\n> Сырой ответ API:\n> {resp_text}"
 
-async def generate_image_with_gpt(prompt: str, image_bytes: bytes = None):
-    api_key = load_openai_key()
+async def generate_image_with_gpt(prompt: str, image_bytes: bytes = None, model: str = "gpt-image-2"):
+    api_keys = load_openai_keys()
 
-    if not api_key:
-        return None, "Не найден OPENAI API ключ. Добавьте OPENAI_API_KEY в переменные окружения."
+    if not api_keys:
+        return None, "Не найден OPENAI API ключ. Добавьте ключи в r.txt."
 
     prompt_text = prompt if prompt else "A highly detailed beautiful picture"
-    headers = {
-        "Authorization": f"Bearer {api_key}"
-    }
     request_timeout = aiohttp.ClientTimeout(total=180)
+    last_error = None
 
-    async with aiohttp.ClientSession() as session:
-        try:
-            if image_bytes:
-                form = aiohttp.FormData()
-                form.add_field("model", "gpt-image-2")
-                form.add_field("prompt", prompt_text)
-                form.add_field(
-                    "image",
-                    image_bytes,
-                    filename="input.jpg",
-                    content_type="image/jpeg"
-                )
+    for api_key in api_keys:
+        headers = {"Authorization": f"Bearer {api_key}"}
+        async with aiohttp.ClientSession() as session:
+            try:
+                if image_bytes and model == "gpt-image-2":
+                    form = aiohttp.FormData()
+                    form.add_field("model", model)
+                    form.add_field("prompt", prompt_text)
+                    form.add_field("image", image_bytes, filename="input.jpg", content_type="image/jpeg")
+                    async with session.post("https://api.openai.com/v1/images/edits", data=form, headers=headers, timeout=request_timeout) as resp:
+                        result, error = await parse_openai_image_response(resp)
+                else:
+                    if model == "dall-e-3":
+                        payload = {"model": model, "prompt": prompt_text, "n": 1, "size": "1024x1024"}
+                    else:
+                        payload = {"model": model, "prompt": prompt_text}
+                    async with session.post("https://api.openai.com/v1/images/generations", json=payload, headers={**headers, "Content-Type": "application/json"}, timeout=request_timeout) as resp:
+                        result, error = await parse_openai_image_response(resp)
 
-                async with session.post(
-                    "https://api.openai.com/v1/images/edits",
-                    data=form,
-                    headers=headers,
-                    timeout=request_timeout
-                ) as resp:
-                    return await parse_openai_image_response(resp)
+                if result:
+                    return result, None
 
-            payload = {
-                "model": "gpt-image-2",
-                "prompt": prompt_text
-            }
+                last_error = error
+                if error and "(401)" in error:
+                    logging.warning(f"OpenAI 401 на ключе {api_key[:12]}..., пробую следующий.")
+                    continue
+                return None, error
 
-            async with session.post(
-                "https://api.openai.com/v1/images/generations",
-                json=payload,
-                headers={**headers, "Content-Type": "application/json"},
-                timeout=request_timeout
-            ) as resp:
-                return await parse_openai_image_response(resp)
+            except asyncio.TimeoutError:
+                logging.error("Таймаут запроса OpenAI: ожидание превысило 180 секунд.")
+                return None, "Таймаут OpenAI: модель не ответила за 180 секунд. Попробуйте еще раз или выберите Gemini."
+            except aiohttp.ClientError as e:
+                logging.error(f"Сетевая ошибка OpenAI: {type(e).__name__}: {e}")
+                return None, f"Сетевая ошибка OpenAI: {type(e).__name__}: {e}"
+            except Exception as e:
+                logging.exception("Неожиданная ошибка OpenAI")
+                return None, f"Ошибка OpenAI: {type(e).__name__}: {e}"
 
-        except asyncio.TimeoutError:
-            logging.error("Таймаут запроса OpenAI: ожидание превысило 180 секунд.")
-            return None, "Таймаут OpenAI: модель не ответила за 180 секунд. Попробуйте еще раз или выберите Gemini."
-        except aiohttp.ClientError as e:
-            logging.error(f"Сетевая ошибка OpenAI: {type(e).__name__}: {e}")
-            return None, f"Сетевая ошибка OpenAI: {type(e).__name__}: {e}"
-        except Exception as e:
-            logging.exception("Неожиданная ошибка OpenAI")
-            return None, f"Ошибка OpenAI: {type(e).__name__}: {e}"
+    return None, last_error
 
 def is_openai_verification_error(error_msg: str) -> bool:
     if not error_msg:
@@ -349,3 +346,91 @@ def is_openai_timeout_error(error_msg: str) -> bool:
 
     lowered = error_msg.lower()
     return "таймаут openai" in lowered or "timeout" in lowered
+
+async def translate_to_english(prompt: str) -> str:
+    import re
+    if not re.search(r'[а-яёА-ЯЁ]', prompt):
+        return prompt
+
+    keys = load_keys()
+    if not keys:
+        return prompt
+
+    key = keys[0]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={key}"
+    payload = {
+        "contents": [{"parts": [{"text": f"Translate this image generation prompt to English for an AI image generator. Return ONLY the translated prompt, no explanations:\n{prompt}"}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "thinkingConfig": {"thinkingBudget": -1}
+        }
+    }
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    translated = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    logging.info(f"Промпт переведён: '{prompt}' → '{translated}'")
+                    return translated
+        except Exception as e:
+            logging.error(f"Ошибка перевода промпта: {e}")
+
+    return prompt
+
+async def generate_image_with_nvidia(prompt: str, model: str = "black-forest-labs/flux.1-schnell"):
+    api_keys = load_nvidia_keys()
+
+    if not api_keys:
+        return None, "Нет ключей NVIDIA NIM. Добавьте nvapi-... ключи в r.txt."
+
+    prompt_text = await translate_to_english(prompt) if prompt else "A highly detailed beautiful picture"
+    url = f"https://ai.api.nvidia.com/v1/genai/{model}"
+
+    if "schnell" in model:
+        steps, cfg_scale = 4, 0
+    elif "klein" in model:
+        steps, cfg_scale = 8, 2.0
+    else:
+        steps, cfg_scale = 30, 3.5
+
+    payload = {
+        "prompt": prompt_text,
+        "width": 1024,
+        "height": 1024,
+        "steps": steps,
+        "seed": 0,
+        "cfg_scale": cfg_scale,
+    }
+    request_timeout = aiohttp.ClientTimeout(total=120)
+    last_error = None
+
+    for api_key in api_keys:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(url, json=payload, headers=headers, timeout=request_timeout) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        artifacts = data.get("artifacts", [])
+                        if artifacts and artifacts[0].get("base64"):
+                            return base64.b64decode(artifacts[0]["base64"]), None
+                        return None, f"NVIDIA не вернул изображение. Ответ: {json.dumps(data, ensure_ascii=False)[:300]}"
+                    resp_text = await resp.text()
+                    last_error = f"Ошибка NVIDIA NIM ({resp.status}): {resp_text[:300]}"
+                    logging.warning(f"NVIDIA NIM {resp.status} на ключе {api_key[:12]}..., пробую следующий.")
+                    continue
+            except asyncio.TimeoutError:
+                return None, "Таймаут NVIDIA NIM: модель не ответила за 120 секунд."
+            except aiohttp.ClientError as e:
+                return None, f"Сетевая ошибка NVIDIA NIM: {type(e).__name__}: {e}"
+            except Exception as e:
+                logging.exception("Неожиданная ошибка NVIDIA NIM")
+                return None, f"Ошибка NVIDIA NIM: {type(e).__name__}: {e}"
+
+    return None, last_error
