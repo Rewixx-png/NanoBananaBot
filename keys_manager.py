@@ -63,13 +63,25 @@ def load_api_config():
     else:
         openai_value = openai_data.strip() if isinstance(openai_data, str) else ""
 
-    if not openai_value:
-        openai_matches = list(dict.fromkeys(re.findall(r'sk-[A-Za-z0-9_-]{20,}', content)))
+    if not openai_value and "openai" not in data:
+        openai_matches = list(dict.fromkeys(re.findall(r'sk-proj-[A-Za-z0-9_-]{20,}', content)))
         openai_value = openai_matches[0] if openai_matches else ""
+
+    nvidia_data = data.get("nvidia", [])
+    nvidia_keys = normalize_key_list(nvidia_data) if isinstance(nvidia_data, list) else (
+        [nvidia_data.strip()] if isinstance(nvidia_data, str) and nvidia_data.strip() else []
+    )
+
+    openrouter_data = data.get("openrouter", [])
+    openrouter_keys = normalize_key_list(openrouter_data) if isinstance(openrouter_data, list) else (
+        [openrouter_data.strip()] if isinstance(openrouter_data, str) and openrouter_data.strip() else []
+    )
 
     return {
         "gemini": gemini_keys,
-        "openai": openai_value
+        "openai": openai_value,
+        "nvidia": nvidia_keys,
+        "openrouter": openrouter_keys,
     }
 
 def save_api_config(config):
@@ -98,24 +110,50 @@ def save_api_config(config):
 def load_keys():
     return load_api_config().get("gemini", [])
 
-def load_openai_key():
+def load_openai_keys():
     key = os.getenv("OPENAI_API_KEY", "").strip()
     if key:
-        return key
+        return [key]
 
     if OPENAI_API_KEY.strip():
-        return OPENAI_API_KEY.strip()
+        return [OPENAI_API_KEY.strip()]
 
     try:
         openai_data = load_api_config().get("openai", "")
-        if isinstance(openai_data, str):
-            return openai_data.strip()
         if isinstance(openai_data, list) and openai_data:
-            return str(openai_data[0]).strip()
+            return openai_data
+        if isinstance(openai_data, str) and openai_data.strip():
+            return [openai_data.strip()]
     except Exception as e:
-        logging.error(f"Ошибка загрузки OpenAI ключа: {e}")
+        logging.error(f"Ошибка загрузки OpenAI ключей: {e}")
 
-    return ""
+    return []
+
+def load_openai_key():
+    keys = load_openai_keys()
+    return keys[0] if keys else ""
+
+def load_nvidia_keys():
+    try:
+        nvidia_data = load_api_config().get("nvidia", [])
+        if isinstance(nvidia_data, list) and nvidia_data:
+            return nvidia_data
+        if isinstance(nvidia_data, str) and nvidia_data.strip():
+            return [nvidia_data.strip()]
+    except Exception as e:
+        logging.error(f"Ошибка загрузки NVIDIA ключей: {e}")
+    return []
+
+def load_openrouter_keys():
+    try:
+        or_data = load_api_config().get("openrouter", [])
+        if isinstance(or_data, list) and or_data:
+            return or_data
+        if isinstance(or_data, str) and or_data.strip():
+            return [or_data.strip()]
+    except Exception as e:
+        logging.error(f"Ошибка загрузки OpenRouter ключей: {e}")
+    return []
 
 def remove_key(key_to_remove):
     config = load_api_config()

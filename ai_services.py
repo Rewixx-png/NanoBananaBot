@@ -23,7 +23,7 @@ from config import (
     RETRY_DELAY_SECONDS
 )
 from database import get_history, save_history
-from keys_manager import load_keys, load_openai_key, load_openai_keys, load_nvidia_keys, remove_key
+from keys_manager import load_keys, load_openai_key, load_openai_keys, load_nvidia_keys, load_openrouter_keys, remove_key
 
 logger = logging.getLogger(__name__)
 
@@ -204,25 +204,26 @@ async def generate_video_with_gemini(prompt: str, video_path: str) -> str:
 # ==========================================
 # Генерация изображения (обращение к Gemini)
 # ==========================================
-async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes] = None, model: str = "gemini-3.1-flash-image-preview") -> Tuple[Optional[bytes], Optional[str]]:
-    """Генерация изображения через Gemini"""
+async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes] = None, model: str = "gemini-3.1-flash-image-preview", images_bytes: list = None) -> Tuple[Optional[bytes], Optional[str]]:
     keys = load_keys()
     
     if not keys:
         return None, "Нет доступных API ключей."
 
+    all_images = images_bytes if images_bytes else ([image_bytes] if image_bytes else [])
+
     for key in keys.copy():
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
         
-        # Формируем запрос
         parts = []
-        if image_bytes:
-            parts.append({
-                "inlineData": {
-                    "mimeType": "image/jpeg",
-                    "data": base64.b64encode(image_bytes).decode('utf-8')
-                }
-            })
+        for img in all_images:
+            if img:
+                parts.append({
+                    "inlineData": {
+                        "mimeType": "image/jpeg",
+                        "data": base64.b64encode(img).decode('utf-8')
+                    }
+                })
         
         parts.append({"text": prompt if prompt else "A highly detailed beautiful picture"})
         
@@ -296,15 +297,12 @@ async def parse_openai_image_response(resp) -> Tuple[Optional[bytes], Optional[s
     except Exception as e:
         return None, f"Не удалось разобрать ответ OpenAI: {e}\n\n> Сырой ответ API:\n> {resp_text}"
 
-async def generate_image_with_gpt(prompt: str, image_bytes: Optional[bytes] = None, model: str = "gpt-image-2") -> Tuple[Optional[bytes], Optional[str]]:
+async def generate_image_with_gpt(prompt: str, image_bytes: Optional[bytes] = None, model: str = "gpt-image-2", images_bytes: list = None) -> Tuple[Optional[bytes], Optional[str]]:
+    image_bytes = (images_bytes[0] if images_bytes else image_bytes)
     """Генерация изображения через OpenAI GPT"""
     api_keys = load_openai_keys()
-
-    if not api_keys:
-        return None, "Не найден OPENAI API ключ. Добавьте ключи в r.txt."
-
     prompt_text = prompt if prompt else "A highly detailed beautiful picture"
-    request_timeout = aiohttp.ClientTimeout(total=OPENAI_TIMEOUT)
+    request_timeout = aiohttp.ClientTimeout(total=180)
     last_error = None
 
     for api_key in api_keys:
@@ -345,7 +343,13 @@ async def generate_image_with_gpt(prompt: str, image_bytes: Optional[bytes] = No
                 logger.exception("Неожиданная ошибка OpenAI")
                 return None, f"Ошибка OpenAI: {type(e).__name__}: {e}"
 
-    return None, last_error
+    logging.info("Все OpenAI ключи упали, пробую через OpenRouter (openai/gpt-5.4-image-2)...")
+    or_result, or_error = await generate_image_with_openrouter(prompt, model="openai/gpt-5.4-image-2")
+    if or_result:
+        return or_result, None
+    logging.warning(f"OpenRouter тоже не помог: {or_error}")
+
+    return None, or_error or last_error or "GPT недоступен: нет рабочих ключей."
 
 def is_openai_verification_error(error_msg: str) -> bool:
     if not error_msg:
@@ -358,12 +362,172 @@ def is_openai_verification_error(error_msg: str) -> bool:
         or "verify organization" in lowered
     )
 
+async def generate_image_with_openrouter(prompt: str, model: str = "google/gemini-3.1-flash-image-preview"):
+    api_keys = load_openrouter_keys()
+    if not api_keys:
+        return None, "Нет ключей OpenRouter. Добавьте sk-or-... ключи в r.txt."
+
+    prompt_text = prompt if prompt else "A highly detailed beautiful picture"
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    modalities = ["image"] if "flux" in model or "seedream" in model or "riverflow" in model else ["image", "text"]
+    payload = {
+        "model": model,
+        "modalities": modalities,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": prompt_text}]}],
+    }
+    request_timeout = aiohttp.ClientTimeout(total=300)
+    last_error = None
+
+    for api_key in api_keys:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(url, json=payload, headers=headers, timeout=request_timeout) as resp:
+                    if resp.status == 200:
+                        raw = await resp.read()
+                        raw_text = raw.decode("utf-8", errors="replace")
+
+                        try:
+                            import re as _re
+                            b64_match = _re.search(r'data:image/[^;]+;base64,([A-Za-z0-9+/=]+)', raw_text)
+                            if b64_match:
+                                return base64.b64decode(b64_match.group(1)), None
+                        except Exception:
+                            pass
+
+                        try:
+                            d = json.loads(raw_text)
+                            msg = d.get("choices", [{}])[0].get("message", {})
+                            for src in [msg.get("images", []), msg.get("content", []) or []]:
+                                for part in src:
+                                    if isinstance(part, dict) and part.get("type") == "image_url":
+                                        img_url = part.get("image_url", {}).get("url", "")
+                                        if img_url.startswith("data:"):
+                                            return base64.b64decode(img_url.split(",", 1)[1]), None
+                                        if img_url.startswith("http"):
+                                            async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=60)) as img_resp:
+                                                if img_resp.status == 200:
+                                                    return await img_resp.read(), None
+                        except Exception:
+                            pass
+
+                        return None, "OpenRouter не вернул изображение в ответе."
+
+                    err_text = await resp.text()
+                    last_error = f"Ошибка OpenRouter ({resp.status}): {err_text[:200]}"
+                    if resp.status in [401, 403]:
+                        logging.warning(f"OpenRouter {resp.status} на ключе {api_key[:12]}..., пробую следующий.")
+                        continue
+                    return None, last_error
+
+            except asyncio.TimeoutError:
+                return None, "Таймаут OpenRouter: модель не ответила за 180 секунд."
+            except aiohttp.ClientError as e:
+                return None, f"Сетевая ошибка OpenRouter: {type(e).__name__}: {e}"
+            except Exception as e:
+                logging.exception("Неожиданная ошибка OpenRouter")
+                return None, f"Ошибка OpenRouter: {type(e).__name__}: {e}"
+
+    return None, last_error
+
 def is_openai_timeout_error(error_msg: str) -> bool:
     if not error_msg:
         return False
 
     lowered = error_msg.lower()
     return "таймаут openai" in lowered or "timeout" in lowered
+
+async def start_veo_generation(prompt: str, model: str = "veo-2.0-generate-001", image_bytes: bytes = None) -> tuple:
+    keys = load_keys()
+    if not keys:
+        return None, None, "Нет Gemini ключей для генерации видео."
+
+    prompt_text = prompt if prompt else "A beautiful cinematic scene"
+
+    for key in keys:
+        headers = {"Content-Type": "application/json", "x-goog-api-key": key}
+        instance = {"prompt": prompt_text}
+        if image_bytes:
+            instance["image"] = {
+                "bytesBase64Encoded": base64.b64encode(image_bytes).decode("utf-8"),
+                "mimeType": "image/jpeg",
+            }
+        payload = {
+            "instances": [instance],
+            "parameters": {
+                "aspectRatio": "16:9",
+                "durationSeconds": 8,
+                "personGeneration": "allow_adult" if image_bytes else "allow_all",
+            }
+        }
+        base_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(f"{base_url}:predictLongRunning", json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status != 200:
+                        err = await resp.text()
+                        logging.warning(f"Veo start {resp.status} ключ {key[:12]}: {err[:100]}")
+                        if resp.status in [429, 403]:
+                            continue
+                        return None, None, f"Ошибка Veo ({resp.status}): {err[:200]}"
+                    op_data = await resp.json()
+                    op_name = op_data.get("name", "")
+                    if op_name:
+                        return op_name, key, None
+                    return None, None, f"Veo не вернул имя операции: {op_data}"
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                return None, None, f"Ошибка Veo start: {type(e).__name__}: {e}"
+
+    return None, None, "Все Gemini ключи исчерпаны."
+
+async def poll_veo_operation(operation_name: str, api_key: str) -> tuple:
+    poll_url = f"https://generativelanguage.googleapis.com/v1beta/{operation_name}?key={api_key}"
+    async with aiohttp.ClientSession() as session:
+        for _ in range(60):
+            await asyncio.sleep(5)
+            try:
+                async with session.get(poll_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        continue
+                    poll_data = await resp.json()
+                    if not poll_data.get("done"):
+                        continue
+                    if "error" in poll_data:
+                        return None, f"Ошибка Veo: {poll_data['error'].get('message', str(poll_data['error']))}"
+                    response_obj = poll_data.get("response", {})
+                    video_response = response_obj.get("generateVideoResponse", response_obj)
+                    samples = video_response.get("generatedSamples", [])
+                    if not samples:
+                        reasons = video_response.get("raiMediaFilteredReasons", [])
+                        if reasons:
+                            return None, f"Veo заблокировал видео фильтром безопасности:\n{reasons[0][:300]}"
+                        return None, f"Veo не вернул видео: {json.dumps(response_obj, ensure_ascii=False)[:400]}"
+                    video = samples[0].get("video", {})
+                    encoded = video.get("encodedVideo", "")
+                    if encoded:
+                        return base64.b64decode(encoded), None
+                    uri = video.get("uri", "")
+                    if uri:
+                        dl_headers = {"x-goog-api-key": api_key}
+                        async with session.get(uri, headers=dl_headers, timeout=aiohttp.ClientTimeout(total=120)) as dl:
+                            if dl.status == 200:
+                                return await dl.read(), None
+                            return None, f"Ошибка скачивания ({dl.status}): {(await dl.text())[:200]}"
+                    return None, f"Veo: нет видеоданных в ответе."
+            except Exception:
+                continue
+    return None, "Veo: операция не завершилась за 5 минут."
+
+async def generate_video_with_veo(prompt: str, model: str = "veo-2.0-generate-001", image_bytes: bytes = None) -> tuple:
+    op_name, api_key, error = await start_veo_generation(prompt, model, image_bytes)
+    if error:
+        return None, error
+    return await poll_veo_operation(op_name, api_key)
 
 async def translate_to_english(prompt: str) -> str:
     """Перевод промпта на английский для NVIDIA"""
