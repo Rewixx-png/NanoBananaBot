@@ -4,3 +4,4 @@ bot_data.db
 r.txt
 test_*.py
 .opencode/
+.aider*
