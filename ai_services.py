@@ -56,7 +56,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int) -> str:
             "generationConfig": {
                 "temperature": 1.0,
                 "thinkingConfig": {
-                    "thinkingBudget": -1
+                    "thinkingBudget": 0
                 }
             }
         }
@@ -169,7 +169,7 @@ async def generate_video_with_gemini(prompt: str, video_path: str) -> str:
             "generationConfig": {
                 "temperature": 1.0,
                 "thinkingConfig": {
-                    "thinkingBudget": -1
+                    "thinkingBudget": 0
                 }
             }
         }
@@ -440,6 +440,71 @@ def is_openai_timeout_error(error_msg: str) -> bool:
     lowered = error_msg.lower()
     return "таймаут openai" in lowered or "timeout" in lowered
 
+async def explain_generation_error(prompt: str, error_msg: str, image_bytes: bytes = None) -> str:
+    keys = load_keys()
+    if not keys:
+        return ""
+    key = keys[0]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={key}"
+
+    parts = []
+    if image_bytes:
+        parts.append({"inlineData": {"mimeType": "image/jpeg", "data": base64.b64encode(image_bytes).decode()}})
+    parts.append({"text": (
+        f"Пользователь пытался сгенерировать {'видео' if image_bytes else 'картинку'}.\n"
+        f"Промпт: {prompt or '<без текста>'}\n"
+        f"Ошибка API: {error_msg[:400]}\n"
+        f"{'На изображении выше — фото которое он прикрепил.' if image_bytes else ''}\n"
+        "Объясни ОЧЕНЬ коротко и агрессивно (1-2 предложения) почему получил бан. "
+        "Если причина в фото — укажи что именно на нём нарушает правила. "
+        "Если в промпте — скажи на что триггернуло."
+    )})
+
+    payload = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {"temperature": 0.5}
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=aiohttp.ClientTimeout(total=25)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except Exception as e:
+            logging.error(f"Ошибка объяснения ошибки генерации: {e}")
+    return ""
+
+async def analyze_image_for_veo(image_bytes: bytes, user_prompt: str = "") -> str:
+    keys = load_keys()
+    if not keys:
+        return user_prompt or ""
+    key = keys[0]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={key}"
+    lang_hint = "на русском" if user_prompt and any('\u0400' <= c <= '\u04ff' for c in user_prompt) else "in English"
+    ask = (
+        f"Опиши это изображение подробно {lang_hint} для генерации видео через Veo: "
+        f"что изображено, кто/что главный объект, их внешность, поза, выражение, фон, освещение, стиль. "
+        f"Дай описание в 2-3 предложения — только описание, без пояснений."
+    )
+    payload = {
+        "contents": [{"parts": [
+            {"inlineData": {"mimeType": "image/jpeg", "data": base64.b64encode(image_bytes).decode()}},
+            {"text": ask}
+        ]}],
+        "generationConfig": {"temperature": 0.2}
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    description = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    logging.info(f"Gemini описал фото для Veo: {description[:80]}...")
+                    return description
+        except Exception as e:
+            logging.warning(f"Ошибка анализа фото для Veo: {e}")
+    return user_prompt or ""
+
 async def start_veo_generation(prompt: str, model: str = "veo-2.0-generate-001", image_bytes: bytes = None) -> tuple:
     keys = load_keys()
     if not keys:
@@ -545,7 +610,7 @@ async def translate_to_english(prompt: str) -> str:
         "contents": [{"parts": [{"text": f"Translate this image generation prompt to English for an AI image generator. Return ONLY the translated prompt, no explanations:\n{prompt}"}]}],
         "generationConfig": {
             "temperature": 0.1,
-            "thinkingConfig": {"thinkingBudget": -1}
+            "thinkingConfig": {"thinkingBudget": 0}
         }
     }
 
