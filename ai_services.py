@@ -224,8 +224,18 @@ async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes] =
                         "data": base64.b64encode(img).decode('utf-8')
                     }
                 })
-        
-        parts.append({"text": prompt if prompt else "A highly detailed beautiful picture"})
+
+        if len(all_images) > 1:
+            multi_ref = (
+                f"The {len(all_images)} photos above are ALL different photos of the SAME subject/person. "
+                "Treat every photo as a reference of the exact same individual — same face, same identity. "
+                "Do NOT blend different people. "
+            )
+            effective_prompt = multi_ref + (prompt if prompt else "Generate a high-quality image of this person.")
+        else:
+            effective_prompt = prompt if prompt else "A highly detailed beautiful picture"
+
+        parts.append({"text": effective_prompt})
         
         payload = {
             "contents": [
@@ -298,8 +308,9 @@ async def parse_openai_image_response(resp) -> Tuple[Optional[bytes], Optional[s
         return None, f"Не удалось разобрать ответ OpenAI: {e}\n\n> Сырой ответ API:\n> {resp_text}"
 
 async def generate_image_with_gpt(prompt: str, image_bytes: Optional[bytes] = None, model: str = "gpt-image-2", images_bytes: list = None) -> Tuple[Optional[bytes], Optional[str]]:
-    image_bytes = (images_bytes[0] if images_bytes else image_bytes)
     """Генерация изображения через OpenAI GPT"""
+    all_ref_images = images_bytes if images_bytes else ([image_bytes] if image_bytes else [])
+
     api_keys = load_openai_keys()
     prompt_text = prompt if prompt else "A highly detailed beautiful picture"
     request_timeout = aiohttp.ClientTimeout(total=180)
@@ -309,11 +320,13 @@ async def generate_image_with_gpt(prompt: str, image_bytes: Optional[bytes] = No
         headers = {"Authorization": f"Bearer {api_key}"}
         async with aiohttp.ClientSession() as session:
             try:
-                if image_bytes and model == "gpt-image-2":
+                if all_ref_images and model == "gpt-image-2":
                     form = aiohttp.FormData()
                     form.add_field("model", model)
                     form.add_field("prompt", prompt_text)
-                    form.add_field("image", image_bytes, filename="input.jpg", content_type="image/jpeg")
+                    # gpt-image-2 поддерживает несколько референсов через image[]
+                    for img in all_ref_images:
+                        form.add_field("image[]", img, filename="input.jpg", content_type="image/jpeg")
                     async with session.post("https://api.openai.com/v1/images/edits", data=form, headers=headers, timeout=request_timeout) as resp:
                         result, error = await parse_openai_image_response(resp)
                 else:
