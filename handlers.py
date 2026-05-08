@@ -13,8 +13,8 @@ from state import pending_image_requests, pending_video_requests, pending_media_
 from database import save_history, save_pending_gen, delete_pending_gen
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
-from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini
-from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID
+from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini
+from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID
 import logging
 
 logger = logging.getLogger(__name__)
@@ -428,25 +428,23 @@ async def handle_image_model_select(callback: types.CallbackQuery):
             reply_to_message_id=request_data["source_message_id"],
             **reply_kwargs
         )
-        
-        # Просим Gemini объяснить ошибку
-        explanation_prompt = f"Пользователь пытался сгенерировать картинку.\nЕго промпт: {request_data['prompt'] or '<без текста, только фото>'}\nОтвет API с ошибкой: {error_msg}\nОбъясни ОЧЕНЬ коротко и агрессивно (максимум 2-3 предложения), почему произошла ошибка? Если это бан по фильтру безопасности или копирайту, объясни на что именно триггернуло."
-        
-        explanation = await generate_text_with_gemini(explanation_prompt, request_data["chat_id"])
-        
-        if "Ебать, гугл зацензурил эту хуйню" in explanation:
-            explanation = "Пиздец, твой изначальный промпт настолько больной и запрещенный, что Гугл забанил (PROHIBITED_CONTENT) даже мою попытку проанализировать эту ошибку! Ты че там генерируешь, извращенец ебаный?"
-            
-        # Убираем блоки кода если есть
-        cleaned_text = re.sub(r'```(\w*)\n(.*?)```', '', explanation, flags=re.DOTALL).strip()
-        if not cleaned_text:
-            cleaned_text = explanation
-            
-        await callback.bot.edit_message_text(
-            chat_id=request_data["chat_id"],
-            message_id=error_sent_msg.message_id,
-            text=f"❌ Ошибка:\n{error_msg}\n\n🧠 Пояснение:\n{cleaned_text}"
+
+        first_image = (imgs[0] if imgs else None)
+        explanation = await explain_generation_error(
+            request_data["prompt"] or "", error_msg, image_bytes=first_image
         )
+
+        if not explanation or "Ебать, гугл зацензурил" in explanation:
+            explanation = "Пиздец, твой промпт или фото настолько больное, что Гугл забанил даже попытку объяснить — иди нахуй со своей хуйнёй!"
+
+        try:
+            await callback.bot.edit_message_text(
+                chat_id=request_data["chat_id"],
+                message_id=error_sent_msg.message_id,
+                text=f"❌ Ошибка:\n{error_msg}\n\n🧠 Пояснение:\n{explanation}"
+            )
+        except Exception:
+            pass
         return
 
     if result_img:
@@ -622,17 +620,19 @@ async def handle_veo_model_select(callback: types.CallbackQuery):
             reply_to_message_id=request_data["source_message_id"],
             **reply_kwargs
         )
-        explanation_prompt = f"Пользователь пытался сгенерировать видео через Veo.\nЕго промпт: {request_data['prompt'] or '<пусто>'}\nОшибка API: {error_msg[:500]}\nОбъясни ОЧЕНЬ коротко и агрессивно (1-2 предложения) почему произошла ошибка. Если это фильтр безопасности — скажи на что триггернуло."
-        explanation = await generate_text_with_gemini(explanation_prompt, request_data["chat_id"])
-        cleaned = re.sub(r'```(\w*)\n(.*?)```', '', explanation, flags=re.DOTALL).strip() or explanation
-        try:
-            await callback.bot.edit_message_text(
-                chat_id=request_data["chat_id"],
-                message_id=error_sent_msg.message_id,
-                text=f"❌ Ошибка генерации видео:\n{error_msg}\n\n🧠 Пояснение:\n{cleaned}"
-            )
-        except Exception:
-            pass
+        image_for_explain = request_data.get("image_bytes")
+        explanation = await explain_generation_error(
+            request_data["prompt"], error_msg, image_bytes=image_for_explain
+        )
+        if explanation:
+            try:
+                await callback.bot.edit_message_text(
+                    chat_id=request_data["chat_id"],
+                    message_id=error_sent_msg.message_id,
+                    text=f"❌ Ошибка генерации видео:\n{error_msg}\n\n🧠 Пояснение:\n{explanation}"
+                )
+            except Exception:
+                pass
         return
 
     if video_bytes:
