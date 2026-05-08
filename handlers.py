@@ -14,7 +14,7 @@ from database import save_history, save_pending_gen, delete_pending_gen
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
 from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image
-from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, OWNER_USER_ID
+from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID
 import logging
 
 logger = logging.getLogger(__name__)
@@ -463,32 +463,29 @@ async def handle_image_model_select(callback: types.CallbackQuery):
             **reply_kwargs
         )
 
-        is_owner_private = (
-            request_data["user_id"] == OWNER_USER_ID
-            and request_data["chat_id"] == OWNER_USER_ID
+        upscale_msg = await callback.bot.send_message(
+            chat_id=request_data["chat_id"],
+            text="⬆️ Улучшаю качество через AI upscaler...",
+            **reply_kwargs
         )
-        if is_owner_private:
-            upscale_msg = await callback.bot.send_message(
+        upscaled, up_err = await upscale_image(result_img)
+        try:
+            await callback.bot.delete_message(
                 chat_id=request_data["chat_id"],
-                text="⬆️ Улучшаю качество через AI upscaler...",
+                message_id=upscale_msg.message_id,
             )
-            upscaled, up_err = await upscale_image(result_img)
-            try:
-                await callback.bot.delete_message(
-                    chat_id=request_data["chat_id"],
-                    message_id=upscale_msg.message_id,
-                )
-            except Exception:
-                pass
-            if upscaled:
-                await callback.bot.send_photo(
-                    chat_id=request_data["chat_id"],
-                    photo=BufferedInputFile(upscaled, filename="upscaled.png"),
-                    caption=f"✨ Улучшенная версия ({model_label}) 2x",
-                    reply_to_message_id=request_data["source_message_id"],
-                )
-            else:
-                logger.warning(f"Upscale failed: {up_err}")
+        except Exception:
+            pass
+        if upscaled:
+            await callback.bot.send_photo(
+                chat_id=request_data["chat_id"],
+                photo=BufferedInputFile(upscaled, filename="upscaled.png"),
+                caption=f"✨ Улучшенная версия ({model_label}) 2x",
+                reply_to_message_id=request_data["source_message_id"],
+                **reply_kwargs
+            )
+        else:
+            logger.warning(f"Upscale failed: {up_err}")
 
         return
 
