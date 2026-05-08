@@ -446,7 +446,7 @@ async def generate_image_with_openrouter(prompt: str, model: str = "google/gemin
 _UPSCALE_CLIENT_ID = "b4f2e8a1c6d9f3b0e7a2c5d8f1b4e7a0"
 _UPSCALE_BASE = "https://image-upscaling.net"
 
-async def upscale_image(image_bytes: bytes) -> Tuple[Optional[bytes], Optional[str]]:
+async def _upscale_imageupscaling(image_bytes: bytes) -> Tuple[Optional[bytes], Optional[str]]:
     cookies = {"client_id": _UPSCALE_CLIENT_ID}
     timeout = aiohttp.ClientTimeout(total=30)
 
@@ -481,6 +481,30 @@ async def upscale_image(image_bytes: bytes) -> Tuple[Optional[bytes], Optional[s
                 continue
 
     return None, "Upscale timeout"
+
+async def _upscale_picwish(image_bytes: bytes) -> Tuple[Optional[bytes], Optional[str]]:
+    try:
+        from picwish import PicWish
+        pw = PicWish()
+        result = await asyncio.wait_for(pw.enhance(image_bytes), timeout=60)
+        data = await asyncio.wait_for(result.get_bytes(), timeout=30)
+        return data, None
+    except asyncio.TimeoutError:
+        return None, "PicWish timeout"
+    except Exception as e:
+        return None, str(e)
+
+async def upscale_image(image_bytes: bytes) -> Tuple[Optional[bytes], Optional[str]]:
+    result, err = await _upscale_imageupscaling(image_bytes)
+    if result:
+        return result, None
+
+    logging.warning(f"image-upscaling.net failed ({err}), trying PicWish fallback")
+    result, err2 = await _upscale_picwish(image_bytes)
+    if result:
+        return result, None
+
+    return None, f"Все апскейлеры недоступны. image-upscaling: {err} | picwish: {err2}"
 
 def is_openai_timeout_error(error_msg: str) -> bool:
     if not error_msg:
