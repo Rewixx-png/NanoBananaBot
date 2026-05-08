@@ -5,3 +5,5 @@ r.txt
 test_*.py
 .opencode/
 .aider*
+bot.log
+*.log
