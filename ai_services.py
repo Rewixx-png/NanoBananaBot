@@ -434,6 +434,12 @@ async def generate_image_with_openrouter(prompt: str, model: str = "google/gemin
                     if resp.status in [401, 403]:
                         logging.warning(f"OpenRouter {resp.status} на ключе {api_key[:12]}..., пробую следующий.")
                         continue
+            except asyncio.TimeoutError:
+                last_error = "Таймаут OpenRouter"
+                continue
+            except Exception as e:
+                last_error = str(e)
+                continue
     return None, last_error
 
 
@@ -475,16 +481,6 @@ async def upscale_image(image_bytes: bytes) -> Tuple[Optional[bytes], Optional[s
                 continue
 
     return None, "Upscale timeout"
-
-            except asyncio.TimeoutError:
-                return None, "Таймаут OpenRouter: модель не ответила за 180 секунд."
-            except aiohttp.ClientError as e:
-                return None, f"Сетевая ошибка OpenRouter: {type(e).__name__}: {e}"
-            except Exception as e:
-                logging.exception("Неожиданная ошибка OpenRouter")
-                return None, f"Ошибка OpenRouter: {type(e).__name__}: {e}"
-
-    return None, last_error
 
 def is_openai_timeout_error(error_msg: str) -> bool:
     if not error_msg:
