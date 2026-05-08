@@ -517,10 +517,10 @@ async def handle_image_model_select(callback: types.CallbackQuery):
         except Exception:
             pass
         if upscaled:
-            await callback.bot.send_photo(
+            await callback.bot.send_document(
                 chat_id=request_data["chat_id"],
-                photo=BufferedInputFile(upscaled, filename="upscaled.png"),
-                caption=f"✨ Улучшенная версия ({model_label}) 2x",
+                document=BufferedInputFile(upscaled, filename="upscaled.png"),
+                caption=f"✨ Улучшенная версия ({model_label}) 2x — без сжатия",
                 reply_to_message_id=request_data["source_message_id"],
                 **reply_kwargs
             )
