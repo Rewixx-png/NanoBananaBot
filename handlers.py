@@ -9,12 +9,12 @@ from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
-from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns
+from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until
 from database import save_history, save_pending_gen, delete_pending_gen
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
 from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image
-from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID
+from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID
 import logging
 
 logger = logging.getLogger(__name__)
@@ -117,6 +117,30 @@ async def cmd_clear(message: types.Message):
     await save_history(message.chat.id, [])
     await message.reply("Окей, я забыл всю хуйню, которую мы тут обсуждали. Начинаем с чистого листа.")
 
+@router.message(Command("vip"))
+async def cmd_vip(message: types.Message):
+    if message.from_user.id not in ALLOWED_USER_IDS and message.from_user.id != OWNER_USER_ID:
+        return
+
+    target_id = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+    else:
+        parts = (message.text or "").split()
+        if len(parts) > 1:
+            try:
+                target_id = int(parts[1])
+            except ValueError:
+                pass
+
+    if not target_id:
+        await message.reply("Ответь на сообщение юзера или укажи /vip <user_id>")
+        return
+
+    paid_unlimited_until[target_id] = time.time() + 86400
+    await message.reply(f"✅ Юзер {target_id} получил безлимит на 24 часа.")
+
+
 @router.message(Command("image"))
 async def cmd_image(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
@@ -124,13 +148,29 @@ async def cmd_image(message: types.Message):
         await message.reply("Доступ запрещен. Вы не состоите в обязательной беседе.")
         return
 
-    # Анти-спам проверка
     current_time = time.time()
-    last_time = user_image_cooldowns.get(message.from_user.id, 0)
-    if current_time - last_time < IMAGE_COOLDOWN_SECONDS:
-        await message.reply(f"Не спамь блять картинками, подожди еще {int(IMAGE_COOLDOWN_SECONDS - (current_time - last_time))} сек.")
-        return
-    user_image_cooldowns[message.from_user.id] = current_time
+    uid = message.from_user.id
+
+    if message.chat.id == FULL_ACCESS_CHAT_ID and uid not in ALLOWED_USER_IDS:
+        if current_time >= paid_unlimited_until.get(uid, 0):
+            last_fa = full_access_image_cooldowns.get(uid, 0)
+            remaining = FULL_ACCESS_CHAT_IMAGE_COOLDOWN - (current_time - last_fa)
+            if remaining > 0:
+                mins = int(remaining // 60)
+                secs = int(remaining % 60)
+                time_str = f"{mins} мин {secs} сек" if mins > 0 else f"{secs} сек"
+                await message.reply(
+                    f"⏳ Лимит: 1 фото каждые 10 минут. Подожди ещё {time_str}.\n\n"
+                    f"💳 Переведи 10₽ на номер {PAYMENT_PHONE} и получи доступ без лимита на 24 часа."
+                )
+                return
+        full_access_image_cooldowns[uid] = current_time
+    else:
+        last_time = user_image_cooldowns.get(uid, 0)
+        if current_time - last_time < IMAGE_COOLDOWN_SECONDS:
+            await message.reply(f"Не спамь блять картинками, подожди еще {int(IMAGE_COOLDOWN_SECONDS - (current_time - last_time))} сек.")
+            return
+        user_image_cooldowns[uid] = current_time
 
     prompt = message.text.replace("/image", "").strip() if message.text else ""
     if message.caption:

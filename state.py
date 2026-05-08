@@ -6,3 +6,6 @@ pending_media_groups = {}
 user_text_cooldowns = {}
 user_image_cooldowns = {}
 user_video_cooldowns = {}
+
+full_access_image_cooldowns = {}
+paid_unlimited_until = {}
