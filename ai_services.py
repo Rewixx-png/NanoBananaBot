@@ -317,7 +317,7 @@ async def generate_image_with_gpt(prompt: str, image_bytes: Optional[bytes] = No
         headers = {"Authorization": f"Bearer {api_key}"}
         async with aiohttp.ClientSession() as session:
             try:
-                if all_ref_images and model == "gpt-image-2":
+                if all_ref_images and not model.startswith("dall-e"):
                     form = aiohttp.FormData()
                     form.add_field("model", model)
                     form.add_field("prompt", prompt_text)
