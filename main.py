@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.types import TelegramObject, Message, CallbackQuery
 from config import BOT_TOKEN, BANNED_USER_IDS
 from database import init_db, get_all_pending_gens, delete_pending_gen
-from handlers import router
+from handlers import router, refresh_models
 from typing import Callable, Any, Awaitable
 
 class BanMiddleware(BaseMiddleware):
@@ -125,6 +125,7 @@ async def on_startup(bot: Bot):
     await init_db()
     logger.info("База данных инициализирована")
     asyncio.create_task(resume_pending_generations(bot))
+    asyncio.create_task(refresh_models())
 
 async def on_shutdown():
     """Действия при остановке бота"""

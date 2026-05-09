@@ -13,7 +13,7 @@ from state import pending_image_requests, pending_video_requests, pending_media_
 from database import save_history, save_pending_gen, delete_pending_gen
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
-from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image, generate_image_prompt, generate_code_with_gemini
+from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image, generate_image_prompt, generate_code_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models
 from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID
 import logging
 
@@ -446,7 +446,7 @@ async def handle_prompt_base(callback: types.CallbackQuery):
         pass
 
 
-PROVIDER_MODELS = {
+PROVIDER_MODELS: dict = {
     "gemini": [
         ("Flash 3.1 Image", "g31flash"),
         ("Flash 2.0 Image", "g20flash"),
@@ -462,7 +462,7 @@ PROVIDER_MODELS = {
     ],
 }
 
-MODEL_TO_REAL = {
+MODEL_TO_REAL: dict = {
     "g31flash":   ("gemini", "gemini-3.1-flash-image-preview"),
     "g20flash":   ("gemini", "gemini-2.0-flash-preview-image-generation"),
     "gpt2":       ("gpt",    "gpt-image-2"),
@@ -471,6 +471,31 @@ MODEL_TO_REAL = {
     "fluxdev":    ("flux",   "black-forest-labs/flux.1-dev"),
     "klein":      ("flux",   "black-forest-labs/flux_2-klein-4b"),
 }
+
+
+async def refresh_models():
+    gemini_models = await fetch_gemini_image_models()
+    if gemini_models:
+        PROVIDER_MODELS["gemini"] = [(label, f"gi{i}") for i, (label, _) in enumerate(gemini_models)]
+        for i, (_, model_id) in enumerate(gemini_models):
+            MODEL_TO_REAL[f"gi{i}"] = ("gemini", model_id)
+
+    openai_models = await fetch_openai_image_models()
+    if openai_models:
+        PROVIDER_MODELS["gpt"] = [(label, f"oi{i}") for i, (label, _) in enumerate(openai_models)]
+        for i, (_, model_id) in enumerate(openai_models):
+            MODEL_TO_REAL[f"oi{i}"] = ("gpt", model_id)
+
+    veo_models = await fetch_veo_models()
+    if veo_models:
+        for i, (label, model_id) in enumerate(veo_models):
+            VEO_MODELS[f"veo{i}"] = (label, model_id)
+
+    logger.info(
+        f"Models refreshed: Gemini={len(PROVIDER_MODELS['gemini'])} "
+        f"GPT={len(PROVIDER_MODELS['gpt'])} "
+        f"Veo={len(VEO_MODELS)}"
+    )
 
 
 @router.message(F.photo & ~F.caption.startswith("/"))
@@ -749,11 +774,11 @@ async def handle_image_model_select(callback: types.CallbackQuery):
         **reply_kwargs
     )
 
-VEO_MODELS = {
-    "veo2":    ("Veo 2 (стабильный)",        "veo-2.0-generate-001"),
-    "veo31f":  ("Veo 3.1 Fast (быстро)",     "veo-3.1-fast-generate-preview"),
-    "veo31":   ("Veo 3.1 (лучшее + аудио)",  "veo-3.1-generate-preview"),
-    "veo31l":  ("Veo 3.1 Lite (дешево)",     "veo-3.1-lite-generate-preview"),
+VEO_MODELS: dict = {
+    "veo0": ("Veo 2",          "veo-2.0-generate-001"),
+    "veo1": ("Veo 3.1 Fast",   "veo-3.1-fast-generate-preview"),
+    "veo2": ("Veo 3.1",        "veo-3.1-generate-preview"),
+    "veo3": ("Veo 3.1 Lite",   "veo-3.1-lite-generate-preview"),
 }
 
 VIDEO_COOLDOWN = 60
