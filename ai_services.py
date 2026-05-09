@@ -797,18 +797,18 @@ async def generate_code_with_gemini(prompt: str) -> str:
     if not keys:
         return "Ключи сдохли."
 
-    for model_name in ["gemini-3.1-pro-preview", "gemini-3.1-flash-preview", "gemini-3.1-flash-lite-preview"]:
+    for model_name in ["gemini-3.1-pro-preview", "gemini-3.1-flash-preview"]:
         for key in keys[:3]:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
             payload = {
                 "systemInstruction": {"parts": [{"text": _CODE_SYSTEM_PROMPT}]},
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
                 "generationConfig": {
-                    "temperature": 0.2,
-                    "maxOutputTokens": 8192,
-                    "thinkingConfig": {"thinkingBudget": 0},
+                    "temperature": 0.4,
+                    "maxOutputTokens": 65536,
                 },
             }
+            logging.info(f"Code gen: trying {model_name} key={key[:12]}...")
             async with aiohttp.ClientSession() as session:
                 try:
                     async with session.post(
@@ -820,7 +820,9 @@ async def generate_code_with_gemini(prompt: str) -> str:
                             break
                         if resp.status == 200:
                             data = await resp.json()
-                            return data["candidates"][0]["content"]["parts"][0]["text"]
+                            result = data["candidates"][0]["content"]["parts"][0]["text"]
+                            logging.info(f"Code gen: success with {model_name}, len={len(result)}")
+                            return result
                         if resp.status in [429, 403]:
                             remove_key(key)
                             continue
