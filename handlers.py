@@ -77,7 +77,10 @@ async def cmd_help(message: types.Message):
         "• Gemini — Flash 3.1 Image / Flash 2.0 Image\n"
         "• GPT — GPT-Image-2 / DALL-E 3\n"
         "• FLUX — Schnell (быстро) / Dev (качество) / Klein 4B\n"
-        "Можно прикрепить 1 или несколько фото (альбом) — бот учтёт их при генерации.\n"
+        "Можно прикрепить до 10 фото альбомом — все будут использованы как референсы.\n"
+        "• Gemini: принимает все фото (до 3000 технически)\n"
+        "• GPT: принимает до 16 референсных фото\n"
+        "• FLUX: референсные фото не поддерживает\n"
         "GPT: если прямые ключи недоступны — автоматически переключается на OpenRouter.\n\n"
         "🎬 ГЕНЕРАЦИЯ ВИДЕО\n"
         "/video ваш промпт\n"
@@ -194,7 +197,7 @@ async def cmd_image(message: types.Message):
                 "file_ids": file_ids,
                 "request_id": None,
             }
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2.5)
             group = pending_media_groups.pop(message.media_group_id, None)
             if group:
                 images_bytes = group["images"]
