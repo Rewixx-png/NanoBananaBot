@@ -160,8 +160,7 @@ async def cmd_image(message: types.Message):
                 secs = int(remaining % 60)
                 time_str = f"{mins} мин {secs} сек" if mins > 0 else f"{secs} сек"
                 await message.reply(
-                    f"⏳ Лимит: 1 фото каждые 10 минут. Подожди ещё {time_str}.\n\n"
-                    f"💳 Переведи 10₽ на номер {PAYMENT_PHONE} и получи доступ без лимита на 24 часа."
+                    f"Не спамь блять картинками, подожди ещё {time_str}."
                 )
                 return
         full_access_image_cooldowns[uid] = current_time
