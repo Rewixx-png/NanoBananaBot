@@ -494,31 +494,17 @@ async def _upscale_picwish(image_bytes: bytes) -> Tuple[Optional[bytes], Optiona
     except Exception as e:
         return None, str(e)
 
-async def _upscale_local_esrgan(image_bytes: bytes) -> Tuple[Optional[bytes], Optional[str]]:
-    try:
-        loop = asyncio.get_event_loop()
-        from esrgan_model import upscale_anime
-        result = await loop.run_in_executor(None, upscale_anime, image_bytes)
-        return result, None
-    except Exception as e:
-        return None, str(e)
-
 async def upscale_image(image_bytes: bytes) -> Tuple[Optional[bytes], Optional[str]]:
-    result, err = await _upscale_local_esrgan(image_bytes)
+    result, err = await _upscale_imageupscaling(image_bytes)
     if result:
         return result, None
 
-    logging.warning(f"Local ESRGAN failed ({err}), trying image-upscaling.net")
-    result, err2 = await _upscale_imageupscaling(image_bytes)
+    logging.warning(f"image-upscaling.net failed ({err}), trying PicWish")
+    result, err2 = await _upscale_picwish(image_bytes)
     if result:
         return result, None
 
-    logging.warning(f"image-upscaling.net failed ({err2}), trying PicWish")
-    result, err3 = await _upscale_picwish(image_bytes)
-    if result:
-        return result, None
-
-    return None, f"Все апскейлеры упали. esrgan: {err} | upscaling.net: {err2} | picwish: {err3}"
+    return None, f"Все апскейлеры недоступны. upscaling.net: {err} | picwish: {err2}"
 
 def is_openai_timeout_error(error_msg: str) -> bool:
     if not error_msg:
