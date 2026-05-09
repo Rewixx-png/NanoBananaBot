@@ -800,13 +800,15 @@ async def generate_code_with_gemini(prompt: str) -> str:
     for model_name in ["gemini-3.1-pro-preview", "gemini-3.1-flash-preview"]:
         for key in keys[:3]:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+            gen_config = {
+                "temperature": 0.4,
+                "maxOutputTokens": 65536,
+                "thinkingConfig": {"thinkingBudget": -1},
+            }
             payload = {
                 "systemInstruction": {"parts": [{"text": _CODE_SYSTEM_PROMPT}]},
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": 0.4,
-                    "maxOutputTokens": 65536,
-                },
+                "generationConfig": gen_config,
             }
             logging.info(f"Code gen: trying {model_name} key={key[:12]}...")
             async with aiohttp.ClientSession() as session:
