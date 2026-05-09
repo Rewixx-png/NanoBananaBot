@@ -1064,18 +1064,24 @@ async def handle_text_messages(message: types.Message):
             return
         user_text_cooldowns[message.from_user.id] = current_time
 
-        # Убираем упоминание бота из текста, если оно там есть
         prompt = message.text
         if bot_user.username:
             prompt = prompt.replace(f"@{bot_user.username}", "").strip()
-        
+
         if not prompt:
             prompt = "Что тебе надо, хуйло?"
+
+        if is_reply_to_bot and message.reply_to_message.text:
+            replied_text = message.reply_to_message.text[:500]
+            prompt = f"[Контекст — ты написал ранее: «{replied_text}»]\n{prompt}"
+
+        username = message.from_user.first_name or message.from_user.username or "Аноним"
 
         reply_kwargs = {}
         if message.chat.is_forum and message.message_thread_id:
             reply_kwargs["message_thread_id"] = message.message_thread_id
 
+        thinking_msg = await message.reply("⏳ Думаю...", **reply_kwargs)
         await message.bot.send_chat_action(chat_id=message.chat.id, action="typing", message_thread_id=message.message_thread_id if message.chat.is_forum else None)
 
         _code_kw = [
@@ -1092,20 +1098,21 @@ async def handle_text_messages(message: types.Message):
         if is_code_request:
             text_response = await generate_code_with_gemini(prompt)
         else:
-            text_response = await generate_text_with_gemini(prompt, message.chat.id)
+            text_response = await generate_text_with_gemini(prompt, message.chat.id, username=username)
 
-        # Вырезаем блоки кода из ответа (```язык\nкод```)
+        try:
+            await thinking_msg.delete()
+        except Exception:
+            pass
+
         code_blocks = re.findall(r'```(\w*)\n(.*?)```', text_response, re.DOTALL)
-        
-        # Убираем код из текста, оставляя только слова
         cleaned_text = re.sub(r'```(\w*)\n(.*?)```', '', text_response, flags=re.DOTALL).strip()
-        
+
         if not cleaned_text and code_blocks:
             cleaned_text = "Вот твой ебаный код, подавись нахуй."
         elif not cleaned_text:
             cleaned_text = "Нихуя не понял, но иди в пизду."
 
-        # Сначала отправляем текст (гневный ответ)
         sent_msg = await message.reply(cleaned_text, **reply_kwargs)
 
         # Если был код, прикрепляем его как файлы в ответ на это же сообщение
