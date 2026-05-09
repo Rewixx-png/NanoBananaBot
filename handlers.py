@@ -13,7 +13,7 @@ from state import pending_image_requests, pending_video_requests, pending_media_
 from database import save_history, save_pending_gen, delete_pending_gen
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
-from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image, generate_image_prompt
+from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image, generate_image_prompt, generate_code_with_gemini
 from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID
 import logging
 
@@ -1006,9 +1006,23 @@ async def handle_text_messages(message: types.Message):
         if message.chat.is_forum and message.message_thread_id:
             reply_kwargs["message_thread_id"] = message.message_thread_id
 
-        # Отправляем запрос к Gemini Lite
         await message.bot.send_chat_action(chat_id=message.chat.id, action="typing", message_thread_id=message.message_thread_id if message.chat.is_forum else None)
-        text_response = await generate_text_with_gemini(prompt, message.chat.id)
+
+        _code_kw = [
+            "напиши код", "напиши скрипт", "сделай скрипт", "напиши программу",
+            "напиши функцию", "создай скрипт", "создай код", "напиши бота",
+            "сделай бота", "напиши сайт", "сделай сайт", "напиши приложение",
+            "создай сайт", "создай приложение", "напиши парсер", "сделай парсер",
+            "напиши апи", "сделай апи", "напиши api", "напиши хэндлер",
+            "реализуй", "write code", "write a script", "write a bot",
+            "write a site", "write a website", "write an app",
+        ]
+        is_code_request = any(kw in prompt.lower() for kw in _code_kw)
+
+        if is_code_request:
+            text_response = await generate_code_with_gemini(prompt)
+        else:
+            text_response = await generate_text_with_gemini(prompt, message.chat.id)
 
         # Вырезаем блоки кода из ответа (```язык\nкод```)
         code_blocks = re.findall(r'```(\w*)\n(.*?)```', text_response, re.DOTALL)

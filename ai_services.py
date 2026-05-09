@@ -758,6 +758,59 @@ async def generate_image_with_nvidia(prompt: str, model: str = "black-forest-lab
     return None, last_error
 
 
+_CODE_SYSTEM_PROMPT = (
+    "You are an elite senior software engineer. You write COMPLETE, PRODUCTION-READY code.\n"
+    "Rules:\n"
+    "- ALWAYS write the FULL implementation — never truncate, never use '...', '# TODO', or '# rest of code'\n"
+    "- No placeholders whatsoever — every function must be fully implemented\n"
+    "- Proper error handling throughout\n"
+    "- Clean architecture, meaningful variable names\n"
+    "- For web: modern responsive design, Tailwind or detailed CSS, complex JS, SVG icons where appropriate\n"
+    "- For scripts: handle edge cases, proper argument parsing if needed\n"
+    "- HTML: always include <meta charset='UTF-8'> in <head>\n"
+    "- Code must be runnable from first line to last with zero modifications\n"
+    "- Return code in a single markdown code block. Add brief explanation only if asked."
+)
+
+
+async def generate_code_with_gemini(prompt: str) -> str:
+    keys = load_keys()
+    if not keys:
+        return "Ключи сдохли."
+
+    for model_name in ["gemini-3.1-pro-preview", "gemini-3.1-flash-preview", "gemini-3.1-flash-lite-preview"]:
+        for key in keys[:3]:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+            payload = {
+                "systemInstruction": {"parts": [{"text": _CODE_SYSTEM_PROMPT}]},
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": 8192,
+                    "thinkingConfig": {"thinkingBudget": 0},
+                },
+            }
+            async with aiohttp.ClientSession() as session:
+                try:
+                    async with session.post(
+                        url, json=payload,
+                        headers={"Content-Type": "application/json"},
+                        timeout=aiohttp.ClientTimeout(total=120)
+                    ) as resp:
+                        if resp.status == 404:
+                            break
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return data["candidates"][0]["content"]["parts"][0]["text"]
+                        if resp.status in [429, 403]:
+                            remove_key(key)
+                            continue
+                except Exception:
+                    continue
+
+    return "Все модели недоступны."
+
+
 async def generate_image_prompt(
     prompt: str,
     images_bytes: list,
