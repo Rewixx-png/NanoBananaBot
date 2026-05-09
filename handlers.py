@@ -192,6 +192,13 @@ async def cmd_image(message: types.Message):
     images_bytes = []
     file_ids = []
     if message.photo:
+        if message.media_group_id:
+            pending_media_groups[message.media_group_id] = {
+                "images": images_bytes,
+                "file_ids": file_ids,
+                "request_id": None,
+            }
+
         photo = message.photo[-1]
         file_ids.append(photo.file_id)
         file_info = await message.bot.get_file(photo.file_id)
@@ -199,11 +206,6 @@ async def cmd_image(message: types.Message):
         images_bytes.append(downloaded_file.read())
 
         if message.media_group_id:
-            pending_media_groups[message.media_group_id] = {
-                "images": images_bytes,
-                "file_ids": file_ids,
-                "request_id": None,
-            }
             await asyncio.sleep(2.5)
             group = pending_media_groups.pop(message.media_group_id, None)
             if group:
