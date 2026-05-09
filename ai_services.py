@@ -30,20 +30,21 @@ logger = logging.getLogger(__name__)
 # ==========================================
 # Генерация текста (обращение к Gemini Flash Lite)
 # ==========================================
-async def generate_text_with_gemini(prompt: str, chat_id: int) -> str:
-    """Генерация текста через Gemini Flash Lite с историей чата"""
+async def generate_text_with_gemini(prompt: str, chat_id: int, username: str = "") -> str:
     keys = load_keys()
     
     if not keys:
         return "Блять, ключи закончились, иди нахуй."
 
     history = await get_history(chat_id)
-    
+
+    prefixed_prompt = f"[{username}]: {prompt}" if username else prompt
+
     contents = []
     for msg in history:
         contents.append({"role": msg["role"], "parts": [{"text": msg["text"]}]})
         
-    contents.append({"role": "user", "parts": [{"text": prompt}]})
+    contents.append({"role": "user", "parts": [{"text": prefixed_prompt}]})
 
     for key in keys.copy():
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={key}"
@@ -69,8 +70,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int) -> str:
                         try:
                             reply_text = data["candidates"][0]["content"]["parts"][0]["text"]
                             
-                            # Сохраняем в историю
-                            history.append({"role": "user", "text": prompt})
+                            history.append({"role": "user", "text": prefixed_prompt})
                             history.append({"role": "model", "text": reply_text})
                             # Храним только последние сообщения
                             if len(history) > MAX_HISTORY_MESSAGES:
