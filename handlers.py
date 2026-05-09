@@ -9,11 +9,11 @@ from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
-from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until
+from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests
 from database import save_history, save_pending_gen, delete_pending_gen
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
-from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image
+from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image, generate_image_prompt
 from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID
 import logging
 
@@ -201,16 +201,48 @@ async def cmd_image(message: types.Message):
                 file_ids = group.get("file_ids", file_ids)
 
     request_id = uuid.uuid4().hex[:10]
+    thread_id = message.message_thread_id if message.chat.is_forum else None
+
     pending_image_requests[request_id] = {
         "user_id": message.from_user.id,
         "chat_id": message.chat.id,
         "source_message_id": message.message_id,
-        "message_thread_id": message.message_thread_id if message.chat.is_forum else None,
+        "message_thread_id": thread_id,
         "prompt": prompt,
         "image_bytes": images_bytes[0] if len(images_bytes) == 1 else None,
         "images_bytes": images_bytes if len(images_bytes) > 1 else None,
         "file_ids": file_ids,
     }
+
+    reply_kwargs = {}
+    if message.chat.is_forum and thread_id:
+        reply_kwargs["message_thread_id"] = thread_id
+
+    if images_bytes and prompt:
+        pending_prompt_requests[request_id] = {
+            "user_id": message.from_user.id,
+            "chat_id": message.chat.id,
+            "source_message_id": message.message_id,
+            "message_thread_id": thread_id,
+            "prompt": prompt,
+            "images_bytes": images_bytes,
+            "file_ids": file_ids,
+            "prev_prompts": [],
+            "current_ai_prompt": None,
+        }
+        photo_word = "фотки" if len(images_bytes) > 1 else "фотку"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🤖 Использовать шаблон промта", callback_data=f"pask:{request_id}")],
+            [InlineKeyboardButton(text="⚡ Генерировать с моим промтом", callback_data=f"pbase:{request_id}")],
+        ])
+        await message.reply(
+            f"Слышь, {photo_word} вижу. Твой промт — ну такое. "
+            f"Могу через Gemini Pro сделать нормальный промт по {'этим' if len(images_bytes) > 1 else 'этому'} {'фоткам' if len(images_bytes) > 1 else 'фото'} "
+            f"и твоей идее. Жмякай кнопку или генерируй со своим мусором.",
+            reply_markup=keyboard,
+            **reply_kwargs
+        )
+        return
 
     providers = ["gemini", "flux"] if message.chat.id == TEXT_ONLY_CHAT_ID else ["gemini", "gpt", "flux"]
     labels = {"gemini": "Gemini", "gpt": "GPT", "flux": "FLUX"}
@@ -222,15 +254,152 @@ async def cmd_image(message: types.Message):
         ]]
     )
 
-    reply_kwargs = {}
-    if message.chat.is_forum and message.message_thread_id:
-        reply_kwargs["message_thread_id"] = message.message_thread_id
-
     await message.reply(
         "Через какую модель хотите сгенерировать фото?",
         reply_markup=keyboard,
         **reply_kwargs
     )
+
+def _prompt_ai_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Использовать этот промт", callback_data=f"puse:{request_id}")],
+        [
+            InlineKeyboardButton(text="🔄 Другой вариант", callback_data=f"pother:{request_id}"),
+            InlineKeyboardButton(text="📝 Мой промт", callback_data=f"pbase:{request_id}"),
+        ],
+    ])
+
+
+async def _run_prompt_generation(callback: types.CallbackQuery, request_id: str):
+    data = pending_prompt_requests.get(request_id)
+    if not data:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+
+    await callback.answer()
+    try:
+        await callback.message.edit_text("🧠 Gemini Pro анализирует фото и промт...")
+    except Exception:
+        pass
+
+    eng, rus, err = await generate_image_prompt(
+        data["prompt"], data["images_bytes"], data["prev_prompts"]
+    )
+
+    if not eng:
+        try:
+            await callback.message.edit_text(f"❌ Ошибка генерации промта: {err}")
+        except Exception:
+            pass
+        return
+
+    data["current_ai_prompt"] = eng
+    data["prev_prompts"].append(eng)
+
+    rus_line = f"\n\n🇷🇺 По-русски:\n{rus}" if rus else ""
+    text = (
+        f"🤖 AI-промт готов:\n\n"
+        f"🇬🇧 English:\n<code>{eng}</code>"
+        f"{rus_line}"
+    )
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_prompt_ai_keyboard(request_id))
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("pask:"))
+async def handle_prompt_ask(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        return
+    _, request_id = parts
+    data = pending_prompt_requests.get(request_id)
+    if not data:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != data["user_id"]:
+        await callback.answer("Только автор запроса.", show_alert=True)
+        return
+    await _run_prompt_generation(callback, request_id)
+
+
+@router.callback_query(F.data.startswith("pother:"))
+async def handle_prompt_other(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        return
+    _, request_id = parts
+    data = pending_prompt_requests.get(request_id)
+    if not data:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != data["user_id"]:
+        await callback.answer("Только автор запроса.", show_alert=True)
+        return
+    await _run_prompt_generation(callback, request_id)
+
+
+@router.callback_query(F.data.startswith("puse:"))
+async def handle_prompt_use(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        return
+    _, request_id = parts
+    data = pending_prompt_requests.pop(request_id, None)
+    if not data:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != data["user_id"]:
+        await callback.answer("Только автор запроса.", show_alert=True)
+        return
+
+    chosen_prompt = data.get("current_ai_prompt") or data["prompt"]
+    req = pending_image_requests.get(request_id, {})
+    req["prompt"] = chosen_prompt
+    pending_image_requests[request_id] = req
+
+    await callback.answer()
+    reply_kwargs = {"message_thread_id": data["message_thread_id"]} if data["message_thread_id"] else {}
+    providers = ["gemini", "flux"] if data["chat_id"] == TEXT_ONLY_CHAT_ID else ["gemini", "gpt", "flux"]
+    labels = {"gemini": "Gemini", "gpt": "GPT", "flux": "FLUX"}
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=labels[p], callback_data=f"imgprov:{request_id}:{p}") for p in providers
+    ]])
+    try:
+        await callback.message.edit_text("Через какую модель генерировать?", reply_markup=keyboard)
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("pbase:"))
+async def handle_prompt_base(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        return
+    _, request_id = parts
+    data = pending_prompt_requests.pop(request_id, None)
+    if not data:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != data["user_id"]:
+        await callback.answer("Только автор запроса.", show_alert=True)
+        return
+
+    await callback.answer()
+    reply_kwargs = {"message_thread_id": data["message_thread_id"]} if data["message_thread_id"] else {}
+    providers = ["gemini", "flux"] if data["chat_id"] == TEXT_ONLY_CHAT_ID else ["gemini", "gpt", "flux"]
+    labels = {"gemini": "Gemini", "gpt": "GPT", "flux": "FLUX"}
+    photo_label = f" 📎{len(data['images_bytes'])} фото" if len(data["images_bytes"]) > 1 else ""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=labels[p] + (photo_label if p != "flux" else ""), callback_data=f"imgprov:{request_id}:{p}")
+        for p in providers
+    ]])
+    try:
+        await callback.message.edit_text("Через какую модель генерировать?", reply_markup=keyboard)
+    except Exception:
+        pass
+
 
 PROVIDER_MODELS = {
     "gemini": [
