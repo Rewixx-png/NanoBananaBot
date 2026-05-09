@@ -797,6 +797,22 @@ async def generate_code_with_gemini(prompt: str) -> str:
     if not keys:
         return "Ключи сдохли."
 
+    _REFUSAL_MARKERS = [
+        "i can't", "i cannot", "i'm unable", "i am unable", "i won't",
+        "i will not", "i'm not able", "i don't feel comfortable",
+        "не могу", "не буду", "отказываюсь", "не стану", "невозможно выполнить",
+        "нарушает", "незаконно", "противоречит", "не могу помочь",
+        "this request", "этот запрос", "harmful", "illegal", "unethical",
+        "safety", "policy", "guidelines",
+    ]
+
+    def _is_refusal(text: str) -> bool:
+        t = text.lower()
+        has_code = "```" in text
+        if has_code:
+            return False
+        return any(m in t for m in _REFUSAL_MARKERS)
+
     for model_name in ["gemini-3.1-pro-preview", "gemini-3.1-flash-preview"]:
         for key in keys[:3]:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
@@ -822,7 +838,12 @@ async def generate_code_with_gemini(prompt: str) -> str:
                             break
                         if resp.status == 200:
                             data = await resp.json()
-                            result = data["candidates"][0]["content"]["parts"][0]["text"]
+                            candidate = data["candidates"][0]
+                            finish = candidate.get("finishReason", "")
+                            result = candidate["content"]["parts"][0]["text"]
+                            if finish == "SAFETY" or _is_refusal(result):
+                                logging.info(f"Code gen: {model_name} refused (finish={finish})")
+                                return "Братуха, я отказываюсь это кодить — даже мне это говно западло. Иди нахуй с такими запросами."
                             logging.info(f"Code gen: success with {model_name}, len={len(result)}")
                             return result
                         if resp.status in [429, 403]:
