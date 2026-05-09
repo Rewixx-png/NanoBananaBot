@@ -247,21 +247,77 @@ async def cmd_image(message: types.Message):
         )
         return
 
-    providers = ["gemini", "flux"] if message.chat.id == TEXT_ONLY_CHAT_ID else ["gemini", "gpt", "flux"]
-    labels = {"gemini": "Gemini", "gpt": "GPT", "flux": "FLUX"}
-    photo_label = f" 📎{len(images_bytes)} фото" if len(images_bytes) > 1 else ""
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(text=labels[p] + (photo_label if p != "flux" else ""), callback_data=f"imgprov:{request_id}:{p}")
-            for p in providers
-        ]]
-    )
-
     await message.reply(
-        "Через какую модель хотите сгенерировать фото?",
-        reply_markup=keyboard,
+        _temp_message(),
+        reply_markup=_temp_keyboard(request_id),
         **reply_kwargs
     )
+
+_TEMP_OPTIONS = [
+    (0.1, "🎯 Точный",     "строго следует промпту, почти без вариаций"),
+    (0.5, "⚖️ Умеренный",  "баланс точности и разнообразия"),
+    (1.0, "✨ Стандарт",   "стандартная генерация (по умолчанию)"),
+    (1.5, "🎨 Творческий", "больше вариативности и интерпретации"),
+    (2.0, "🌀 Безумный",   "максимальная непредсказуемость"),
+]
+
+def _temp_message() -> str:
+    lines = [
+        "🌡️ Выберите температуру генерации:\n",
+        "Температура влияет на то, насколько точно ИИ следует промпту.",
+        "Диапазон: 0.1 (точно) — 2.0 (творческий хаос)\n",
+    ]
+    for val, label, desc in _TEMP_OPTIONS:
+        lines.append(f"{label} — {desc}")
+    return "\n".join(lines)
+
+def _temp_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(
+        text=f"{label} ({val})",
+        callback_data=f"ptmp:{request_id}:{i}"
+    )] for i, (val, label, _) in enumerate(_TEMP_OPTIONS)]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def _providers_keyboard(request_id: str, chat_id: int, photo_count: int = 0) -> InlineKeyboardMarkup:
+    providers = ["gemini", "flux"] if chat_id == TEXT_ONLY_CHAT_ID else ["gemini", "gpt", "flux"]
+    labels = {"gemini": "Gemini", "gpt": "GPT", "flux": "FLUX"}
+    photo_label = f" 📎{photo_count} фото" if photo_count > 1 else ""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text=labels[p] + (photo_label if p != "flux" else ""),
+            callback_data=f"imgprov:{request_id}:{p}"
+        ) for p in providers
+    ]])
+
+
+@router.callback_query(F.data.startswith("ptmp:"))
+async def handle_temp_select(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        return
+    _, request_id, idx_str = parts
+    req = pending_image_requests.get(request_id)
+    if not req:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != req["user_id"]:
+        await callback.answer("Только автор запроса.", show_alert=True)
+        return
+
+    idx = int(idx_str)
+    temp_val, temp_label, _ = _TEMP_OPTIONS[idx]
+    req["temperature"] = temp_val
+    await callback.answer(f"Температура: {temp_label} ({temp_val})")
+
+    imgs = req.get("images_bytes") or ([req["image_bytes"]] if req.get("image_bytes") else [])
+    try:
+        await callback.message.edit_text(
+            f"🌡️ {temp_label} ({temp_val}) — выбрано\n\nЧерез какую модель генерировать?",
+            reply_markup=_providers_keyboard(request_id, req["chat_id"], len(imgs))
+        )
+    except Exception:
+        pass
+
 
 def _prompt_ai_keyboard(request_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -363,14 +419,8 @@ async def handle_prompt_use(callback: types.CallbackQuery):
     pending_image_requests[request_id] = req
 
     await callback.answer()
-    reply_kwargs = {"message_thread_id": data["message_thread_id"]} if data["message_thread_id"] else {}
-    providers = ["gemini", "flux"] if data["chat_id"] == TEXT_ONLY_CHAT_ID else ["gemini", "gpt", "flux"]
-    labels = {"gemini": "Gemini", "gpt": "GPT", "flux": "FLUX"}
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=labels[p], callback_data=f"imgprov:{request_id}:{p}") for p in providers
-    ]])
     try:
-        await callback.message.edit_text("Через какую модель генерировать?", reply_markup=keyboard)
+        await callback.message.edit_text(_temp_message(), reply_markup=_temp_keyboard(request_id))
     except Exception:
         pass
 
@@ -390,16 +440,8 @@ async def handle_prompt_base(callback: types.CallbackQuery):
         return
 
     await callback.answer()
-    reply_kwargs = {"message_thread_id": data["message_thread_id"]} if data["message_thread_id"] else {}
-    providers = ["gemini", "flux"] if data["chat_id"] == TEXT_ONLY_CHAT_ID else ["gemini", "gpt", "flux"]
-    labels = {"gemini": "Gemini", "gpt": "GPT", "flux": "FLUX"}
-    photo_label = f" 📎{len(data['images_bytes'])} фото" if len(data["images_bytes"]) > 1 else ""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=labels[p] + (photo_label if p != "flux" else ""), callback_data=f"imgprov:{request_id}:{p}")
-        for p in providers
-    ]])
     try:
-        await callback.message.edit_text("Через какую модель генерировать?", reply_markup=keyboard)
+        await callback.message.edit_text(_temp_message(), reply_markup=_temp_keyboard(request_id))
     except Exception:
         pass
 
@@ -608,7 +650,7 @@ async def handle_image_model_select(callback: types.CallbackQuery):
                 **reply_kwargs
             )
             selected_label = "Gemini Flash 3.1"
-            result_img, error_msg = await generate_image_with_gemini(request_data["prompt"], images_bytes=imgs)
+            result_img, error_msg = await generate_image_with_gemini(request_data["prompt"], images_bytes=imgs, temperature=request_data.get("temperature", 1.0))
         elif error_msg and is_openai_timeout_error(error_msg):
             await callback.bot.send_message(
                 chat_id=request_data["chat_id"],
@@ -617,11 +659,11 @@ async def handle_image_model_select(callback: types.CallbackQuery):
                 **reply_kwargs
             )
             selected_label = "Gemini Flash 3.1"
-            result_img, error_msg = await generate_image_with_gemini(request_data["prompt"], images_bytes=imgs)
+            result_img, error_msg = await generate_image_with_gemini(request_data["prompt"], images_bytes=imgs, temperature=request_data.get("temperature", 1.0))
     elif provider == "flux":
         result_img, error_msg = await generate_image_with_nvidia(request_data["prompt"], model=real_model)
     else:
-        result_img, error_msg = await generate_image_with_gemini(request_data["prompt"], images_bytes=imgs, model=real_model)
+        result_img, error_msg = await generate_image_with_gemini(request_data["prompt"], images_bytes=imgs, model=real_model, temperature=request_data.get("temperature", 1.0))
 
     if progress_task:
         progress_task.cancel()

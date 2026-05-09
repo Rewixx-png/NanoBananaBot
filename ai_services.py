@@ -204,7 +204,7 @@ async def generate_video_with_gemini(prompt: str, video_path: str) -> str:
 # ==========================================
 # Генерация изображения (обращение к Gemini)
 # ==========================================
-async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes] = None, model: str = "gemini-3.1-flash-image-preview", images_bytes: list = None) -> Tuple[Optional[bytes], Optional[str]]:
+async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes] = None, model: str = "gemini-3.1-flash-image-preview", images_bytes: list = None, temperature: float = 1.0) -> Tuple[Optional[bytes], Optional[str]]:
     keys = load_keys()
     
     if not keys:
@@ -238,11 +238,8 @@ async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes] =
         parts.append({"text": effective_prompt})
         
         payload = {
-            "contents": [
-                {
-                    "parts": parts
-                }
-            ]
+            "contents": [{"parts": parts}],
+            "generationConfig": {"temperature": temperature},
         }
 
         async with aiohttp.ClientSession() as session:
