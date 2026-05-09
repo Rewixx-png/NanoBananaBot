@@ -808,6 +808,116 @@ async def generate_code_with_gemini(prompt: str) -> str:
     return "Все модели недоступны."
 
 
+_models_cache: dict = {}
+_MODELS_CACHE_TTL = 3600
+
+
+def _pretty_model_name(model_id: str) -> str:
+    name = model_id.replace("-preview", "").replace("-generate", "").replace("-001", "")
+    parts = name.split("-")
+    out = []
+    for p in parts:
+        if p in ("pro", "flash", "lite", "fast", "ultra", "image", "mini"):
+            out.append(p.capitalize())
+        elif p in ("veo", "gpt", "dall", "e"):
+            out.append(p.upper())
+        elif p.replace(".", "").isdigit():
+            out.append(p)
+        else:
+            out.append(p.capitalize())
+    return " ".join(out)
+
+
+async def fetch_gemini_image_models() -> list:
+    cache_key = "gemini_image"
+    now = __import__("time").time()
+    if cache_key in _models_cache and now - _models_cache[cache_key]["ts"] < _MODELS_CACHE_TTL:
+        return _models_cache[cache_key]["data"]
+
+    keys = load_keys()
+    if not keys:
+        return []
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={keys[0]}&pageSize=200"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    result = []
+                    for m in data.get("models", []):
+                        model_id = m["name"].replace("models/", "")
+                        methods = m.get("supportedGenerationMethods", [])
+                        if "image" in model_id.lower() and "generateContent" in methods:
+                            result.append((_pretty_model_name(model_id), model_id))
+                    _models_cache[cache_key] = {"ts": now, "data": result}
+                    return result
+        except Exception as e:
+            logging.warning(f"fetch_gemini_image_models: {e}")
+    return []
+
+
+async def fetch_openai_image_models() -> list:
+    cache_key = "openai_image"
+    now = __import__("time").time()
+    if cache_key in _models_cache and now - _models_cache[cache_key]["ts"] < _MODELS_CACHE_TTL:
+        return _models_cache[cache_key]["data"]
+
+    api_keys = load_openai_keys()
+    if not api_keys:
+        return []
+
+    headers = {"Authorization": f"Bearer {api_keys[0]}"}
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(
+                "https://api.openai.com/v1/models", headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    skip = {"dall-e-2", "gpt-image-1-mini"}
+                    result = []
+                    for m in sorted(data.get("data", []), key=lambda x: x["id"], reverse=True):
+                        mid = m["id"]
+                        if any(p in mid for p in ("gpt-image", "dall-e", "chatgpt-image")):
+                            if mid not in skip:
+                                result.append((_pretty_model_name(mid), mid))
+                    _models_cache[cache_key] = {"ts": now, "data": result}
+                    return result
+        except Exception as e:
+            logging.warning(f"fetch_openai_image_models: {e}")
+    return []
+
+
+async def fetch_veo_models() -> list:
+    cache_key = "veo"
+    now = __import__("time").time()
+    if cache_key in _models_cache and now - _models_cache[cache_key]["ts"] < _MODELS_CACHE_TTL:
+        return _models_cache[cache_key]["data"]
+
+    keys = load_keys()
+    if not keys:
+        return []
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={keys[0]}&pageSize=200"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    result = []
+                    for m in data.get("models", []):
+                        model_id = m["name"].replace("models/", "")
+                        if "veo" in model_id.lower():
+                            result.append((_pretty_model_name(model_id), model_id))
+                    _models_cache[cache_key] = {"ts": now, "data": result}
+                    return result
+        except Exception as e:
+            logging.warning(f"fetch_veo_models: {e}")
+    return []
+
+
 async def generate_image_prompt(
     prompt: str,
     images_bytes: list,
