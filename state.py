@@ -9,3 +9,5 @@ user_video_cooldowns = {}
 
 full_access_image_cooldowns = {}
 paid_unlimited_until = {}
+
+pending_prompt_requests = {}

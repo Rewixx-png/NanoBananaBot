@@ -756,3 +756,77 @@ async def generate_image_with_nvidia(prompt: str, model: str = "black-forest-lab
                 return None, f"Ошибка NVIDIA NIM: {type(e).__name__}: {e}"
 
     return None, last_error
+
+
+async def generate_image_prompt(
+    prompt: str,
+    images_bytes: list,
+    prev_prompts: list = None,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    keys = load_keys()
+    if not keys:
+        return None, None, "Нет ключей"
+
+    key = keys[0]
+    prev_prompts = prev_prompts or []
+
+    sys_text = (
+        "You are a world-class AI image generation prompt engineer specializing in Midjourney, DALL-E, Flux, and Stable Diffusion. "
+        "You analyze reference photo(s) and the user's rough idea, then craft the perfect detailed generation prompt. "
+        "Include: subject description, art style, lighting, composition, mood, quality tags (masterpiece, 8k, highly detailed, etc.). "
+        "Respond ONLY in this exact format — nothing else:\n"
+        "ENGLISH: <your detailed English prompt>\n"
+        "RUSSIAN: <Russian translation>"
+    )
+
+    photo_count = len([b for b in images_bytes if b])
+    prev_note = ""
+    if prev_prompts:
+        prev_note = " Previously generated (make a DIFFERENT one): " + " | ".join(f'"{p}"' for p in prev_prompts[-3:])
+
+    user_text = (
+        f"{'Two' if photo_count > 1 else 'One'} reference photo{'s are' if photo_count > 1 else ' is'} attached. "
+        f"User's idea: \"{prompt}\".{prev_note} "
+        f"Generate the optimal image generation prompt."
+    )
+
+    parts = []
+    for img in images_bytes:
+        if img:
+            parts.append({"inlineData": {"mimeType": "image/jpeg", "data": base64.b64encode(img).decode()}})
+    parts.append({"text": user_text})
+
+    for model_name in ["gemini-3.1-pro-preview", "gemini-3.1-flash-preview", "gemini-3.1-flash-lite-preview"]:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+        payload = {
+            "systemInstruction": {"parts": [{"text": sys_text}]},
+            "contents": [{"parts": parts}],
+            "generationConfig": {"temperature": 0.95},
+        }
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(
+                    url, json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=35)
+                ) as resp:
+                    if resp.status == 404:
+                        continue
+                    if resp.status == 200:
+                        data = await resp.json()
+                        raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        english, russian = "", ""
+                        for line in raw.split("\n"):
+                            if line.upper().startswith("ENGLISH:"):
+                                english = line[8:].strip()
+                            elif line.upper().startswith("RUSSIAN:"):
+                                russian = line[8:].strip()
+                        if not english:
+                            english = raw.split("\n")[0][:300]
+                        return english, russian, None
+                    err = await resp.text()
+                    return None, None, f"API {resp.status}: {err[:150]}"
+            except Exception as e:
+                return None, None, str(e)
+
+    return None, None, "Все модели недоступны"
