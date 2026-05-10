@@ -474,12 +474,25 @@ _NSFW_CFG   = [5.0, 6.5, 7.0, 8.5, 10.0]
 _NSFW_SIZES = ["512x768", "768x1024", "896x1152", "1024x1024", "1024x1536"]
 _NSFW_DEFAULT_NEG = "lowres, bad anatomy, bad hands, text, error, missing fingers, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, blurry"
 
-_NSFW_STRENGTH = [0.3, 0.5, 0.7, 0.85, 1.0]
+_NSFW_SCHEDULERS = [
+    "DPM++ 2M Karras", "DPM++ 2M SDE Karras", "DPM++ SDE Karras",
+    "DPM++ 2M", "DPM++ 2M SDE", "DPM++ SDE",
+    "Euler a", "Euler", "DDIM", "DDPM",
+    "DPM2 Karras", "DPM2 a Karras", "DPM2", "DPM2 a",
+    "LMS Karras", "LMS", "UniPC", "Heun", "PNDM", "DEIS",
+]
+_NSFW_CLIP_SKIP  = [1, 2, 3]
+_NSFW_PAG        = [0, 1, 2, 3, 5]
+_NSFW_RESCALE    = [0.5, 0.7, 1.0]
 
 def _nsfw_default_cfg(model: str) -> dict:
     if "flux" in model:
-        return {"steps": 28, "cfg": 3.5, "size": "1024x1024", "neg": "", "strength": 0.85}
-    return {"steps": 28, "cfg": 7.0, "size": "896x1152", "neg": _NSFW_DEFAULT_NEG, "strength": 0.85}
+        return {"steps": 28, "cfg": 3.5, "size": "1024x1024", "neg": ""}
+    return {
+        "steps": 28, "cfg": 7.0, "size": "896x1152", "neg": _NSFW_DEFAULT_NEG,
+        "scheduler": "DPM++ 2M Karras", "clip_skip": 2,
+        "pag_scale": 0, "rescale": 1.0, "prepend": True, "seed": -1,
+    }
 
 def _nsfw_cfg_text(request_id: str) -> str:
     d = pending_nsfw_configs.get(request_id, {})
@@ -489,19 +502,35 @@ def _nsfw_cfg_text(request_id: str) -> str:
     neg = neg_full[:150]
     label = d.get("label", "NSFW")
     neg_display = f'"{neg}{"..." if len(neg_full) > 150 else ""}"' if neg_full else "не задан (стандартный)"
+    is_wai = "flux" not in d.get("model", "")
+    extra = ""
+    if is_wai:
+        extra = (
+            f"\n\nПланировщик: {cfg.get('scheduler','DPM++ 2M Karras')}"
+            f"\nCLIP Skip: {cfg.get('clip_skip',2)}  |  PAG: {cfg.get('pag_scale',0)}  |  Rescale: {cfg.get('rescale',1.0)}"
+            f"\nПрепромпт: {'✅' if cfg.get('prepend',True) else '❌'}  |  Seed: {cfg.get('seed',-1)}"
+        )
     return (
         f"⚙️ {label}\n\n"
         f"📝 Промпт:\n\"{prompt}\"\n\n"
         f"🚫 Негативный промпт:\n{neg_display}\n\n"
         f"Шаги: {cfg.get('steps', 28)}  |  CFG: {cfg.get('cfg', 7.0)}  |  Размер: {cfg.get('size', '896x1152')}"
+        f"{extra}"
     )
 
 def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
     d = pending_nsfw_configs.get(request_id, {})
     cfg = d.get("cfg", {})
-    cur_steps = cfg.get("steps", 28)
-    cur_cfgv  = cfg.get("cfg", 7.0)
-    cur_size  = cfg.get("size", "896x1152")
+    cur_steps  = cfg.get("steps", 28)
+    cur_cfgv   = cfg.get("cfg", 7.0)
+    cur_size   = cfg.get("size", "896x1152")
+    cur_sched  = cfg.get("scheduler", "DPM++ 2M Karras")
+    cur_clip   = cfg.get("clip_skip", 2)
+    cur_pag    = cfg.get("pag_scale", 0)
+    cur_resc   = cfg.get("rescale", 1.0)
+    cur_pre    = cfg.get("prepend", True)
+    cur_seed   = cfg.get("seed", -1)
+    is_wai     = "flux" not in d.get("model", "")
 
     def row(field, options, current):
         return [InlineKeyboardButton(
@@ -519,16 +548,39 @@ def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="— CFG Scale —", callback_data="noop")],
         row("cfg", _NSFW_CFG, cur_cfgv),
         [InlineKeyboardButton(text="— Размер —", callback_data="noop")],
-        [InlineKeyboardButton(
-            text=f"{'✅' if s == cur_size else ''}{s}",
-            callback_data=f"nsfwcfg:{request_id}:size:{s}"
-        ) for s in _NSFW_SIZES[:3]],
-        [InlineKeyboardButton(
-            text=f"{'✅' if s == cur_size else ''}{s}",
-            callback_data=f"nsfwcfg:{request_id}:size:{s}"
-        ) for s in _NSFW_SIZES[3:]],
-        [InlineKeyboardButton(text="🚀 Генерировать", callback_data=f"nsfwgen:{request_id}")],
+        [InlineKeyboardButton(text=f"{'✅' if s==cur_size else ''}{s}", callback_data=f"nsfwcfg:{request_id}:size:{s}") for s in _NSFW_SIZES[:3]],
+        [InlineKeyboardButton(text=f"{'✅' if s==cur_size else ''}{s}", callback_data=f"nsfwcfg:{request_id}:size:{s}") for s in _NSFW_SIZES[3:]],
     ]
+
+    if is_wai:
+        rows += [
+            [InlineKeyboardButton(text="— Планировщик (Sampler) —", callback_data="noop")],
+            [InlineKeyboardButton(text=f"{'✅' if s==cur_sched else ''}{s}", callback_data=f"nsfwcfg:{request_id}:scheduler:{s}") for s in _NSFW_SCHEDULERS[:3]],
+            [InlineKeyboardButton(text=f"{'✅' if s==cur_sched else ''}{s}", callback_data=f"nsfwcfg:{request_id}:scheduler:{s}") for s in _NSFW_SCHEDULERS[3:6]],
+            [InlineKeyboardButton(text=f"{'✅' if s==cur_sched else ''}{s}", callback_data=f"nsfwcfg:{request_id}:scheduler:{s}") for s in _NSFW_SCHEDULERS[6:9]],
+            [InlineKeyboardButton(text=f"{'✅' if s==cur_sched else ''}{s}", callback_data=f"nsfwcfg:{request_id}:scheduler:{s}") for s in _NSFW_SCHEDULERS[9:12]],
+            [InlineKeyboardButton(text=f"{'✅' if s==cur_sched else ''}{s}", callback_data=f"nsfwcfg:{request_id}:scheduler:{s}") for s in _NSFW_SCHEDULERS[12:15]],
+            [InlineKeyboardButton(text=f"{'✅' if s==cur_sched else ''}{s}", callback_data=f"nsfwcfg:{request_id}:scheduler:{s}") for s in _NSFW_SCHEDULERS[15:18]],
+            [InlineKeyboardButton(text=f"{'✅' if s==cur_sched else ''}{s}", callback_data=f"nsfwcfg:{request_id}:scheduler:{s}") for s in _NSFW_SCHEDULERS[18:]],
+            [InlineKeyboardButton(text="— CLIP Skip —", callback_data="noop")],
+            row("clip_skip", _NSFW_CLIP_SKIP, cur_clip),
+            [InlineKeyboardButton(text="— PAG Scale (улучшение качества) —", callback_data="noop")],
+            row("pag_scale", _NSFW_PAG, cur_pag),
+            [InlineKeyboardButton(text="— Guidance Rescale —", callback_data="noop")],
+            row("rescale", _NSFW_RESCALE, cur_resc),
+            [
+                InlineKeyboardButton(
+                    text=f"{'✅' if cur_pre else '❌'} Препромпт качества",
+                    callback_data=f"nsfwcfg:{request_id}:prepend:{'0' if cur_pre else '1'}"
+                ),
+                InlineKeyboardButton(
+                    text=f"🎲 Seed: {cur_seed}",
+                    callback_data=f"nsfwinput:{request_id}:seed"
+                ),
+            ],
+        ]
+
+    rows.append([InlineKeyboardButton(text="🚀 Генерировать", callback_data=f"nsfwgen:{request_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -550,7 +602,7 @@ async def handle_nsfw_input(callback: types.CallbackQuery):
         return
 
     await callback.answer()
-    field_name = "промпт" if field == "prompt" else "негативный промпт"
+    field_name = {"prompt": "промпт", "neg": "негативный промпт", "seed": "seed (число, -1 = случайный)"}.get(field, field)
 
     _nsfw_awaiting_input[(d["chat_id"], d["user_id"])] = {
         "request_id": request_id,
@@ -637,7 +689,7 @@ async def handle_noop(callback: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("nsfwcfg:"))
 async def handle_nsfw_config(callback: types.CallbackQuery):
-    parts = callback.data.split(":")
+    parts = callback.data.split(":", 3)
     if len(parts) != 4:
         await callback.answer()
         return
@@ -656,8 +708,16 @@ async def handle_nsfw_config(callback: types.CallbackQuery):
         d["cfg"]["cfg"] = float(value)
     elif field == "size":
         d["cfg"]["size"] = value
-    elif field == "strength":
-        d["cfg"]["strength"] = float(value)
+    elif field == "scheduler":
+        d["cfg"]["scheduler"] = value
+    elif field == "clip_skip":
+        d["cfg"]["clip_skip"] = int(value)
+    elif field == "pag_scale":
+        d["cfg"]["pag_scale"] = float(value)
+    elif field == "rescale":
+        d["cfg"]["rescale"] = float(value)
+    elif field == "prepend":
+        d["cfg"]["prepend"] = value == "1"
 
     await callback.answer(f"✅ {field}: {value}")
     try:
@@ -698,13 +758,25 @@ async def handle_nsfw_generate(callback: types.CallbackQuery):
                 return {"prompt": p, "width": _w, "height": _h, "steps": _s, _ck: _c}
             _REPLICATE_MODELS[model]["input"] = _flux_input
         else:
-            def _sdxl_input(p, _s=cfg.get("steps",28), _c=cfg.get("cfg",7.0), _w=int(w), _h=int(h), _n=neg, _ck=cfg_key):
+            def _sdxl_input(p,
+                _s=cfg.get("steps",28), _c=cfg.get("cfg",7.0),
+                _w=int(w), _h=int(h), _n=neg, _ck=cfg_key,
+                _sched=cfg.get("scheduler","DPM++ 2M Karras"),
+                _clip=cfg.get("clip_skip",2), _pag=cfg.get("pag_scale",0),
+                _resc=cfg.get("rescale",1.0), _pre=cfg.get("prepend",True),
+                _seed=cfg.get("seed",-1),
+            ):
                 return {
                     "prompt": p,
                     "negative_prompt": _n if _n else _NSFW_DEFAULT_NEG,
                     "width": _w, "height": _h,
                     "steps": _s, _ck: _c,
-                    "scheduler": "DPM++ 2M Karras",
+                    "scheduler": _sched,
+                    "clip_skip": _clip,
+                    "pag_scale": _pag,
+                    "guidance_rescale": _resc,
+                    "prepend_preprompt": _pre,
+                    "seed": _seed,
                 }
             _REPLICATE_MODELS[model]["input"] = _sdxl_input
 
@@ -1458,8 +1530,13 @@ async def handle_text_messages(message: types.Message):
             new_val = message.text.strip()
             if field == "prompt":
                 d["prompt"] = new_val
-            else:
+            elif field == "neg":
                 d["cfg"]["neg"] = new_val
+            elif field == "seed":
+                try:
+                    d["cfg"]["seed"] = int(new_val)
+                except ValueError:
+                    d["cfg"]["seed"] = -1
             try:
                 await message.delete()
             except Exception:
