@@ -1039,30 +1039,35 @@ async def generate_image_prompt(
     return None, None, "Все модели недоступны"
 
 
-_REPLICATE_MODEL_INPUTS = {
-    "aisha-ai-official/wai-nsfw-illustrious-v12": lambda p: {
-        "prompt": p,
-        "negative_prompt": "lowres, bad anatomy, bad hands, text, error, missing fingers, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry",
-        "width": 896,
-        "height": 1152,
-        "num_inference_steps": 28,
-        "guidance_scale": 7.0,
-        "scheduler": "DPM++ 2M Karras",
+_REPLICATE_MODELS = {
+    "aisha-ai-official/wai-nsfw-illustrious-v12": {
+        "version": "0fc0fa9885b284901a6f9c0b4d67701fd7647d157b88371427d63f8089ce140e",
+        "input": lambda p: {
+            "prompt": p,
+            "negative_prompt": "lowres, bad anatomy, bad hands, text, error, missing fingers, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry",
+            "width": 896, "height": 1152,
+            "num_inference_steps": 28,
+            "guidance_scale": 7.0,
+            "scheduler": "DPM++ 2M Karras",
+        },
     },
-    "aisha-ai-official/wai-nsfw-illustrious-v11": lambda p: {
-        "prompt": p,
-        "negative_prompt": "lowres, bad anatomy, bad hands, text, error, worst quality, low quality",
-        "width": 896,
-        "height": 1152,
-        "num_inference_steps": 28,
-        "guidance_scale": 7.0,
+    "aisha-ai-official/wai-nsfw-illustrious-v11": {
+        "version": "c1d5b02687df6081c7953c74bcc527858702e8c153c9382012ccc3906752d3ec",
+        "input": lambda p: {
+            "prompt": p,
+            "negative_prompt": "lowres, bad anatomy, bad hands, text, error, worst quality, low quality",
+            "width": 896, "height": 1152,
+            "num_inference_steps": 28,
+            "guidance_scale": 7.0,
+        },
     },
-    "aisha-ai-official/nsfw-flux-dev": lambda p: {
-        "prompt": p,
-        "width": 1024,
-        "height": 1024,
-        "steps": 28,
-        "guidance_scale": 3.5,
+    "aisha-ai-official/nsfw-flux-dev": {
+        "version": "fb4f086702d6a301ca32c170d926239324a7b7b2f0afc3d232a9c4be382dc3fa",
+        "input": lambda p: {
+            "prompt": p,
+            "width": 1024, "height": 1024,
+            "steps": 28, "guidance_scale": 3.5,
+        },
     },
 }
 
@@ -1075,13 +1080,12 @@ async def generate_image_with_replicate(
     if not keys:
         return None, "Нет Replicate ключей."
 
-    input_builder = _REPLICATE_MODEL_INPUTS.get(model)
-    if not input_builder:
+    model_cfg = _REPLICATE_MODELS.get(model)
+    if not model_cfg:
         return None, f"Неизвестная Replicate модель: {model}"
 
-    model_input = input_builder(prompt)
-    owner, name = model.split("/", 1)
-    create_url = f"https://api.replicate.com/v1/models/{owner}/{name}/predictions"
+    version = model_cfg["version"]
+    model_input = model_cfg["input"](prompt)
 
     for key in keys:
         headers = {
@@ -1092,8 +1096,8 @@ async def generate_image_with_replicate(
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.post(
-                    create_url,
-                    json={"input": model_input},
+                    "https://api.replicate.com/v1/predictions",
+                    json={"version": version, "input": model_input},
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=90),
                 ) as resp:
