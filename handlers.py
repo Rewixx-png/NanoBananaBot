@@ -229,12 +229,12 @@ async def cmd_image(message: types.Message):
     uid = message.from_user.id
 
     if message.chat.id == FULL_ACCESS_CHAT_ID and uid not in ALLOWED_USER_IDS:
-        is_main_member = False
+        is_main_member = True
         try:
             m = await message.bot.get_chat_member(chat_id=CHAT_ID, user_id=uid)
-            is_main_member = m.status in ("member", "administrator", "creator")
-        except Exception:
-            pass
+            is_main_member = m.status in ("member", "administrator", "creator", "restricted")
+        except Exception as e:
+            logger.warning(f"is_main_member check failed for {uid}: {e}")
 
         if not is_main_member and current_time >= paid_unlimited_until.get(uid, 0):
             last_fa = full_access_image_cooldowns.get(uid, 0)
