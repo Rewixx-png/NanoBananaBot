@@ -482,10 +482,11 @@ def _nsfw_default_cfg(model: str) -> dict:
 def _nsfw_cfg_text(request_id: str) -> str:
     d = pending_nsfw_configs.get(request_id, {})
     cfg = d.get("cfg", {})
-    prompt = d.get("prompt", "")[:80]
-    neg = cfg.get("neg", "")[:60]
+    prompt = d.get("prompt", "")[:100]
+    neg_full = cfg.get("neg", "")
+    neg = neg_full[:150]
     label = d.get("label", "NSFW")
-    neg_display = f'"{neg}"' if neg else "не задан"
+    neg_display = f'"{neg}{"..." if len(neg_full) > 150 else ""}"' if neg_full else "не задан (стандартный)"
     return (
         f"⚙️ {label}\n\n"
         f"📝 Промпт:\n\"{prompt}\"\n\n"
