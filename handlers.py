@@ -148,9 +148,20 @@ async def cmd_all(message: types.Message):
         return
     _all_cooldowns[(message.chat.id, uid)] = now
 
+    try:
+        admins = await message.bot.get_chat_administrators(message.chat.id)
+        if message.chat.id not in chat_members_cache:
+            chat_members_cache[message.chat.id] = {}
+        for a in admins:
+            u = a.user
+            if not u.is_bot:
+                chat_members_cache[message.chat.id][u.id] = (u.first_name or "Аноним", u.username)
+    except Exception:
+        pass
+
     members = chat_members_cache.get(message.chat.id, {})
     if not members:
-        await message.reply("Никого не знаю ещё — пусть сначала понапишут что-нибудь.")
+        await message.reply("Никого не знаю ещё.")
         return
 
     bot_user = await message.bot.get_me()
