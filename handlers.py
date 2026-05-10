@@ -530,7 +530,7 @@ def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-_nsfw_input_wait: dict = {}
+_nsfw_awaiting_input: dict = {}
 
 
 @router.callback_query(F.data.startswith("nsfwinput:"))
@@ -549,12 +549,45 @@ async def handle_nsfw_input(callback: types.CallbackQuery):
 
     await callback.answer()
     field_name = "промпт" if field == "prompt" else "негативный промпт"
-    hint = await callback.bot.send_message(
-        chat_id=d["chat_id"],
-        text=f"✏️ Напиши {field_name} ответом на это сообщение:",
-        reply_markup=types.ForceReply(selective=True),
-    )
-    _nsfw_input_wait[hint.message_id] = {"request_id": request_id, "field": field, "user_id": d["user_id"]}
+
+    _nsfw_awaiting_input[(d["chat_id"], d["user_id"])] = {
+        "request_id": request_id,
+        "field": field,
+        "msg_id": callback.message.message_id,
+    }
+
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"nsfwcancel:{request_id}")
+    ]])
+    try:
+        await callback.message.edit_text(
+            f"✏️ Напиши {field_name} следующим сообщением:\n\n"
+            f"(просто отправь текст в чат)",
+            reply_markup=cancel_kb,
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("nsfwcancel:"))
+async def handle_nsfw_cancel(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        return
+    _, request_id = parts
+    d = pending_nsfw_configs.get(request_id)
+    if not d:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != d["user_id"]:
+        await callback.answer("Только автор.", show_alert=True)
+        return
+    _nsfw_awaiting_input.pop((d["chat_id"], d["user_id"]), None)
+    await callback.answer("Отменено")
+    try:
+        await callback.message.edit_text(_nsfw_cfg_text(request_id), reply_markup=_nsfw_cfg_keyboard(request_id))
+    except Exception:
+        pass
 
 
 @router.message(F.reply_to_message & F.text)
@@ -1404,27 +1437,31 @@ async def handle_text_messages(message: types.Message):
         return
 
     # Проверяем, упомянули ли бота или ответили ли на его сообщение
-    if message.reply_to_message and message.reply_to_message.message_id in _nsfw_input_wait:
-        reply_id = message.reply_to_message.message_id
-        wait = _nsfw_input_wait.pop(reply_id)
-        if message.from_user.id == wait["user_id"]:
-            request_id = wait["request_id"]
-            field = wait["field"]
-            d = pending_nsfw_configs.get(request_id)
-            if d:
-                new_val = message.text.strip()
-                if field == "prompt":
-                    d["prompt"] = new_val
-                else:
-                    d["cfg"]["neg"] = new_val
-                try:
-                    await message.reply_to_message.delete()
-                except Exception:
-                    pass
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
+    _nsfw_key = (message.chat.id, message.from_user.id)
+    if _nsfw_key in _nsfw_awaiting_input:
+        wait = _nsfw_awaiting_input.pop(_nsfw_key)
+        request_id = wait["request_id"]
+        field = wait["field"]
+        msg_id = wait["msg_id"]
+        d = pending_nsfw_configs.get(request_id)
+        if d:
+            new_val = message.text.strip()
+            if field == "prompt":
+                d["prompt"] = new_val
+            else:
+                d["cfg"]["neg"] = new_val
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=msg_id,
+                    text=_nsfw_cfg_text(request_id),
+                    reply_markup=_nsfw_cfg_keyboard(request_id),
+                )
+            except Exception:
                 await message.bot.send_message(
                     chat_id=d["chat_id"],
                     text=_nsfw_cfg_text(request_id),
