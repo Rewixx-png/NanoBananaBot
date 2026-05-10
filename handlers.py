@@ -474,10 +474,12 @@ _NSFW_CFG   = [5.0, 6.5, 7.0, 8.5, 10.0]
 _NSFW_SIZES = ["512x768", "768x1024", "896x1152", "1024x1024", "1024x1536"]
 _NSFW_DEFAULT_NEG = "lowres, bad anatomy, bad hands, text, error, missing fingers, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, blurry"
 
+_NSFW_STRENGTH = [0.3, 0.5, 0.7, 0.85, 1.0]
+
 def _nsfw_default_cfg(model: str) -> dict:
     if "flux" in model:
-        return {"steps": 28, "cfg": 3.5, "size": "1024x1024", "neg": ""}
-    return {"steps": 28, "cfg": 7.0, "size": "896x1152", "neg": _NSFW_DEFAULT_NEG}
+        return {"steps": 28, "cfg": 3.5, "size": "1024x1024", "neg": "", "strength": 0.85}
+    return {"steps": 28, "cfg": 7.0, "size": "896x1152", "neg": _NSFW_DEFAULT_NEG, "strength": 0.85}
 
 def _nsfw_cfg_text(request_id: str) -> str:
     d = pending_nsfw_configs.get(request_id, {})
@@ -486,9 +488,11 @@ def _nsfw_cfg_text(request_id: str) -> str:
     neg_full = cfg.get("neg", "")
     neg = neg_full[:150]
     label = d.get("label", "NSFW")
+    has_image = d.get("image_bytes") is not None
     neg_display = f'"{neg}{"..." if len(neg_full) > 150 else ""}"' if neg_full else "не задан (стандартный)"
+    img_line = f"\n🖼️ Фото: прикреплено (img2img, сила: {cfg.get('strength', 0.85)})" if has_image else ""
     return (
-        f"⚙️ {label}\n\n"
+        f"⚙️ {label}{img_line}\n\n"
         f"📝 Промпт:\n\"{prompt}\"\n\n"
         f"🚫 Негативный промпт:\n{neg_display}\n\n"
         f"Шаги: {cfg.get('steps', 28)}  |  CFG: {cfg.get('cfg', 7.0)}  |  Размер: {cfg.get('size', '896x1152')}"
@@ -497,9 +501,11 @@ def _nsfw_cfg_text(request_id: str) -> str:
 def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
     d = pending_nsfw_configs.get(request_id, {})
     cfg = d.get("cfg", {})
-    cur_steps = cfg.get("steps", 28)
-    cur_cfgv  = cfg.get("cfg", 7.0)
-    cur_size  = cfg.get("size", "896x1152")
+    cur_steps    = cfg.get("steps", 28)
+    cur_cfgv     = cfg.get("cfg", 7.0)
+    cur_size     = cfg.get("size", "896x1152")
+    cur_strength = cfg.get("strength", 0.85)
+    has_image    = d.get("image_bytes") is not None
 
     def row(field, options, current):
         return [InlineKeyboardButton(
@@ -509,8 +515,8 @@ def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
 
     rows = [
         [
-            InlineKeyboardButton(text="✏️ Изменить промпт", callback_data=f"nsfwinput:{request_id}:prompt"),
-            InlineKeyboardButton(text="🚫 Негативный промпт", callback_data=f"nsfwinput:{request_id}:neg"),
+            InlineKeyboardButton(text="✏️ Промпт", callback_data=f"nsfwinput:{request_id}:prompt"),
+            InlineKeyboardButton(text="🚫 Негативный", callback_data=f"nsfwinput:{request_id}:neg"),
         ],
         [InlineKeyboardButton(text="— Шаги —", callback_data="noop")],
         row("steps", _NSFW_STEPS, cur_steps),
@@ -525,8 +531,11 @@ def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
             text=f"{'✅' if s == cur_size else ''}{s}",
             callback_data=f"nsfwcfg:{request_id}:size:{s}"
         ) for s in _NSFW_SIZES[3:]],
-        [InlineKeyboardButton(text="🚀 Генерировать", callback_data=f"nsfwgen:{request_id}")],
     ]
+    if has_image:
+        rows.append([InlineKeyboardButton(text="— Сила изменения (img2img) —", callback_data="noop")])
+        rows.append(row("strength", _NSFW_STRENGTH, cur_strength))
+    rows.append([InlineKeyboardButton(text="🚀 Генерировать", callback_data=f"nsfwgen:{request_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -654,6 +663,8 @@ async def handle_nsfw_config(callback: types.CallbackQuery):
         d["cfg"]["cfg"] = float(value)
     elif field == "size":
         d["cfg"]["size"] = value
+    elif field == "strength":
+        d["cfg"]["strength"] = float(value)
 
     await callback.answer(f"✅ {field}: {value}")
     try:
@@ -686,19 +697,36 @@ async def handle_nsfw_generate(callback: types.CallbackQuery):
     w, h = cfg.get("size", "1024x1024").split("x")
 
     neg = cfg.get("neg", "")
+    strength = cfg.get("strength", 0.85)
+    img_bytes = d.get("image_bytes")
+    img_b64 = None
+    if img_bytes:
+        import base64 as _b64
+        img_b64 = "data:image/jpeg;base64," + _b64.b64encode(img_bytes).decode()
+
     from ai_services import _REPLICATE_MODELS
     if model in _REPLICATE_MODELS:
         if "flux" in model:
-            _REPLICATE_MODELS[model]["input"] = lambda p, _s=cfg.get("steps",28), _c=cfg.get("cfg",3.5), _w=int(w), _h=int(h): {
-                "prompt": p, "width": _w, "height": _h, "steps": _s, "guidance_scale": _c,
-            }
+            def _flux_input(p, _s=cfg.get("steps",28), _c=cfg.get("cfg",3.5), _w=int(w), _h=int(h), _img=img_b64, _str=strength):
+                inp = {"prompt": p, "width": _w, "height": _h, "steps": _s, "guidance_scale": _c}
+                if _img:
+                    inp["image"] = _img
+                    inp["prompt_strength"] = _str
+                return inp
+            _REPLICATE_MODELS[model]["input"] = _flux_input
         else:
-            _REPLICATE_MODELS[model]["input"] = lambda p, _s=cfg.get("steps",28), _c=cfg.get("cfg",7.0), _w=int(w), _h=int(h), _n=neg: {
-                "prompt": p,
-                "negative_prompt": _n if _n else _NSFW_DEFAULT_NEG,
-                "width": _w, "height": _h,
-                "num_inference_steps": _s, "guidance_scale": _c,
-            }
+            def _sdxl_input(p, _s=cfg.get("steps",28), _c=cfg.get("cfg",7.0), _w=int(w), _h=int(h), _n=neg, _img=img_b64, _str=strength):
+                inp = {
+                    "prompt": p,
+                    "negative_prompt": _n if _n else _NSFW_DEFAULT_NEG,
+                    "width": _w, "height": _h,
+                    "num_inference_steps": _s, "guidance_scale": _c,
+                }
+                if _img:
+                    inp["image"] = _img
+                    inp["prompt_strength"] = _str
+                return inp
+            _REPLICATE_MODELS[model]["input"] = _sdxl_input
 
     progress_task = None
     try:
@@ -1061,6 +1089,7 @@ async def handle_image_model_select(callback: types.CallbackQuery):
 
     if provider == "nsfw":
         pending_image_requests.pop(request_id, None)
+        imgs = request_data.get("images_bytes") or ([request_data["image_bytes"]] if request_data.get("image_bytes") else None)
         pending_nsfw_configs[request_id] = {
             "user_id": request_data["user_id"],
             "chat_id": request_data["chat_id"],
@@ -1069,6 +1098,7 @@ async def handle_image_model_select(callback: types.CallbackQuery):
             "prompt": request_data["prompt"],
             "model": real_model,
             "label": selected_label,
+            "image_bytes": imgs[0] if imgs else None,
             "cfg": _nsfw_default_cfg(real_model),
         }
         try:
