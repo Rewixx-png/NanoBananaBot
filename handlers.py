@@ -398,23 +398,25 @@ async def _send_generation_result(bot, request_data, request_id, result_img, err
 _NSFW_STEPS = [20, 25, 28, 35, 50]
 _NSFW_CFG   = [5.0, 6.5, 7.0, 8.5, 10.0]
 _NSFW_SIZES = ["512x768", "768x1024", "896x1152", "1024x1024", "1024x1536"]
+_NSFW_DEFAULT_NEG = "lowres, bad anatomy, bad hands, text, error, missing fingers, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, blurry"
 
 def _nsfw_default_cfg(model: str) -> dict:
     if "flux" in model:
-        return {"steps": 28, "cfg": 3.5, "size": "1024x1024"}
-    return {"steps": 28, "cfg": 7.0, "size": "896x1152"}
+        return {"steps": 28, "cfg": 3.5, "size": "1024x1024", "neg": ""}
+    return {"steps": 28, "cfg": 7.0, "size": "896x1152", "neg": _NSFW_DEFAULT_NEG}
 
 def _nsfw_cfg_text(request_id: str) -> str:
     d = pending_nsfw_configs.get(request_id, {})
     cfg = d.get("cfg", {})
-    prompt = d.get("prompt", "")[:60]
+    prompt = d.get("prompt", "")[:80]
+    neg = cfg.get("neg", "")[:60]
     label = d.get("label", "NSFW")
+    neg_display = f'"{neg}"' if neg else "не задан"
     return (
-        f"⚙️ {label}\n"
-        f"Промпт: \"{prompt}\"\n\n"
-        f"Шаги генерации: {cfg.get('steps', 28)}\n"
-        f"CFG Scale: {cfg.get('cfg', 7.0)}\n"
-        f"Размер: {cfg.get('size', '896x1152')}"
+        f"⚙️ {label}\n\n"
+        f"📝 Промпт:\n\"{prompt}\"\n\n"
+        f"🚫 Негативный промпт:\n{neg_display}\n\n"
+        f"Шаги: {cfg.get('steps', 28)}  |  CFG: {cfg.get('cfg', 7.0)}  |  Размер: {cfg.get('size', '896x1152')}"
     )
 
 def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
@@ -424,17 +426,21 @@ def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
     cur_cfgv  = cfg.get("cfg", 7.0)
     cur_size  = cfg.get("size", "896x1152")
 
-    def row(label, field, options, current):
+    def row(field, options, current):
         return [InlineKeyboardButton(
             text=f"{'✅' if str(o) == str(current) else ''}{o}",
             callback_data=f"nsfwcfg:{request_id}:{field}:{o}"
         ) for o in options]
 
     rows = [
+        [
+            InlineKeyboardButton(text="✏️ Изменить промпт", callback_data=f"nsfwinput:{request_id}:prompt"),
+            InlineKeyboardButton(text="🚫 Негативный промпт", callback_data=f"nsfwinput:{request_id}:neg"),
+        ],
         [InlineKeyboardButton(text="— Шаги —", callback_data="noop")],
-        row("steps", "steps", _NSFW_STEPS, cur_steps),
+        row("steps", _NSFW_STEPS, cur_steps),
         [InlineKeyboardButton(text="— CFG Scale —", callback_data="noop")],
-        row("cfg", "cfg", _NSFW_CFG, cur_cfgv),
+        row("cfg", _NSFW_CFG, cur_cfgv),
         [InlineKeyboardButton(text="— Размер —", callback_data="noop")],
         [InlineKeyboardButton(
             text=f"{'✅' if s == cur_size else ''}{s}",
@@ -447,6 +453,71 @@ def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🚀 Генерировать", callback_data=f"nsfwgen:{request_id}")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+_nsfw_input_wait: dict = {}
+
+
+@router.callback_query(F.data.startswith("nsfwinput:"))
+async def handle_nsfw_input(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        return
+    _, request_id, field = parts
+    d = pending_nsfw_configs.get(request_id)
+    if not d:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != d["user_id"]:
+        await callback.answer("Только автор запроса.", show_alert=True)
+        return
+
+    await callback.answer()
+    field_name = "промпт" if field == "prompt" else "негативный промпт"
+    hint = await callback.bot.send_message(
+        chat_id=d["chat_id"],
+        text=f"✏️ Напиши {field_name} ответом на это сообщение:",
+        reply_markup=types.ForceReply(selective=True),
+    )
+    _nsfw_input_wait[hint.message_id] = {"request_id": request_id, "field": field, "user_id": d["user_id"]}
+
+
+@router.message(F.reply_to_message & F.text)
+async def handle_nsfw_text_input(message: types.Message):
+    reply_to_id = message.reply_to_message.message_id if message.reply_to_message else None
+    if reply_to_id not in _nsfw_input_wait:
+        return
+    wait = _nsfw_input_wait.pop(reply_to_id)
+    if message.from_user.id != wait["user_id"]:
+        return
+
+    request_id = wait["request_id"]
+    field = wait["field"]
+    d = pending_nsfw_configs.get(request_id)
+    if not d:
+        return
+
+    new_val = message.text.strip()
+    if field == "prompt":
+        d["prompt"] = new_val
+    else:
+        d["cfg"]["neg"] = new_val
+
+    try:
+        await message.reply_to_message.delete()
+    except Exception:
+        pass
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    cfg_msg = await message.bot.send_message(
+        chat_id=d["chat_id"],
+        text=_nsfw_cfg_text(request_id),
+        reply_markup=_nsfw_cfg_keyboard(request_id),
+    )
+    d["cfg_msg_id"] = cfg_msg.message_id
 
 
 @router.callback_query(F.data == "noop")
@@ -506,19 +577,20 @@ async def handle_nsfw_generate(callback: types.CallbackQuery):
     label = d["label"]
     w, h = cfg.get("size", "1024x1024").split("x")
 
+    neg = cfg.get("neg", "")
     from ai_services import _REPLICATE_MODELS
     if model in _REPLICATE_MODELS:
-        _REPLICATE_MODELS[model]["input"] = lambda p, _steps=cfg.get("steps",28), _cfg=cfg.get("cfg",7.0), _w=int(w), _h=int(h): {
-            "prompt": p,
-            "negative_prompt": "lowres, bad anatomy, bad hands, text, error, worst quality, low quality",
-            "width": _w, "height": _h,
-            "num_inference_steps": _steps,
-            "guidance_scale": _cfg,
-        } if "flux" not in model else {
-            "prompt": p,
-            "width": _w, "height": _h,
-            "steps": _steps, "guidance_scale": _cfg,
-        }
+        if "flux" in model:
+            _REPLICATE_MODELS[model]["input"] = lambda p, _s=cfg.get("steps",28), _c=cfg.get("cfg",3.5), _w=int(w), _h=int(h): {
+                "prompt": p, "width": _w, "height": _h, "steps": _s, "guidance_scale": _c,
+            }
+        else:
+            _REPLICATE_MODELS[model]["input"] = lambda p, _s=cfg.get("steps",28), _c=cfg.get("cfg",7.0), _w=int(w), _h=int(h), _n=neg: {
+                "prompt": p,
+                "negative_prompt": _n if _n else _NSFW_DEFAULT_NEG,
+                "width": _w, "height": _h,
+                "num_inference_steps": _s, "guidance_scale": _c,
+            }
 
     progress_task = None
     try:
