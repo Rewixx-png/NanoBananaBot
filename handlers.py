@@ -9,7 +9,7 @@ from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
-from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests
+from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs
 from database import save_history, save_pending_gen, delete_pending_gen
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
@@ -257,8 +257,8 @@ async def cmd_image(message: types.Message):
         return
 
     await message.reply(
-        _temp_message(),
-        reply_markup=_temp_keyboard(request_id),
+        "Через какую модель хотите сгенерировать фото?",
+        reply_markup=_providers_keyboard(request_id, message.chat.id, len(images_bytes)),
         **reply_kwargs
     )
 
@@ -318,6 +318,33 @@ async def handle_temp_select(callback: types.CallbackQuery):
     req["temperature"] = temp_val
     await callback.answer(f"Температура: {temp_label} ({temp_val})")
 
+    if req.get("selected_model"):
+        pending_image_requests.pop(request_id, None)
+        real_model = req["selected_model"]
+        selected_label = req.get("selected_label", real_model)
+        message_thread_id = req.get("message_thread_id")
+        reply_kwargs = {"message_thread_id": message_thread_id} if message_thread_id else {}
+        await callback.bot.send_chat_action(chat_id=req["chat_id"], action="upload_photo", message_thread_id=message_thread_id)
+        progress_task = None
+        try:
+            await callback.message.edit_text(f"🌡️ {temp_label} ({temp_val})\n⏳ Запускаю генерацию...")
+            progress_task = asyncio.create_task(run_progress_bar(callback.bot, req["chat_id"], callback.message.message_id, selected_label))
+        except Exception:
+            pass
+        imgs = req.get("images_bytes") or ([req["image_bytes"]] if req.get("image_bytes") else None)
+        gen_id = f"img_{request_id}"
+        await save_pending_gen(gen_id=gen_id, gen_type="image", user_id=req["user_id"], chat_id=req["chat_id"],
+            source_message_id=req["source_message_id"], message_thread_id=message_thread_id,
+            prompt=req["prompt"], model=real_model, provider="gemini", file_ids=req.get("file_ids", []), model_label=selected_label)
+        result_img, error_msg = await generate_image_with_gemini(req["prompt"], images_bytes=imgs, model=real_model, temperature=temp_val)
+        if progress_task:
+            progress_task.cancel()
+            try: await progress_task
+            except asyncio.CancelledError: pass
+        await delete_pending_gen(gen_id)
+        await _send_generation_result(callback.bot, req, request_id, result_img, error_msg, selected_label, imgs, reply_kwargs)
+        return
+
     imgs = req.get("images_bytes") or ([req["image_bytes"]] if req.get("image_bytes") else [])
     try:
         await callback.message.edit_text(
@@ -326,6 +353,188 @@ async def handle_temp_select(callback: types.CallbackQuery):
         )
     except Exception:
         pass
+
+
+async def _send_generation_result(bot, request_data, request_id, result_img, error_msg, model_label, imgs, reply_kwargs):
+    if error_msg:
+        err_msg = await bot.send_message(
+            chat_id=request_data["chat_id"],
+            text=f"❌ Ошибка:\n{error_msg}\n\n⏳ Ща спрошу у мозгов, че не так...",
+            reply_to_message_id=request_data["source_message_id"], **reply_kwargs
+        )
+        first_image = (imgs[0] if imgs else None)
+        explanation = await explain_generation_error(request_data["prompt"] or "", error_msg, image_bytes=first_image)
+        if not explanation or "Ебать, гугл зацензурил" in explanation:
+            explanation = "Пиздец, твой промпт или фото настолько больное, что Гугл забанил даже попытку объяснить!"
+        try:
+            await bot.edit_message_text(chat_id=request_data["chat_id"], message_id=err_msg.message_id,
+                text=f"❌ Ошибка:\n{error_msg}\n\n🧠 Пояснение:\n{explanation}")
+        except Exception:
+            pass
+        return
+    if result_img:
+        caption = (f"🎨 Ваш результат ({model_label}) по запросу: {request_data['prompt']}"
+                   if request_data["prompt"] else f"🎨 Ваш результат ({model_label}) готов.")
+        await bot.send_photo(chat_id=request_data["chat_id"],
+            photo=BufferedInputFile(result_img, filename="generated.jpg"),
+            caption=caption, reply_to_message_id=request_data["source_message_id"], **reply_kwargs)
+        upscale_msg = await bot.send_message(chat_id=request_data["chat_id"],
+            text="⬆️ Улучшаю качество через AI upscaler...", **reply_kwargs)
+        upscaled, up_err = await upscale_image(result_img)
+        try:
+            await bot.delete_message(chat_id=request_data["chat_id"], message_id=upscale_msg.message_id)
+        except Exception:
+            pass
+        if upscaled:
+            await bot.send_document(chat_id=request_data["chat_id"],
+                document=BufferedInputFile(upscaled, filename="upscaled.png"),
+                caption=f"✨ Улучшенная версия ({model_label}) 2x — без сжатия",
+                reply_to_message_id=request_data["source_message_id"], **reply_kwargs)
+        return
+    await bot.send_message(chat_id=request_data["chat_id"], text="❌ Не удалось получить изображение.",
+        reply_to_message_id=request_data["source_message_id"], **reply_kwargs)
+
+
+_NSFW_STEPS = [20, 25, 28, 35, 50]
+_NSFW_CFG   = [5.0, 6.5, 7.0, 8.5, 10.0]
+_NSFW_SIZES = ["512x768", "768x1024", "896x1152", "1024x1024", "1024x1536"]
+
+def _nsfw_default_cfg(model: str) -> dict:
+    if "flux" in model:
+        return {"steps": 28, "cfg": 3.5, "size": "1024x1024"}
+    return {"steps": 28, "cfg": 7.0, "size": "896x1152"}
+
+def _nsfw_cfg_text(request_id: str) -> str:
+    d = pending_nsfw_configs.get(request_id, {})
+    cfg = d.get("cfg", {})
+    prompt = d.get("prompt", "")[:60]
+    label = d.get("label", "NSFW")
+    return (
+        f"⚙️ {label}\n"
+        f"Промпт: \"{prompt}\"\n\n"
+        f"Шаги генерации: {cfg.get('steps', 28)}\n"
+        f"CFG Scale: {cfg.get('cfg', 7.0)}\n"
+        f"Размер: {cfg.get('size', '896x1152')}"
+    )
+
+def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    d = pending_nsfw_configs.get(request_id, {})
+    cfg = d.get("cfg", {})
+    cur_steps = cfg.get("steps", 28)
+    cur_cfgv  = cfg.get("cfg", 7.0)
+    cur_size  = cfg.get("size", "896x1152")
+
+    def row(label, field, options, current):
+        return [InlineKeyboardButton(
+            text=f"{'✅' if str(o) == str(current) else ''}{o}",
+            callback_data=f"nsfwcfg:{request_id}:{field}:{o}"
+        ) for o in options]
+
+    rows = [
+        [InlineKeyboardButton(text="— Шаги —", callback_data="noop")],
+        row("steps", "steps", _NSFW_STEPS, cur_steps),
+        [InlineKeyboardButton(text="— CFG Scale —", callback_data="noop")],
+        row("cfg", "cfg", _NSFW_CFG, cur_cfgv),
+        [InlineKeyboardButton(text="— Размер —", callback_data="noop")],
+        [InlineKeyboardButton(
+            text=f"{'✅' if s == cur_size else ''}{s}",
+            callback_data=f"nsfwcfg:{request_id}:size:{s}"
+        ) for s in _NSFW_SIZES[:3]],
+        [InlineKeyboardButton(
+            text=f"{'✅' if s == cur_size else ''}{s}",
+            callback_data=f"nsfwcfg:{request_id}:size:{s}"
+        ) for s in _NSFW_SIZES[3:]],
+        [InlineKeyboardButton(text="🚀 Генерировать", callback_data=f"nsfwgen:{request_id}")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "noop")
+async def handle_noop(callback: types.CallbackQuery):
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("nsfwcfg:"))
+async def handle_nsfw_config(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer()
+        return
+    _, request_id, field, value = parts
+    d = pending_nsfw_configs.get(request_id)
+    if not d:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != d["user_id"]:
+        await callback.answer("Только автор запроса.", show_alert=True)
+        return
+
+    if field == "steps":
+        d["cfg"]["steps"] = int(value)
+    elif field == "cfg":
+        d["cfg"]["cfg"] = float(value)
+    elif field == "size":
+        d["cfg"]["size"] = value
+
+    await callback.answer(f"✅ {field}: {value}")
+    try:
+        await callback.message.edit_text(_nsfw_cfg_text(request_id), reply_markup=_nsfw_cfg_keyboard(request_id))
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("nsfwgen:"))
+async def handle_nsfw_generate(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        return
+    _, request_id = parts
+    d = pending_nsfw_configs.pop(request_id, None)
+    if not d:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != d["user_id"]:
+        await callback.answer("Только автор запроса.", show_alert=True)
+        return
+
+    await callback.answer()
+    message_thread_id = d.get("message_thread_id")
+    reply_kwargs = {"message_thread_id": message_thread_id} if message_thread_id else {}
+    cfg = d.get("cfg", {})
+
+    model = d["model"]
+    label = d["label"]
+    w, h = cfg.get("size", "1024x1024").split("x")
+
+    from ai_services import _REPLICATE_MODELS
+    if model in _REPLICATE_MODELS:
+        _REPLICATE_MODELS[model]["input"] = lambda p, _steps=cfg.get("steps",28), _cfg=cfg.get("cfg",7.0), _w=int(w), _h=int(h): {
+            "prompt": p,
+            "negative_prompt": "lowres, bad anatomy, bad hands, text, error, worst quality, low quality",
+            "width": _w, "height": _h,
+            "num_inference_steps": _steps,
+            "guidance_scale": _cfg,
+        } if "flux" not in model else {
+            "prompt": p,
+            "width": _w, "height": _h,
+            "steps": _steps, "guidance_scale": _cfg,
+        }
+
+    progress_task = None
+    try:
+        await callback.message.edit_text(f"⏳ Генерирую через {label}...")
+        progress_task = asyncio.create_task(run_progress_bar(callback.bot, d["chat_id"], callback.message.message_id, label))
+    except Exception:
+        pass
+
+    result_img, error_msg = await generate_image_with_replicate(d["prompt"], model=model)
+
+    if progress_task:
+        progress_task.cancel()
+        try: await progress_task
+        except asyncio.CancelledError: pass
+
+    await _send_generation_result(callback.bot, d, request_id, result_img, error_msg, label, None, reply_kwargs)
 
 
 def _prompt_ai_keyboard(request_id: str) -> InlineKeyboardMarkup:
@@ -428,8 +637,12 @@ async def handle_prompt_use(callback: types.CallbackQuery):
     pending_image_requests[request_id] = req
 
     await callback.answer()
+    req = pending_image_requests.get(request_id, {})
     try:
-        await callback.message.edit_text(_temp_message(), reply_markup=_temp_keyboard(request_id))
+        await callback.message.edit_text(
+            "Через какую модель генерировать?",
+            reply_markup=_providers_keyboard(request_id, req.get("chat_id", data["chat_id"]), len(data.get("images_bytes") or []))
+        )
     except Exception:
         pass
 
@@ -449,8 +662,12 @@ async def handle_prompt_base(callback: types.CallbackQuery):
         return
 
     await callback.answer()
+    req = pending_image_requests.get(request_id, {})
     try:
-        await callback.message.edit_text(_temp_message(), reply_markup=_temp_keyboard(request_id))
+        await callback.message.edit_text(
+            "Через какую модель генерировать?",
+            reply_markup=_providers_keyboard(request_id, req.get("chat_id", data["chat_id"]), len(data.get("images_bytes") or []))
+        )
     except Exception:
         pass
 
@@ -643,9 +860,47 @@ async def handle_image_model_select(callback: types.CallbackQuery):
         return
 
     provider, real_model = model_info
-    pending_image_requests.pop(request_id, None)
+
+    selected_label = next(
+        (l for lst in PROVIDER_MODELS.values() for l, m in lst
+         if next((k for k, (p, rm) in MODEL_TO_REAL.items() if rm == m and p == provider), None) == model_id),
+        real_model
+    )
 
     await callback.answer()
+
+    if provider == "gemini":
+        request_data["selected_model"] = real_model
+        request_data["selected_provider"] = provider
+        request_data["selected_label"] = selected_label
+        try:
+            await callback.message.edit_text(_temp_message(), reply_markup=_temp_keyboard(request_id))
+        except Exception:
+            pass
+        return
+
+    if provider == "nsfw":
+        pending_image_requests.pop(request_id, None)
+        pending_nsfw_configs[request_id] = {
+            "user_id": request_data["user_id"],
+            "chat_id": request_data["chat_id"],
+            "source_message_id": request_data["source_message_id"],
+            "message_thread_id": request_data["message_thread_id"],
+            "prompt": request_data["prompt"],
+            "model": real_model,
+            "label": selected_label,
+            "cfg": _nsfw_default_cfg(real_model),
+        }
+        try:
+            await callback.message.edit_text(
+                _nsfw_cfg_text(request_id),
+                reply_markup=_nsfw_cfg_keyboard(request_id),
+            )
+        except Exception:
+            pass
+        return
+
+    pending_image_requests.pop(request_id, None)
 
     message_thread_id = request_data["message_thread_id"]
     reply_kwargs = {}
@@ -653,12 +908,9 @@ async def handle_image_model_select(callback: types.CallbackQuery):
         reply_kwargs["message_thread_id"] = message_thread_id
 
     await callback.bot.send_chat_action(
-        chat_id=request_data["chat_id"],
-        action="upload_photo",
+        chat_id=request_data["chat_id"], action="upload_photo",
         message_thread_id=message_thread_id
     )
-
-    selected_label = next((l for lst in PROVIDER_MODELS.values() for l, m in lst if next((k for k, (p, rm) in MODEL_TO_REAL.items() if rm == m and p == provider), None) == model_id), real_model)
 
     progress_task = None
     if callback.message:
@@ -717,81 +969,7 @@ async def handle_image_model_select(callback: types.CallbackQuery):
             pass
 
     await delete_pending_gen(gen_id)
-
-    if error_msg:
-        error_sent_msg = await callback.bot.send_message(
-            chat_id=request_data["chat_id"],
-            text=f"❌ Ошибка:\n{error_msg}\n\n⏳ Ща спрошу у мозгов, че не так...",
-            reply_to_message_id=request_data["source_message_id"],
-            **reply_kwargs
-        )
-
-        first_image = (imgs[0] if imgs else None)
-        explanation = await explain_generation_error(
-            request_data["prompt"] or "", error_msg, image_bytes=first_image
-        )
-
-        if not explanation or "Ебать, гугл зацензурил" in explanation:
-            explanation = "Пиздец, твой промпт или фото настолько больное, что Гугл забанил даже попытку объяснить — иди нахуй со своей хуйнёй!"
-
-        try:
-            await callback.bot.edit_message_text(
-                chat_id=request_data["chat_id"],
-                message_id=error_sent_msg.message_id,
-                text=f"❌ Ошибка:\n{error_msg}\n\n🧠 Пояснение:\n{explanation}"
-            )
-        except Exception:
-            pass
-        return
-
-    if result_img:
-        photo_file = BufferedInputFile(result_img, filename="generated.jpg")
-        model_label = selected_label
-        caption = (
-            f"🎨 Ваш результат ({model_label}) по запросу: {request_data['prompt']}"
-            if request_data["prompt"]
-            else f"🎨 Ваш результат ({model_label}) готов."
-        )
-        await callback.bot.send_photo(
-            chat_id=request_data["chat_id"],
-            photo=photo_file,
-            caption=caption,
-            reply_to_message_id=request_data["source_message_id"],
-            **reply_kwargs
-        )
-
-        upscale_msg = await callback.bot.send_message(
-            chat_id=request_data["chat_id"],
-            text="⬆️ Улучшаю качество через AI upscaler...",
-            **reply_kwargs
-        )
-        upscaled, up_err = await upscale_image(result_img)
-        try:
-            await callback.bot.delete_message(
-                chat_id=request_data["chat_id"],
-                message_id=upscale_msg.message_id,
-            )
-        except Exception:
-            pass
-        if upscaled:
-            await callback.bot.send_document(
-                chat_id=request_data["chat_id"],
-                document=BufferedInputFile(upscaled, filename="upscaled.png"),
-                caption=f"✨ Улучшенная версия ({model_label}) 2x — без сжатия",
-                reply_to_message_id=request_data["source_message_id"],
-                **reply_kwargs
-            )
-        else:
-            logger.warning(f"Upscale failed: {up_err}")
-
-        return
-
-    await callback.bot.send_message(
-        chat_id=request_data["chat_id"],
-        text="❌ Не удалось получить изображение.",
-        reply_to_message_id=request_data["source_message_id"],
-        **reply_kwargs
-    )
+    await _send_generation_result(callback.bot, request_data, request_id, result_img, error_msg, selected_label, imgs, reply_kwargs)
 
 VEO_MODELS: dict = {
     "veo0": ("Veo 2",          "veo-2.0-generate-001"),
