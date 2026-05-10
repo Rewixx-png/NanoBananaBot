@@ -1403,12 +1403,14 @@ async def handle_text_messages(message: types.Message):
         return
 
     # Проверяем, упомянули ли бота или ответили ли на его сообщение
+    if message.reply_to_message and message.reply_to_message.message_id in _nsfw_input_wait:
+        return
+
     bot_user = await message.bot.get_me()
     
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
     is_mentioned = bot_user.username and f"@{bot_user.username}" in message.text
 
-    # Также отвечаем, если это ЛС (private chat)
     is_private = message.chat.type == "private"
 
     if is_reply_to_bot or is_mentioned or is_private:
