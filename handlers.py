@@ -491,7 +491,7 @@ def _nsfw_default_cfg(model: str) -> dict:
     return {
         "steps": 28, "cfg": 7.0, "size": "896x1152", "neg": _NSFW_DEFAULT_NEG,
         "scheduler": "DPM++ 2M Karras", "clip_skip": 2,
-        "pag_scale": 0, "rescale": 1.0, "prepend": True, "seed": -1,
+        "pag_scale": 0, "rescale": 1.0, "prepend": True, "seed": -1, "batch": 1,
     }
 
 def _nsfw_cfg_text(request_id: str) -> str:
@@ -506,7 +506,7 @@ def _nsfw_cfg_text(request_id: str) -> str:
     extra = ""
     if is_wai:
         extra = (
-            f"\n\nПланировщик: {cfg.get('scheduler','DPM++ 2M Karras')}"
+            f"\n\nКол-во: {cfg.get('batch',1)} шт  |  Планировщик: {cfg.get('scheduler','DPM++ 2M Karras')}"
             f"\nCLIP Skip: {cfg.get('clip_skip',2)}  |  PAG: {cfg.get('pag_scale',0)}  |  Rescale: {cfg.get('rescale',1.0)}"
             f"\nПрепромпт: {'✅' if cfg.get('prepend',True) else '❌'}  |  Seed: {cfg.get('seed',-1)}"
         )
@@ -553,7 +553,10 @@ def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
     ]
 
     if is_wai:
+        cur_batch = cfg.get("batch", 1)
         rows += [
+            [InlineKeyboardButton(text="— Количество изображений —", callback_data="noop")],
+            [InlineKeyboardButton(text=f"{'✅' if i==cur_batch else ''}{i}", callback_data=f"nsfwcfg:{request_id}:batch:{i}") for i in range(1, 5)],
             [InlineKeyboardButton(text="— Планировщик (Sampler) —", callback_data="noop")],
             [InlineKeyboardButton(text=f"{'✅' if s==cur_sched else ''}{s}", callback_data=f"nsfwcfg:{request_id}:scheduler:{s}") for s in _NSFW_SCHEDULERS[:3]],
             [InlineKeyboardButton(text=f"{'✅' if s==cur_sched else ''}{s}", callback_data=f"nsfwcfg:{request_id}:scheduler:{s}") for s in _NSFW_SCHEDULERS[3:6]],
@@ -718,6 +721,8 @@ async def handle_nsfw_config(callback: types.CallbackQuery):
         d["cfg"]["rescale"] = float(value)
     elif field == "prepend":
         d["cfg"]["prepend"] = value == "1"
+    elif field == "batch":
+        d["cfg"]["batch"] = int(value)
 
     await callback.answer(f"✅ {field}: {value}")
     try:
@@ -758,13 +763,14 @@ async def handle_nsfw_generate(callback: types.CallbackQuery):
                 return {"prompt": p, "width": _w, "height": _h, "steps": _s, _ck: _c}
             _REPLICATE_MODELS[model]["input"] = _flux_input
         else:
+            _batch = cfg.get("batch", 1)
             def _sdxl_input(p,
                 _s=cfg.get("steps",28), _c=cfg.get("cfg",7.0),
                 _w=int(w), _h=int(h), _n=neg, _ck=cfg_key,
                 _sched=cfg.get("scheduler","DPM++ 2M Karras"),
                 _clip=cfg.get("clip_skip",2), _pag=cfg.get("pag_scale",0),
                 _resc=cfg.get("rescale",1.0), _pre=cfg.get("prepend",True),
-                _seed=cfg.get("seed",-1),
+                _seed=cfg.get("seed",-1), _b=_batch,
             ):
                 return {
                     "prompt": p,
@@ -777,6 +783,7 @@ async def handle_nsfw_generate(callback: types.CallbackQuery):
                     "guidance_rescale": _resc,
                     "prepend_preprompt": _pre,
                     "seed": _seed,
+                    "batch_size": _b,
                 }
             _REPLICATE_MODELS[model]["input"] = _sdxl_input
 
@@ -787,14 +794,39 @@ async def handle_nsfw_generate(callback: types.CallbackQuery):
     except Exception:
         pass
 
-    result_img, error_msg = await generate_image_with_replicate(d["prompt"], model=model)
+    results, error_msg = await generate_image_with_replicate(d["prompt"], model=model)
 
     if progress_task:
         progress_task.cancel()
         try: await progress_task
         except asyncio.CancelledError: pass
 
-    await _send_generation_result(callback.bot, d, request_id, result_img, error_msg, label, None, reply_kwargs)
+    if error_msg or not results:
+        await _send_generation_result(callback.bot, d, request_id, None, error_msg or "Нет результата", label, None, reply_kwargs)
+        return
+
+    if len(results) == 1:
+        await _send_generation_result(callback.bot, d, request_id, results[0], None, label, None, reply_kwargs)
+    else:
+        from aiogram.types import InputMediaPhoto
+        caption = f"🎨 {label} × {len(results)}\n{d['prompt'][:100]}" if d.get("prompt") else f"🎨 {label} × {len(results)}"
+        media = [InputMediaPhoto(media=BufferedInputFile(img, filename=f"nsfw_{i+1}.jpg"),
+                                 caption=caption if i == 0 else None)
+                 for i, img in enumerate(results)]
+        await callback.bot.send_media_group(chat_id=d["chat_id"],
+            media=media, reply_to_message_id=d["source_message_id"], **reply_kwargs)
+        upscale_msg = await callback.bot.send_message(chat_id=d["chat_id"],
+            text="⬆️ Улучшаю первое фото...", **reply_kwargs)
+        upscaled, _ = await upscale_image(results[0])
+        try:
+            await callback.bot.delete_message(chat_id=d["chat_id"], message_id=upscale_msg.message_id)
+        except Exception:
+            pass
+        if upscaled:
+            await callback.bot.send_document(chat_id=d["chat_id"],
+                document=BufferedInputFile(upscaled, filename="upscaled.png"),
+                caption=f"✨ #{1} улучшенная версия 2x",
+                reply_to_message_id=d["source_message_id"], **reply_kwargs)
 
 
 def _prompt_ai_keyboard(request_id: str) -> InlineKeyboardMarkup:
