@@ -1136,11 +1136,15 @@ async def generate_image_with_replicate(
                 if not output:
                     return None, "Replicate: timeout"
 
-                img_url = output[0] if isinstance(output, list) else output
-                async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=30)) as dl:
-                    if dl.status == 200:
-                        return await dl.read(), None
-                    return None, f"Replicate download failed: {dl.status}"
+                urls = output if isinstance(output, list) else [output]
+                results = []
+                for img_url in urls:
+                    async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=30)) as dl:
+                        if dl.status == 200:
+                            results.append(await dl.read())
+                if results:
+                    return results, None
+                return None, "Replicate download failed"
 
             except asyncio.TimeoutError:
                 return None, "Replicate: timeout"
