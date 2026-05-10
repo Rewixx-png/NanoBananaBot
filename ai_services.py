@@ -23,7 +23,7 @@ from config import (
     RETRY_DELAY_SECONDS
 )
 from database import get_history, save_history
-from keys_manager import load_keys, load_openai_key, load_openai_keys, load_nvidia_keys, load_openrouter_keys, remove_key
+from keys_manager import load_keys, load_openai_key, load_openai_keys, load_nvidia_keys, load_openrouter_keys, load_replicate_keys, remove_key
 
 logger = logging.getLogger(__name__)
 
@@ -1037,3 +1037,107 @@ async def generate_image_prompt(
                 return None, None, str(e)
 
     return None, None, "Все модели недоступны"
+
+
+_REPLICATE_MODEL_INPUTS = {
+    "aisha-ai-official/wai-nsfw-illustrious-v12": lambda p: {
+        "prompt": p,
+        "negative_prompt": "lowres, bad anatomy, bad hands, text, error, missing fingers, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry",
+        "width": 896,
+        "height": 1152,
+        "num_inference_steps": 28,
+        "guidance_scale": 7.0,
+        "scheduler": "DPM++ 2M Karras",
+    },
+    "aisha-ai-official/wai-nsfw-illustrious-v11": lambda p: {
+        "prompt": p,
+        "negative_prompt": "lowres, bad anatomy, bad hands, text, error, worst quality, low quality",
+        "width": 896,
+        "height": 1152,
+        "num_inference_steps": 28,
+        "guidance_scale": 7.0,
+    },
+    "aisha-ai-official/nsfw-flux-dev": lambda p: {
+        "prompt": p,
+        "width": 1024,
+        "height": 1024,
+        "steps": 28,
+        "guidance_scale": 3.5,
+    },
+}
+
+
+async def generate_image_with_replicate(
+    prompt: str,
+    model: str = "aisha-ai-official/wai-nsfw-illustrious-v12",
+) -> Tuple[Optional[bytes], Optional[str]]:
+    keys = load_replicate_keys()
+    if not keys:
+        return None, "Нет Replicate ключей."
+
+    input_builder = _REPLICATE_MODEL_INPUTS.get(model)
+    if not input_builder:
+        return None, f"Неизвестная Replicate модель: {model}"
+
+    model_input = input_builder(prompt)
+    owner, name = model.split("/", 1)
+    create_url = f"https://api.replicate.com/v1/models/{owner}/{name}/predictions"
+
+    for key in keys:
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "wait=60",
+        }
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(
+                    create_url,
+                    json={"input": model_input},
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=90),
+                ) as resp:
+                    if resp.status not in (200, 201):
+                        err = await resp.text()
+                        logging.warning(f"Replicate create {resp.status}: {err[:150]}")
+                        if resp.status in (401, 403):
+                            continue
+                        return None, f"Replicate error {resp.status}: {err[:200]}"
+
+                    prediction = await resp.json()
+
+                pred_id = prediction.get("id")
+                status = prediction.get("status")
+                output = prediction.get("output")
+
+                for _ in range(30):
+                    if status == "succeeded" and output:
+                        break
+                    if status == "failed":
+                        return None, prediction.get("error", "Replicate: generation failed")
+                    await asyncio.sleep(3)
+                    async with session.get(
+                        f"https://api.replicate.com/v1/predictions/{pred_id}",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as poll:
+                        prediction = await poll.json()
+                        status = prediction.get("status")
+                        output = prediction.get("output")
+
+                if not output:
+                    return None, "Replicate: timeout"
+
+                img_url = output[0] if isinstance(output, list) else output
+                async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=30)) as dl:
+                    if dl.status == 200:
+                        return await dl.read(), None
+                    return None, f"Replicate download failed: {dl.status}"
+
+            except asyncio.TimeoutError:
+                return None, "Replicate: timeout"
+            except Exception as e:
+                logging.error(f"Replicate error: {e}")
+                return None, str(e)
+
+    return None, "Все Replicate ключи недоступны."

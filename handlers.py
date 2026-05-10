@@ -13,7 +13,7 @@ from state import pending_image_requests, pending_video_requests, pending_media_
 from database import save_history, save_pending_gen, delete_pending_gen
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
-from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image, generate_image_prompt, generate_code_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models
+from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image, generate_image_prompt, generate_code_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate
 from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID
 import logging
 
@@ -288,12 +288,12 @@ def _temp_keyboard(request_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def _providers_keyboard(request_id: str, chat_id: int, photo_count: int = 0) -> InlineKeyboardMarkup:
-    providers = ["gemini", "flux"] if chat_id == TEXT_ONLY_CHAT_ID else ["gemini", "gpt", "flux"]
-    labels = {"gemini": "Gemini", "gpt": "GPT", "flux": "FLUX"}
+    providers = ["gemini", "flux", "nsfw"] if chat_id == TEXT_ONLY_CHAT_ID else ["gemini", "gpt", "flux", "nsfw"]
+    labels = {"gemini": "Gemini", "gpt": "GPT", "flux": "FLUX", "nsfw": "NSFW 🔞"}
     photo_label = f" 📎{photo_count} фото" if photo_count > 1 else ""
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
-            text=labels[p] + (photo_label if p != "flux" else ""),
+            text=labels[p] + (photo_label if p not in ("flux", "nsfw") else ""),
             callback_data=f"imgprov:{request_id}:{p}"
         ) for p in providers
     ]])
@@ -469,6 +469,11 @@ PROVIDER_MODELS: dict = {
         ("FLUX Dev (качество)", "fluxdev"),
         ("FLUX Klein 4B", "klein"),
     ],
+    "nsfw": [
+        ("WAI Illustrious v12", "wai12"),
+        ("WAI Illustrious v11", "wai11"),
+        ("NSFW FLUX Dev", "nsfwflux"),
+    ],
 }
 
 MODEL_TO_REAL: dict = {
@@ -479,6 +484,9 @@ MODEL_TO_REAL: dict = {
     "schnell":    ("flux",   "black-forest-labs/flux.1-schnell"),
     "fluxdev":    ("flux",   "black-forest-labs/flux.1-dev"),
     "klein":      ("flux",   "black-forest-labs/flux_2-klein-4b"),
+    "wai12":      ("nsfw",   "aisha-ai-official/wai-nsfw-illustrious-v12"),
+    "wai11":      ("nsfw",   "aisha-ai-official/wai-nsfw-illustrious-v11"),
+    "nsfwflux":   ("nsfw",   "aisha-ai-official/nsfw-flux-dev"),
 }
 
 
@@ -696,6 +704,8 @@ async def handle_image_model_select(callback: types.CallbackQuery):
             result_img, error_msg = await generate_image_with_gemini(request_data["prompt"], images_bytes=imgs, temperature=request_data.get("temperature", 1.0))
     elif provider == "flux":
         result_img, error_msg = await generate_image_with_nvidia(request_data["prompt"], model=real_model)
+    elif provider == "nsfw":
+        result_img, error_msg = await generate_image_with_replicate(request_data["prompt"], model=real_model)
     else:
         result_img, error_msg = await generate_image_with_gemini(request_data["prompt"], images_bytes=imgs, model=real_model, temperature=request_data.get("temperature", 1.0))
 

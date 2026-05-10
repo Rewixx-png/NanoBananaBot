@@ -155,6 +155,21 @@ def load_openrouter_keys():
         logging.error(f"Ошибка загрузки OpenRouter ключей: {e}")
     return []
 
+def load_replicate_keys():
+    try:
+        with open(API_KEYS_FILE, 'r') as f:
+            raw = f.read()
+        content = strip_code_fences(raw)
+        data = json.loads(content)
+        rep_data = data.get("replicate", [])
+        if isinstance(rep_data, list) and rep_data:
+            return rep_data
+        if isinstance(rep_data, str) and rep_data.strip():
+            return [rep_data.strip()]
+    except Exception as e:
+        logging.error(f"Ошибка загрузки Replicate ключей: {e}")
+    return []
+
 def remove_key(key_to_remove):
     config = load_api_config()
     keys = config.get("gemini", [])
