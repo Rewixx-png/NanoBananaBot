@@ -488,11 +488,9 @@ def _nsfw_cfg_text(request_id: str) -> str:
     neg_full = cfg.get("neg", "")
     neg = neg_full[:150]
     label = d.get("label", "NSFW")
-    has_image = d.get("image_bytes") is not None
     neg_display = f'"{neg}{"..." if len(neg_full) > 150 else ""}"' if neg_full else "не задан (стандартный)"
-    img_line = f"\n🖼️ Фото: прикреплено (img2img, сила: {cfg.get('strength', 0.85)})" if has_image else ""
     return (
-        f"⚙️ {label}{img_line}\n\n"
+        f"⚙️ {label}\n\n"
         f"📝 Промпт:\n\"{prompt}\"\n\n"
         f"🚫 Негативный промпт:\n{neg_display}\n\n"
         f"Шаги: {cfg.get('steps', 28)}  |  CFG: {cfg.get('cfg', 7.0)}  |  Размер: {cfg.get('size', '896x1152')}"
@@ -501,11 +499,9 @@ def _nsfw_cfg_text(request_id: str) -> str:
 def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
     d = pending_nsfw_configs.get(request_id, {})
     cfg = d.get("cfg", {})
-    cur_steps    = cfg.get("steps", 28)
-    cur_cfgv     = cfg.get("cfg", 7.0)
-    cur_size     = cfg.get("size", "896x1152")
-    cur_strength = cfg.get("strength", 0.85)
-    has_image    = d.get("image_bytes") is not None
+    cur_steps = cfg.get("steps", 28)
+    cur_cfgv  = cfg.get("cfg", 7.0)
+    cur_size  = cfg.get("size", "896x1152")
 
     def row(field, options, current):
         return [InlineKeyboardButton(
@@ -531,11 +527,8 @@ def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
             text=f"{'✅' if s == cur_size else ''}{s}",
             callback_data=f"nsfwcfg:{request_id}:size:{s}"
         ) for s in _NSFW_SIZES[3:]],
+        [InlineKeyboardButton(text="🚀 Генерировать", callback_data=f"nsfwgen:{request_id}")],
     ]
-    if has_image:
-        rows.append([InlineKeyboardButton(text="— Сила изменения (img2img) —", callback_data="noop")])
-        rows.append(row("strength", _NSFW_STRENGTH, cur_strength))
-    rows.append([InlineKeyboardButton(text="🚀 Генерировать", callback_data=f"nsfwgen:{request_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -697,35 +690,22 @@ async def handle_nsfw_generate(callback: types.CallbackQuery):
     w, h = cfg.get("size", "1024x1024").split("x")
 
     neg = cfg.get("neg", "")
-    strength = cfg.get("strength", 0.85)
-    img_bytes = d.get("image_bytes")
-    img_b64 = None
-    if img_bytes:
-        import base64 as _b64
-        img_b64 = "data:image/jpeg;base64," + _b64.b64encode(img_bytes).decode()
-
     from ai_services import _REPLICATE_MODELS
     if model in _REPLICATE_MODELS:
+        cfg_key = _REPLICATE_MODELS[model].get("cfg_key", "guidance_scale")
         if "flux" in model:
-            def _flux_input(p, _s=cfg.get("steps",28), _c=cfg.get("cfg",3.5), _w=int(w), _h=int(h), _img=img_b64, _str=strength):
-                inp = {"prompt": p, "width": _w, "height": _h, "steps": _s, "guidance_scale": _c}
-                if _img:
-                    inp["image"] = _img
-                    inp["prompt_strength"] = _str
-                return inp
+            def _flux_input(p, _s=cfg.get("steps",28), _c=cfg.get("cfg",3.5), _w=int(w), _h=int(h), _ck=cfg_key):
+                return {"prompt": p, "width": _w, "height": _h, "steps": _s, _ck: _c}
             _REPLICATE_MODELS[model]["input"] = _flux_input
         else:
-            def _sdxl_input(p, _s=cfg.get("steps",28), _c=cfg.get("cfg",7.0), _w=int(w), _h=int(h), _n=neg, _img=img_b64, _str=strength):
-                inp = {
+            def _sdxl_input(p, _s=cfg.get("steps",28), _c=cfg.get("cfg",7.0), _w=int(w), _h=int(h), _n=neg, _ck=cfg_key):
+                return {
                     "prompt": p,
                     "negative_prompt": _n if _n else _NSFW_DEFAULT_NEG,
                     "width": _w, "height": _h,
-                    "num_inference_steps": _s, "guidance_scale": _c,
+                    "steps": _s, _ck: _c,
+                    "scheduler": "DPM++ 2M Karras",
                 }
-                if _img:
-                    inp["image"] = _img
-                    inp["prompt_strength"] = _str
-                return inp
             _REPLICATE_MODELS[model]["input"] = _sdxl_input
 
     progress_task = None

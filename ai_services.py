@@ -1042,31 +1042,35 @@ async def generate_image_prompt(
 _REPLICATE_MODELS = {
     "aisha-ai-official/wai-nsfw-illustrious-v12": {
         "version": "0fc0fa9885b284901a6f9c0b4d67701fd7647d157b88371427d63f8089ce140e",
+        "cfg_key": "cfg_scale",
         "input": lambda p: {
             "prompt": p,
             "negative_prompt": "lowres, bad anatomy, bad hands, text, error, missing fingers, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry",
             "width": 896, "height": 1152,
-            "num_inference_steps": 28,
-            "guidance_scale": 7.0,
+            "steps": 28,
+            "cfg_scale": 7.0,
             "scheduler": "DPM++ 2M Karras",
         },
     },
     "aisha-ai-official/wai-nsfw-illustrious-v11": {
         "version": "c1d5b02687df6081c7953c74bcc527858702e8c153c9382012ccc3906752d3ec",
+        "cfg_key": "cfg_scale",
         "input": lambda p: {
             "prompt": p,
             "negative_prompt": "lowres, bad anatomy, bad hands, text, error, worst quality, low quality",
             "width": 896, "height": 1152,
-            "num_inference_steps": 28,
-            "guidance_scale": 7.0,
+            "steps": 28,
+            "cfg_scale": 7.0,
         },
     },
     "aisha-ai-official/nsfw-flux-dev": {
         "version": "fb4f086702d6a301ca32c170d926239324a7b7b2f0afc3d232a9c4be382dc3fa",
+        "cfg_key": "guidance_scale",
         "input": lambda p: {
             "prompt": p,
             "width": 1024, "height": 1024,
-            "steps": 28, "guidance_scale": 3.5,
+            "steps": 28,
+            "guidance_scale": 3.5,
         },
     },
 }
