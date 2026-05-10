@@ -12,3 +12,5 @@ paid_unlimited_until = {}
 
 pending_prompt_requests = {}
 pending_nsfw_configs = {}
+
+chat_members_cache: dict = {}
