@@ -9,7 +9,7 @@ from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
-from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs
+from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache
 from database import save_history, save_pending_gen, delete_pending_gen
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
@@ -120,6 +120,68 @@ async def cmd_clear(message: types.Message):
     await save_history(message.chat.id, [])
     await message.reply("Окей, я забыл всю хуйню, которую мы тут обсуждали. Начинаем с чистого листа.")
 
+import random as _random
+
+_ALL_PHRASES = [
+    "Эй вы, уроды, все сюда нахуй! 👇",
+    "Хуиданте сюда все, живо! 🔔",
+    "Ау, дебилы, слышите? Все сюда! 📢",
+    "Все ко мне, быстро, я сказал! 🗣️",
+    "Ну-ка все собрались, чего расползлись! 👊",
+    "Стоять всем! Сюда смотреть! 👁️",
+    "Эй ты, и ты, и ты тоже — все на месте! ⚡",
+]
+
+_all_cooldowns: dict = {}
+
+@router.message(Command("all"))
+async def cmd_all(message: types.Message):
+    if message.chat.type == "private":
+        await message.reply("В личке некого созывать, дурик.")
+        return
+
+    uid = message.from_user.id
+    now = time.time()
+    if now - _all_cooldowns.get((message.chat.id, uid), 0) < 300:
+        remaining = int(300 - (now - _all_cooldowns.get((message.chat.id, uid), 0)))
+        await message.reply(f"Не спамь созывом, подожди ещё {remaining} сек.")
+        return
+    _all_cooldowns[(message.chat.id, uid)] = now
+
+    members = chat_members_cache.get(message.chat.id, {})
+    if not members:
+        await message.reply("Никого не знаю ещё — пусть сначала понапишут что-нибудь.")
+        return
+
+    bot_user = await message.bot.get_me()
+    mentions = []
+    for user_id, (first_name, username) in members.items():
+        if user_id == bot_user.id or user_id == uid:
+            continue
+        if username:
+            mentions.append(f"@{username}")
+        else:
+            mentions.append(f'<a href="tg://user?id={user_id}">{first_name}</a>')
+
+    if not mentions:
+        await message.reply("Не на кого тегать, все и так тут.")
+        return
+
+    phrase = _random.choice(_ALL_PHRASES)
+    chunks = []
+    chunk = phrase + "\n"
+    for m in mentions:
+        if len(chunk) + len(m) + 1 > 4000:
+            chunks.append(chunk)
+            chunk = ""
+        chunk += m + " "
+    if chunk.strip():
+        chunks.append(chunk)
+
+    for ch in chunks:
+        await message.answer(ch, parse_mode="HTML")
+
+
 @router.message(Command("vip"))
 async def cmd_vip(message: types.Message):
     if message.from_user.id not in ALLOWED_USER_IDS and message.from_user.id != OWNER_USER_ID:
@@ -146,6 +208,7 @@ async def cmd_vip(message: types.Message):
 
 @router.message(Command("image"))
 async def cmd_image(message: types.Message):
+    _track_user(message)
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
         await message.reply("Доступ запрещен. Вы не состоите в обязательной беседе.")
@@ -1309,8 +1372,21 @@ async def handle_video(message: types.Message):
             )
 
 # Хэндлер на текстовые сообщения (реплаи и теги)
+def _track_user(message: types.Message):
+    if message.from_user and message.chat.type != "private":
+        cid = message.chat.id
+        uid = message.from_user.id
+        if cid not in chat_members_cache:
+            chat_members_cache[cid] = {}
+        chat_members_cache[cid][uid] = (
+            message.from_user.first_name or "Аноним",
+            message.from_user.username,
+        )
+
+
 @router.message(F.text)
 async def handle_text_messages(message: types.Message):
+    _track_user(message)
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
         return
