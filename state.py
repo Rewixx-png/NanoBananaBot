@@ -14,3 +14,5 @@ pending_prompt_requests = {}
 pending_nsfw_configs = {}
 
 chat_members_cache: dict = {}
+
+daily_gen_limits: dict = {}

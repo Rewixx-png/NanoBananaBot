@@ -9,12 +9,12 @@ from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
-from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache
+from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache, daily_gen_limits
 from database import save_history, save_pending_gen, delete_pending_gen
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
 from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image, generate_image_prompt, generate_code_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate
-from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID
+from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID, DAILY_GEN_LIMIT, PAYMENT_USERNAME, CHAT_ID
 import logging
 
 logger = logging.getLogger(__name__)
@@ -217,13 +217,32 @@ async def cmd_vip(message: types.Message):
     await message.reply(f"✅ Юзер {target_id} получил безлимит на 24 часа.")
 
 
+def _check_daily_limit(user_id: int) -> tuple:
+    from datetime import date
+    today = str(date.today())
+    entry = daily_gen_limits.get(user_id, {})
+    if entry.get("date") != today:
+        entry = {"date": today, "count": 0}
+    count = entry.get("count", 0)
+    if count >= DAILY_GEN_LIMIT:
+        return False, 0
+    entry["count"] = count + 1
+    daily_gen_limits[user_id] = entry
+    return True, DAILY_GEN_LIMIT - entry["count"]
+
+
 @router.message(Command("image"))
 async def cmd_image(message: types.Message):
     _track_user(message)
-    is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
-    if not is_member:
-        await message.reply("Доступ запрещен. Вы не состоите в обязательной беседе.")
-        return
+    if message.chat.type == "private":
+        from utils import is_banned
+        if is_banned(message.from_user.id):
+            return
+    else:
+        is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
+        if not is_member:
+            await message.reply("Доступ запрещен. Вы не состоите в обязательной беседе.")
+            return
 
     current_time = time.time()
     uid = message.from_user.id
@@ -1069,6 +1088,24 @@ async def handle_provider_select(callback: types.CallbackQuery):
     if provider == "gpt" and callback.message and callback.message.chat.id == TEXT_ONLY_CHAT_ID:
         await callback.answer("GPT недоступен в этой беседе.", show_alert=True)
         return
+
+    uid = callback.from_user.id
+    if provider in ("gemini", "gpt") and uid not in ALLOWED_USER_IDS:
+        is_main_member = False
+        try:
+            m = await callback.bot.get_chat_member(chat_id=CHAT_ID, user_id=uid)
+            is_main_member = m.status in ("member", "administrator", "creator", "restricted")
+        except Exception:
+            is_main_member = True
+        if not is_main_member:
+            allowed, remaining = _check_daily_limit(uid)
+            if not allowed:
+                await callback.answer(
+                    f"❌ Дневной лимит {DAILY_GEN_LIMIT} генерации исчерпан.\n"
+                    f"Для безлимита свяжитесь с {PAYMENT_USERNAME} и пополните карту Тбанка на 10₽.",
+                    show_alert=True
+                )
+                return
 
     models = PROVIDER_MODELS.get(provider, [])
     if not models:
