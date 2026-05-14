@@ -47,6 +47,17 @@ async def init_db():
             await db.execute(
                 "CREATE TABLE IF NOT EXISTS banned_users (user_id INTEGER PRIMARY KEY)"
             )
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS prompt_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    username TEXT,
+                    first_name TEXT,
+                    gen_type TEXT,
+                    prompt TEXT,
+                    created_at REAL
+                )
+            """)
             await db.commit()
             logger.info("База данных успешно инициализирована")
     except Exception as e:
@@ -193,3 +204,40 @@ async def remove_banned_user_db(user_id: int):
             await db.commit()
     except Exception:
         pass
+
+async def log_prompt(user_id: int, username: str, first_name: str, gen_type: str, prompt: str):
+    try:
+        username = username or ""
+        first_name = first_name or "Аноним"
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO prompt_logs (user_id, username, first_name, gen_type, prompt, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, username, first_name, gen_type, prompt, time.time())
+            )
+            await db.commit()
+    except Exception as e:
+        logger.error(f"Ошибка логирования промпта: {e}")
+
+async def get_recent_prompts(limit: int = 50, user_id: int = None) -> List[Dict[str, Any]]:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            if user_id:
+                async with db.execute(
+                    "SELECT user_id, username, first_name, gen_type, prompt, created_at FROM prompt_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (user_id, limit)
+                ) as cur:
+                    rows = await cur.fetchall()
+            else:
+                async with db.execute(
+                    "SELECT user_id, username, first_name, gen_type, prompt, created_at FROM prompt_logs ORDER BY created_at DESC LIMIT ?",
+                    (limit,)
+                ) as cur:
+                    rows = await cur.fetchall()
+                    
+            return [{
+                "user_id": r[0], "username": r[1], "first_name": r[2], 
+                "gen_type": r[3], "prompt": r[4], "created_at": r[5]
+            } for r in rows]
+    except Exception as e:
+        logger.error(f"Ошибка получения промптов: {e}")
+        return []
