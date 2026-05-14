@@ -5,8 +5,9 @@ import sys
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.types import TelegramObject, Message, CallbackQuery
 from config import BOT_TOKEN, BANNED_USER_IDS
-from database import init_db, get_all_pending_gens, delete_pending_gen
+from database import init_db, get_all_pending_gens, delete_pending_gen, get_banned_users_db
 from handlers import router, refresh_models
+from state import banned_user_ids
 from typing import Callable, Any, Awaitable
 
 class BanMiddleware(BaseMiddleware):
@@ -16,7 +17,7 @@ class BanMiddleware(BaseMiddleware):
             user_id = event.from_user.id
         elif isinstance(event, CallbackQuery) and event.from_user:
             user_id = event.from_user.id
-        if user_id and user_id in BANNED_USER_IDS:
+        if user_id and (user_id in BANNED_USER_IDS or user_id in banned_user_ids):
             return
         return await handler(event, data)
 
@@ -123,7 +124,12 @@ async def resume_pending_generations(bot: Bot):
 async def on_startup(bot: Bot):
     logger.info("Инициализация базы данных...")
     await init_db()
-    logger.info("База данных инициализирована")
+    
+    banned = await get_banned_users_db()
+    for b in banned:
+        banned_user_ids.add(b)
+        
+    logger.info(f"База данных инициализирована. Загружено банов: {len(banned_user_ids)}")
     asyncio.create_task(resume_pending_generations(bot))
     asyncio.create_task(refresh_models())
 

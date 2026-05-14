@@ -9,8 +9,8 @@ from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
-from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache, daily_gen_limits
-from database import save_history, save_pending_gen, delete_pending_gen
+from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache, daily_gen_limits, banned_user_ids
+from database import save_history, save_pending_gen, delete_pending_gen, add_user_stat, get_user_stats, add_banned_user_db, remove_banned_user_db
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
 from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image, generate_image_prompt, generate_code_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate
@@ -193,6 +193,150 @@ async def cmd_all(message: types.Message):
         await message.answer(ch, parse_mode="HTML")
 
 
+@router.message(Command("unban"))
+async def cmd_unban(message: types.Message):
+    if message.from_user.id != OWNER_USER_ID:
+        return
+
+    target_id = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+    else:
+        parts = (message.text or "").split()
+        if len(parts) > 1:
+            if parts[1].startswith("@"):
+                # try to resolve from cache
+                target_username = parts[1][1:]
+                for cid, mems in chat_members_cache.items():
+                    for uid, (_, un) in mems.items():
+                        if un and un.lower() == target_username.lower():
+                            target_id = uid
+                            break
+                    if target_id:
+                        break
+            else:
+                try:
+                    target_id = int(parts[1])
+                except ValueError:
+                    pass
+
+    if not target_id:
+        await message.reply("Ответь на сообщение юзера или укажи /unban <user_id> или @username")
+        return
+
+    await remove_banned_user_db(target_id)
+    if target_id in banned_user_ids:
+        banned_user_ids.remove(target_id)
+    await message.reply(f"✅ Юзер {target_id} разбанен.")
+
+
+@router.message(Command("ban"))
+async def cmd_ban(message: types.Message):
+    if message.from_user.id != OWNER_USER_ID:
+        return
+
+    target_id = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+    else:
+        parts = (message.text or "").split()
+        if len(parts) > 1:
+            if parts[1].startswith("@"):
+                target_username = parts[1][1:]
+                for cid, mems in chat_members_cache.items():
+                    for uid, (_, un) in mems.items():
+                        if un and un.lower() == target_username.lower():
+                            target_id = uid
+                            break
+                    if target_id:
+                        break
+            else:
+                try:
+                    target_id = int(parts[1])
+                except ValueError:
+                    pass
+
+    if not target_id:
+        await message.reply("Ответь на сообщение юзера или укажи /ban <user_id> или @username")
+        return
+
+    await add_banned_user_db(target_id)
+    banned_user_ids.add(target_id)
+    await message.reply(f"🚫 Юзер {target_id} забанен навсегда.")
+
+
+def _stats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="За сегодня", callback_data="stats:today")],
+        [InlineKeyboardButton(text="За всё время", callback_data="stats:all")],
+    ])
+
+@router.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    if message.from_user.id != OWNER_USER_ID:
+        return
+    await message.reply("📊 Выберите период для статистики:", reply_markup=_stats_keyboard())
+
+@router.callback_query(F.data.startswith("stats:"))
+async def handle_stats(callback: types.CallbackQuery):
+    if callback.from_user.id != OWNER_USER_ID:
+        await callback.answer("Только для владельца.", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        return
+    
+    period = parts[1]
+    from datetime import date
+    today_str = str(date.today())
+    
+    if period == "today":
+        stats = await get_user_stats(today_str)
+        title = f"📊 Статистика за сегодня ({today_str}):"
+    else:
+        stats = await get_user_stats()
+        title = "📊 Статистика за всё время:"
+
+    if not stats:
+        await callback.answer("Нет данных.")
+        return
+        
+    lines = [title, ""]
+    # Group by user_id
+    user_totals = {}
+    for s in stats:
+        uid = s["user_id"]
+        if uid not in user_totals:
+            user_totals[uid] = {
+                "name": s["first_name"],
+                "username": s["username"],
+                "image": 0, "video": 0, "text": 0, "code": 0
+            }
+        # map types
+        t = s["type"]
+        if t in user_totals[uid]:
+            user_totals[uid][t] += s["count"]
+            
+    # Sort by total
+    sorted_users = sorted(user_totals.items(), key=lambda x: sum(x[1][k] for k in ["image", "video", "text", "code"]), reverse=True)
+    
+    for uid, data in sorted_users:
+        un = f"@{data['username']}" if data["username"] else f"<a href='tg://user?id={uid}'>{data['name']}</a>"
+        total = sum(data[k] for k in ["image", "video", "text", "code"])
+        line = f"👤 {un} (<code>{uid}</code>)\n"
+        line += f"  Всего: {total} (Картинки: {data['image']}, Видео: {data['video']}, Текст: {data['text']}, Код: {data['code']})"
+        lines.append(line)
+        
+    text = "\n\n".join(lines)[:4000]
+    
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_stats_keyboard())
+    except Exception:
+        pass
+    await callback.answer()
+
+
 @router.message(Command("vip"))
 async def cmd_vip(message: types.Message):
     if message.from_user.id not in ALLOWED_USER_IDS and message.from_user.id != OWNER_USER_ID:
@@ -247,32 +391,29 @@ async def cmd_image(message: types.Message):
     current_time = time.time()
     uid = message.from_user.id
 
-    if message.chat.id == FULL_ACCESS_CHAT_ID and uid not in ALLOWED_USER_IDS:
-        is_main_member = True
-        try:
-            m = await message.bot.get_chat_member(chat_id=CHAT_ID, user_id=uid)
-            is_main_member = m.status in ("member", "administrator", "creator", "restricted")
-        except Exception as e:
-            logger.warning(f"is_main_member check failed for {uid}: {e}")
+    if uid not in ALLOWED_USER_IDS:
+        if message.chat.id == FULL_ACCESS_CHAT_ID:
+            is_main_member = True
+            try:
+                m = await message.bot.get_chat_member(chat_id=CHAT_ID, user_id=uid)
+                is_main_member = m.status in ("member", "administrator", "creator", "restricted")
+            except Exception as e:
+                logger.warning(f"is_main_member check failed for {uid}: {e}")
 
-        if not is_main_member and current_time >= paid_unlimited_until.get(uid, 0):
-            last_fa = full_access_image_cooldowns.get(uid, 0)
-            remaining = FULL_ACCESS_CHAT_IMAGE_COOLDOWN - (current_time - last_fa)
-            if remaining > 0:
-                mins = int(remaining // 60)
-                secs = int(remaining % 60)
-                time_str = f"{mins} мин {secs} сек" if mins > 0 else f"{secs} сек"
-                await message.reply(
-                    f"Не спамь блять картинками, подожди ещё {time_str}."
-                )
+            if not is_main_member and current_time >= paid_unlimited_until.get(uid, 0):
+                last_fa = full_access_image_cooldowns.get(uid, 0)
+                remaining = FULL_ACCESS_CHAT_IMAGE_COOLDOWN - (current_time - last_fa)
+                if remaining > 0:
+                    secs = int(remaining)
+                    await message.reply(f"Не спамь блять картинками, подожди ещё {secs} сек.")
+                    return
+            full_access_image_cooldowns[uid] = current_time
+        else:
+            last_time = user_image_cooldowns.get(uid, 0)
+            if current_time - last_time < IMAGE_COOLDOWN_SECONDS:
+                await message.reply(f"Не спамь блять картинками, подожди еще {int(IMAGE_COOLDOWN_SECONDS - (current_time - last_time))} сек.")
                 return
-        full_access_image_cooldowns[uid] = current_time
-    else:
-        last_time = user_image_cooldowns.get(uid, 0)
-        if current_time - last_time < IMAGE_COOLDOWN_SECONDS:
-            await message.reply(f"Не спамь блять картинками, подожди еще {int(IMAGE_COOLDOWN_SECONDS - (current_time - last_time))} сек.")
-            return
-        user_image_cooldowns[uid] = current_time
+            user_image_cooldowns[uid] = current_time
 
     prompt = message.text.replace("/image", "").strip() if message.text else ""
     if message.caption:
@@ -310,6 +451,8 @@ async def cmd_image(message: types.Message):
 
     pending_image_requests[request_id] = {
         "user_id": message.from_user.id,
+        "first_name": message.from_user.first_name or "Аноним",
+        "username": message.from_user.username or "",
         "chat_id": message.chat.id,
         "source_message_id": message.message_id,
         "message_thread_id": thread_id,
@@ -483,6 +626,13 @@ async def _send_generation_result(bot, request_data, request_id, result_img, err
                 document=BufferedInputFile(upscaled, filename="upscaled.png"),
                 caption=f"✨ Улучшенная версия ({model_label}) 2x — без сжатия",
                 reply_to_message_id=request_data["source_message_id"], **reply_kwargs)
+            
+        asyncio.create_task(add_user_stat(
+            request_data.get("user_id", 0),
+            request_data.get("username", ""),
+            request_data.get("first_name", "Аноним"),
+            "image"
+        ))
         return
     await bot.send_message(chat_id=request_data["chat_id"], text="❌ Не удалось получить изображение.",
         reply_to_message_id=request_data["source_message_id"], **reply_kwargs)
@@ -1476,6 +1626,12 @@ async def handle_veo_model_select(callback: types.CallbackQuery):
             reply_to_message_id=request_data["source_message_id"],
             **reply_kwargs
         )
+        asyncio.create_task(add_user_stat(
+            request_data.get("user_id", 0),
+            request_data.get("username", ""),
+            request_data.get("first_name", "Аноним"),
+            "video"
+        ))
         return
 
     await callback.bot.send_message(
@@ -1566,6 +1722,8 @@ async def handle_video(message: types.Message):
                 reply_to_message_id=sent_msg.message_id,
                 **reply_kwargs
             )
+            
+    asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or "", message.from_user.first_name or "Аноним", "video"))
 
 # Хэндлер на текстовые сообщения (реплаи и теги)
 def _track_user(message: types.Message):
@@ -1674,8 +1832,10 @@ async def handle_text_messages(message: types.Message):
 
         if is_code_request:
             text_response = await generate_code_with_gemini(prompt)
+            asyncio.create_task(add_user_stat(message.from_user.id, username, message.from_user.first_name or "Аноним", "code"))
         else:
             text_response = await generate_text_with_gemini(prompt, message.chat.id, username=username)
+            asyncio.create_task(add_user_stat(message.from_user.id, username, message.from_user.first_name or "Аноним", "text"))
 
         try:
             await thinking_msg.delete()

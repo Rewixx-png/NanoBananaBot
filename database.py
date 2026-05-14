@@ -33,6 +33,20 @@ async def init_db():
                     created_at REAL
                 )
             """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS user_stats (
+                    user_id INTEGER,
+                    username TEXT,
+                    first_name TEXT,
+                    date_str TEXT,
+                    gen_type TEXT,
+                    count INTEGER DEFAULT 0,
+                    PRIMARY KEY (user_id, date_str, gen_type)
+                )
+            """)
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS banned_users (user_id INTEGER PRIMARY KEY)"
+            )
             await db.commit()
             logger.info("База данных успешно инициализирована")
     except Exception as e:
@@ -115,3 +129,67 @@ async def save_history(chat_id: int, history: List[Dict[str, Any]]):
     except Exception as e:
         logger.exception(f"Ошибка при сохранении истории для chat_id {chat_id}: {e}")
         raise
+
+async def add_user_stat(user_id: int, username: str, first_name: str, gen_type: str):
+    from datetime import date
+    date_str = str(date.today())
+    username = username or ""
+    first_name = first_name or "Аноним"
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO user_stats (user_id, username, first_name, date_str, gen_type, count)
+                VALUES (?, ?, ?, ?, ?, 1)
+                ON CONFLICT(user_id, date_str, gen_type) DO UPDATE SET 
+                count = count + 1, username=excluded.username, first_name=excluded.first_name
+            """, (user_id, username, first_name, date_str, gen_type))
+            await db.commit()
+    except Exception as e:
+        logger.error(f"Ошибка сохранения статистики: {e}")
+
+async def get_user_stats(date_str: str = None) -> List[dict]:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            if date_str:
+                async with db.execute("""
+                    SELECT user_id, username, first_name, SUM(count) as c, gen_type 
+                    FROM user_stats WHERE date_str = ? 
+                    GROUP BY user_id, username, first_name, gen_type ORDER BY c DESC
+                """, (date_str,)) as cur:
+                    rows = await cur.fetchall()
+            else:
+                async with db.execute("""
+                    SELECT user_id, username, first_name, SUM(count) as c, gen_type 
+                    FROM user_stats 
+                    GROUP BY user_id, username, first_name, gen_type ORDER BY c DESC
+                """) as cur:
+                    rows = await cur.fetchall()
+            return [{"user_id": r[0], "username": r[1], "first_name": r[2], "count": r[3], "type": r[4]} for r in rows]
+    except Exception as e:
+        logger.error(f"Ошибка чтения статистики: {e}")
+        return []
+
+async def get_banned_users_db() -> set:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT user_id FROM banned_users") as cur:
+                rows = await cur.fetchall()
+                return {r[0] for r in rows}
+    except Exception:
+        return set()
+
+async def add_banned_user_db(user_id: int):
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("INSERT OR IGNORE INTO banned_users (user_id) VALUES (?)", (user_id,))
+            await db.commit()
+    except Exception:
+        pass
+
+async def remove_banned_user_db(user_id: int):
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
+            await db.commit()
+    except Exception:
+        pass
