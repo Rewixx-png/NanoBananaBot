@@ -271,6 +271,30 @@ async def cmd_ban(message: types.Message):
     await message.reply(f"🚫 Юзер {target_id} забанен навсегда.")
 
 
+@router.message(Command("limit"))
+async def cmd_limit(message: types.Message):
+    if message.from_user.id != OWNER_USER_ID:
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.reply("Укажи лимит и количество дней, например: /limit 3 1")
+        return
+
+    try:
+        req_limit = int(parts[1])
+        days = int(parts[2])
+    except ValueError:
+        await message.reply("Некорректный формат. Нужно: /limit <количество> <дней>")
+        return
+
+    chat_custom_limits[message.chat.id] = (req_limit, days)
+    from database import set_chat_limit_db
+    await set_chat_limit_db(message.chat.id, req_limit, days)
+    
+    await message.reply(f"✅ Установлен лимит для этого чата: {req_limit} генераций раз в {days} дней.")
+
+
 def _stats_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="За сегодня", callback_data="stats:today")],
@@ -396,18 +420,22 @@ async def cmd_vip(message: types.Message):
     await message.reply(f"✅ Юзер {target_id} получил безлимит на 24 часа.")
 
 
-def _check_daily_limit(user_id: int) -> tuple:
-    from datetime import date
-    today = str(date.today())
-    entry = daily_gen_limits.get(user_id, {})
-    if entry.get("date") != today:
-        entry = {"date": today, "count": 0}
+def _check_daily_limit(user_id: int, chat_id: int) -> tuple:
+    req_limit, days = chat_custom_limits.get(chat_id, (DAILY_GEN_LIMIT, 1))
+    
+    period_id = str(int(time.time() // (86400 * days))) if days > 0 else str(time.time())
+    
+    entry = daily_gen_limits.get((chat_id, user_id), {})
+    if entry.get("period") != period_id:
+        entry = {"period": period_id, "count": 0}
+        
     count = entry.get("count", 0)
-    if count >= DAILY_GEN_LIMIT:
+    if count >= req_limit:
         return False, 0
+        
     entry["count"] = count + 1
-    daily_gen_limits[user_id] = entry
-    return True, DAILY_GEN_LIMIT - entry["count"]
+    daily_gen_limits[(chat_id, user_id)] = entry
+    return True, req_limit - entry["count"]
 
 
 @router.message(Command("image"))
@@ -1290,10 +1318,11 @@ async def handle_provider_select(callback: types.CallbackQuery):
         except Exception:
             is_main_member = True
         if not is_main_member:
-            allowed, remaining = _check_daily_limit(uid)
+            allowed, remaining = _check_daily_limit(uid, callback.message.chat.id if callback.message else request_data["chat_id"])
             if not allowed:
+                req_limit, days = chat_custom_limits.get(callback.message.chat.id if callback.message else request_data["chat_id"], (DAILY_GEN_LIMIT, 1))
                 await callback.answer(
-                    f"❌ Дневной лимит {DAILY_GEN_LIMIT} генерации исчерпан.\n"
+                    f"❌ Лимит {req_limit} генерации за {days} дн. исчерпан.\n"
                     f"Для безлимита свяжитесь с {PAYMENT_USERNAME} и пополните карту Тбанка на 10₽.",
                     show_alert=True
                 )
