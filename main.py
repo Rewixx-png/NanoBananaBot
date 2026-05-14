@@ -5,9 +5,9 @@ import sys
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.types import TelegramObject, Message, CallbackQuery
 from config import BOT_TOKEN, BANNED_USER_IDS
-from database import init_db, get_all_pending_gens, delete_pending_gen, get_banned_users_db
+from database import init_db, get_all_pending_gens, delete_pending_gen, get_banned_users_db, get_all_chat_limits
 from handlers import router, refresh_models
-from state import banned_user_ids
+from state import banned_user_ids, chat_custom_limits
 from typing import Callable, Any, Awaitable
 
 class BanMiddleware(BaseMiddleware):
@@ -129,7 +129,11 @@ async def on_startup(bot: Bot):
     for b in banned:
         banned_user_ids.add(b)
         
-    logger.info(f"База данных инициализирована. Загружено банов: {len(banned_user_ids)}")
+    chat_lims = await get_all_chat_limits()
+    for cid, (req_limit, days) in chat_lims.items():
+        chat_custom_limits[cid] = (req_limit, days)
+        
+    logger.info(f"База данных инициализирована. Загружено банов: {len(banned_user_ids)}, лимитов чатов: {len(chat_custom_limits)}")
     asyncio.create_task(resume_pending_generations(bot))
     asyncio.create_task(refresh_models())
 
