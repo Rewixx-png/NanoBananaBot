@@ -221,7 +221,10 @@ async def cmd_unban(message: types.Message):
                     pass
 
     if not target_id:
-        await message.reply("Ответь на сообщение юзера или укажи /unban <user_id> или @username")
+        if parts and len(parts) > 1 and parts[1].startswith("@"):
+            await message.reply(f"Я не знаю юзера {parts[1]} (нет в кэше). Пусть напишет что-то в чат, или укажи его числовой ID.")
+        else:
+            await message.reply("Ответь на сообщение юзера или укажи /unban <user_id> или @username")
         return
 
     await remove_banned_user_db(target_id)
@@ -257,7 +260,10 @@ async def cmd_ban(message: types.Message):
                     pass
 
     if not target_id:
-        await message.reply("Ответь на сообщение юзера или укажи /ban <user_id> или @username")
+        if parts and len(parts) > 1 and parts[1].startswith("@"):
+            await message.reply(f"Я не знаю юзера {parts[1]} (нет в кэше). Пусть напишет что-то в чат, или укажи его числовой ID.")
+        else:
+            await message.reply("Ответь на сообщение юзера или укажи /ban <user_id> или @username")
         return
 
     await add_banned_user_db(target_id)
