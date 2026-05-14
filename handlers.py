@@ -273,7 +273,7 @@ async def cmd_ban(message: types.Message):
 
 @router.message(Command("limit"))
 async def cmd_limit(message: types.Message):
-    if message.from_user.id not in ALLOWED_USER_IDS and message.from_user.id != OWNER_USER_ID:
+    if message.from_user.id != OWNER_USER_ID:
         return
 
     parts = (message.text or "").split()
@@ -880,6 +880,90 @@ async def handle_nsfw_cancel(callback: types.CallbackQuery):
         return
     _nsfw_awaiting_input.pop((d["chat_id"], d["user_id"]), None)
     await callback.answer("Отменено")
+    try:
+        await callback.message.edit_text(_nsfw_cfg_text(request_id), reply_markup=_nsfw_cfg_keyboard(request_id))
+    except Exception:
+        pass
+
+
+@router.message(F.reply_to_message & F.text)
+async def handle_nsfw_text_input(message: types.Message):
+    reply_to_id = message.reply_to_message.message_id if message.reply_to_message else None
+    if reply_to_id not in _nsfw_input_wait:
+        return
+    wait = _nsfw_input_wait.pop(reply_to_id)
+    if message.from_user.id != wait["user_id"]:
+        return
+
+    request_id = wait["request_id"]
+    field = wait["field"]
+    d = pending_nsfw_configs.get(request_id)
+    if not d:
+        return
+
+    new_val = message.text.strip()
+    if field == "prompt":
+        d["prompt"] = new_val
+    else:
+        d["cfg"]["neg"] = new_val
+
+    try:
+        await message.reply_to_message.delete()
+    except Exception:
+        pass
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    cfg_msg = await message.bot.send_message(
+        chat_id=d["chat_id"],
+        text=_nsfw_cfg_text(request_id),
+        reply_markup=_nsfw_cfg_keyboard(request_id),
+    )
+    d["cfg_msg_id"] = cfg_msg.message_id
+
+
+@router.callback_query(F.data == "noop")
+async def handle_noop(callback: types.CallbackQuery):
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("nsfwcfg:"))
+async def handle_nsfw_config(callback: types.CallbackQuery):
+    parts = callback.data.split(":", 3)
+    if len(parts) != 4:
+        await callback.answer()
+        return
+    _, request_id, field, value = parts
+    d = pending_nsfw_configs.get(request_id)
+    if not d:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != d["user_id"]:
+        await callback.answer("Только автор запроса.", show_alert=True)
+        return
+
+    if field == "steps":
+        d["cfg"]["steps"] = int(value)
+    elif field == "cfg":
+        d["cfg"]["cfg"] = float(value)
+    elif field == "size":
+        d["cfg"]["size"] = value
+    elif field == "scheduler":
+        d["cfg"]["scheduler"] = value
+    elif field == "clip_skip":
+        d["cfg"]["clip_skip"] = int(value)
+    elif field == "pag_scale":
+        d["cfg"]["pag_scale"] = float(value)
+    elif field == "rescale":
+        d["cfg"]["rescale"] = float(value)
+    elif field == "prepend":
+        d["cfg"]["prepend"] = value == "1"
+    elif field == "batch":
+        d["cfg"]["batch"] = int(value)
+
+    await callback.answer(f"✅ {field}: {value}")
     try:
         await callback.message.edit_text(_nsfw_cfg_text(request_id), reply_markup=_nsfw_cfg_keyboard(request_id))
     except Exception:
