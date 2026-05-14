@@ -273,7 +273,7 @@ async def cmd_ban(message: types.Message):
 
 @router.message(Command("limit"))
 async def cmd_limit(message: types.Message):
-    if message.from_user.id != OWNER_USER_ID:
+    if message.from_user.id not in ALLOWED_USER_IDS and message.from_user.id != OWNER_USER_ID:
         return
 
     parts = (message.text or "").split()
