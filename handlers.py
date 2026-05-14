@@ -10,7 +10,7 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache, daily_gen_limits, banned_user_ids
-from database import save_history, save_pending_gen, delete_pending_gen, add_user_stat, get_user_stats, add_banned_user_db, remove_banned_user_db
+from database import save_history, save_pending_gen, delete_pending_gen, add_user_stat, get_user_stats, add_banned_user_db, remove_banned_user_db, log_prompt, get_recent_prompts
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
 from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image, generate_image_prompt, generate_code_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate
@@ -337,6 +337,35 @@ async def handle_stats(callback: types.CallbackQuery):
     await callback.answer()
 
 
+@router.message(Command("prompts"))
+async def cmd_prompts(message: types.Message):
+    if message.from_user.id != OWNER_USER_ID:
+        return
+        
+    parts = (message.text or "").split()
+    user_id = None
+    if len(parts) > 1:
+        try:
+            user_id = int(parts[1])
+        except ValueError:
+            await message.reply("Укажи валидный ID юзера, например: /prompts 12345678")
+            return
+            
+    prompts = await get_recent_prompts(limit=15, user_id=user_id)
+    if not prompts:
+        await message.reply("Нет логов промптов.")
+        return
+        
+    lines = [f"📝 Последние {len(prompts)} промптов" + (f" от {user_id}" if user_id else "") + ":\n"]
+    for p in prompts:
+        import datetime
+        dt = datetime.datetime.fromtimestamp(p['created_at']).strftime('%H:%M:%S')
+        un = f"@{p['username']}" if p['username'] else f"{p['first_name']}"
+        lines.append(f"[{dt}] 👤 {un} ({p['user_id']}) - <b>{p['gen_type']}</b>:\n<pre>{p['prompt'][:300]}</pre>")
+        
+    text = "\n\n".join(lines)[:4000]
+    await message.reply(text, parse_mode="HTML")
+
 @router.message(Command("vip"))
 async def cmd_vip(message: types.Message):
     if message.from_user.id not in ALLOWED_USER_IDS and message.from_user.id != OWNER_USER_ID:
@@ -632,6 +661,13 @@ async def _send_generation_result(bot, request_data, request_id, result_img, err
             request_data.get("username", ""),
             request_data.get("first_name", "Аноним"),
             "image"
+        ))
+        asyncio.create_task(log_prompt(
+            request_data.get("user_id", 0),
+            request_data.get("username", ""),
+            request_data.get("first_name", "Аноним"),
+            "image",
+            request_data.get("prompt", "")
         ))
         return
     await bot.send_message(chat_id=request_data["chat_id"], text="❌ Не удалось получить изображение.",
@@ -1632,6 +1668,13 @@ async def handle_veo_model_select(callback: types.CallbackQuery):
             request_data.get("first_name", "Аноним"),
             "video"
         ))
+        asyncio.create_task(log_prompt(
+            request_data.get("user_id", 0),
+            request_data.get("username", ""),
+            request_data.get("first_name", "Аноним"),
+            "video",
+            request_data.get("prompt", "")
+        ))
         return
 
     await callback.bot.send_message(
@@ -1724,6 +1767,7 @@ async def handle_video(message: types.Message):
             )
             
     asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or "", message.from_user.first_name or "Аноним", "video"))
+    asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or "", message.from_user.first_name or "Аноним", "video", prompt))
 
 # Хэндлер на текстовые сообщения (реплаи и теги)
 def _track_user(message: types.Message):
@@ -1833,9 +1877,11 @@ async def handle_text_messages(message: types.Message):
         if is_code_request:
             text_response = await generate_code_with_gemini(prompt)
             asyncio.create_task(add_user_stat(message.from_user.id, username, message.from_user.first_name or "Аноним", "code"))
+            asyncio.create_task(log_prompt(message.from_user.id, username, message.from_user.first_name or "Аноним", "code", prompt))
         else:
             text_response = await generate_text_with_gemini(prompt, message.chat.id, username=username)
             asyncio.create_task(add_user_stat(message.from_user.id, username, message.from_user.first_name or "Аноним", "text"))
+            asyncio.create_task(log_prompt(message.from_user.id, username, message.from_user.first_name or "Аноним", "text", prompt))
 
         try:
             await thinking_msg.delete()
