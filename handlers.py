@@ -1915,14 +1915,38 @@ async def handle_tts_input(callback: types.CallbackQuery):
 
     await callback.answer()
     
-    field_names = {
-        "prompt": "текст",
-        "scene": "сцену (описание окружения)",
-        "style": "стиль (например: upbeat, energetic)",
-        "pace": "темп (например: fast, slow)",
-        "accent": "акцент (например: british, southern)"
+    field_prompts = {
+        "prompt": "✏️ Напиши **текст для озвучки** следующим сообщением:\n\n(просто отправь текст в чат)",
+        "scene": (
+            "🎭 Опиши **сцену (окружение)** следующим сообщением:\n\n"
+            "Это задаст общий вайб и акустику. Примеры:\n"
+            "🇷🇺 <i>Шумное кафе ранним утром, играет тихий джаз на фоне.</i>\n"
+            "🇬🇧 <i>A busy train station with echoing announcements.</i>\n\n"
+            "(отправь текст или нажми Отмена)"
+        ),
+        "style": (
+            "🎭 Опиши **стиль (настроение)** следующим сообщением:\n\n"
+            "Указывает эмоцию и характер речи. Примеры:\n"
+            "🇷🇺 <i>радостно, агрессивно, шепотом, уставший.</i>\n"
+            "🇬🇧 <i>energetic and upbeat, angry, whispering, tired.</i>\n\n"
+            "(отправь текст или нажми Отмена)"
+        ),
+        "pace": (
+            "🎭 Укажи **темп речи** следующим сообщением:\n\n"
+            "С какой скоростью говорить. Примеры:\n"
+            "🇷🇺 <i>очень быстро, медленно с длинными паузами, размеренно.</i>\n"
+            "🇬🇧 <i>very fast, slow with dramatic pauses, steady.</i>\n\n"
+            "(отправь текст или нажми Отмена)"
+        ),
+        "accent": (
+            "🎭 Укажи **акцент или манеру** следующим сообщением:\n\n"
+            "Примеры:\n"
+            "🇷🇺 <i>с британским акцентом, французский акцент, грубый голос.</i>\n"
+            "🇬🇧 <i>British accent, Southern US drawl, French accent.</i>\n\n"
+            "(отправь текст или нажми Отмена)"
+        )
     }
-    field_name = field_names.get(field, field)
+    prompt_text = field_prompts.get(field, f"✏️ Напиши {field} следующим сообщением:")
 
     _tts_awaiting_input[(d["chat_id"], d["user_id"])] = {
         "request_id": request_id,
@@ -1935,9 +1959,9 @@ async def handle_tts_input(callback: types.CallbackQuery):
     ]])
     try:
         await callback.message.edit_text(
-            f"✏️ Напиши {field_name} следующим сообщением:\n\n"
-            f"(просто отправь текст в чат)",
+            prompt_text,
             reply_markup=cancel_kb,
+            parse_mode="HTML"
         )
     except Exception:
         pass
