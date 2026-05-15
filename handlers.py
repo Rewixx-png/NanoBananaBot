@@ -1493,8 +1493,7 @@ async def handle_text_messages(message: types.Message):
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
     is_mentioned = bot_user.username and f'@{bot_user.username}' in message.text
     is_private = message.chat.type == 'private'
-    is_full_access = message.chat.id == FULL_ACCESS_CHAT_ID
-    if is_reply_to_bot or is_mentioned or is_private or is_full_access:
+    if is_reply_to_bot or is_mentioned or is_private:
         current_time = time.time()
         last_time = user_text_cooldowns.get(message.from_user.id, 0)
         if current_time - last_time < TEXT_COOLDOWN_SECONDS:
