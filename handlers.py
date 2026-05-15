@@ -9,7 +9,7 @@ from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
-from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache, daily_gen_limits, banned_user_ids, chat_custom_limits, pending_tts_requests, pending_tts_configs
+from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache, daily_gen_limits, banned_user_ids, chat_custom_limits, pending_tts_requests, pending_tts_configs, tts_voice_previews
 from database import save_history, save_pending_gen, delete_pending_gen, add_user_stat, get_user_stats, add_banned_user_db, remove_banned_user_db, log_prompt, get_recent_prompts
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
@@ -1828,6 +1828,7 @@ def _tts_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
     for i in range(0, 15, 3):
         rows.append(make_voice_row(TTS_VOICES[i:i+3]))
 
+    rows.append([InlineKeyboardButton(text="🔊 Прослушать голос", callback_data=f"ttsprev:{request_id}")])
     rows.append([InlineKeyboardButton(text="🚀 Генерировать", callback_data=f"ttsgen:{request_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1903,6 +1904,75 @@ async def handle_tts_config(callback: types.CallbackQuery):
         await callback.message.edit_text(_tts_cfg_text(request_id), reply_markup=_tts_cfg_keyboard(request_id))
     except Exception:
         pass
+
+
+@router.callback_query(F.data.startswith("ttsprev:"))
+async def handle_tts_preview(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        return
+    _, request_id = parts
+    d = pending_tts_configs.get(request_id)
+    if not d:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != d["user_id"]:
+        await callback.answer("Только автор.", show_alert=True)
+        return
+
+    voice = d["cfg"].get("voice", "Puck")
+    lang = d["cfg"].get("lang", "ru-RU")
+    temp = d["cfg"].get("temp", 1.0)
+    
+    # Check cache
+    cache_key = f"{voice}_{lang}_{temp}"
+    cached_file_id = tts_voice_previews.get(cache_key)
+
+    await callback.answer()
+    
+    reply_kwargs = {"message_thread_id": d.get("message_thread_id")} if d.get("message_thread_id") else {}
+
+    if cached_file_id:
+        await callback.bot.send_voice(
+            chat_id=d["chat_id"],
+            voice=cached_file_id,
+            caption=f"🔊 Проверка: {voice} ({lang})",
+            reply_to_message_id=d["source_message_id"],
+            **reply_kwargs
+        )
+        return
+
+    await callback.bot.send_chat_action(chat_id=d["chat_id"], action="record_voice", message_thread_id=d.get("message_thread_id"))
+
+    test_phrases = {
+        "ru-RU": "Привет! Это проверка моего голоса. Как меня слышно?",
+        "en-US": "Hello! This is a test of my voice. How do I sound?",
+        "ja-JP": "こんにちは！これは私の声のテストです。どう聞こえますか？"
+    }
+    phrase = test_phrases.get(lang, test_phrases["ru-RU"])
+
+    audio_bytes, error_msg = await generate_tts_with_gemini(phrase, d["model"], voice, temp, lang)
+
+    if error_msg:
+        await callback.bot.send_message(
+            chat_id=d["chat_id"],
+            text=f"❌ Ошибка предпрослушивания:\n{error_msg}",
+            reply_to_message_id=d["source_message_id"],
+            **reply_kwargs
+        )
+        return
+
+    if audio_bytes:
+        voice_file = BufferedInputFile(audio_bytes, filename="voice.ogg")
+        sent_msg = await callback.bot.send_voice(
+            chat_id=d["chat_id"],
+            voice=voice_file,
+            caption=f"🔊 Проверка: {voice} ({lang})",
+            reply_to_message_id=d["source_message_id"],
+            **reply_kwargs
+        )
+        if sent_msg.voice and sent_msg.voice.file_id:
+            tts_voice_previews[cache_key] = sent_msg.voice.file_id
 
 
 @router.callback_query(F.data.startswith("ttsgen:"))
