@@ -95,13 +95,12 @@ async def cmd_all(message: types.Message):
         return
         
     phrase = _random.choice(_ALL_PHRASES)
-    base_text = f"{phrase} ({len(targets)})"
     
-    target_chunks = [targets[i:i + 50] for i in range(0, len(targets), 50)]
+    target_chunks = [targets[i:i + 5] for i in range(0, len(targets), 5)]
     
     for t_chunk in target_chunks:
-        mentions = [f'<a href="tg://user?id={uid}">\u206c</a>' for uid in t_chunk]
-        text = base_text + "\n" + "".join(mentions)
+        mentions = [f'<a href="tg://user?id={uid}">\u200b</a>' for uid in t_chunk]
+        text = f"{phrase} ({len(t_chunk)})\n" + "\u200b".join(mentions) + "\u200d"
         await message.answer(text, parse_mode='HTML')
 
 @router.message(Command('unban'))
