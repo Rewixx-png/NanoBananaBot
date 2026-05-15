@@ -1184,16 +1184,33 @@ async def generate_image_with_replicate(
     return None, "Все Replicate ключи недоступны."
 
 
-async def generate_tts_with_gemini(text: str, model: str, voice_name: str, temperature: float = 1.0, language_code: str = "ru-RU") -> Tuple[Optional[bytes], Optional[str]]:
+async def generate_tts_with_gemini(
+    text: str, model: str, voice_name: str, temperature: float = 1.0, language_code: str = "ru-RU",
+    scene: str = "", style: str = "", pace: str = "", accent: str = ""
+) -> Tuple[Optional[bytes], Optional[str]]:
     import wave
     import io
     keys = load_keys()
     if not keys:
         return None, "Нет ключей Gemini."
     
+    full_text = ""
+    has_advanced = scene or style or pace or accent
+    if has_advanced:
+        full_text += f"# AUDIO PROFILE: {voice_name}\n"
+        if scene:
+            full_text += f"## THE SCENE: {scene}\n"
+        if style or pace or accent:
+            full_text += "### DIRECTOR'S NOTES\n"
+            if style: full_text += f"Style: {style}\n"
+            if pace: full_text += f"Pace: {pace}\n"
+            if accent: full_text += f"Accent: {accent}\n"
+        full_text += "\n#### TRANSCRIPT\n"
+    full_text += text
+
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={keys[0]}"
     payload = {
-        "contents": [{"parts": [{"text": text}]}],
+        "contents": [{"parts": [{"text": full_text}]}],
         "generationConfig": {
             "temperature": temperature,
             "responseModalities": ["AUDIO"],

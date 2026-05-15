@@ -1793,12 +1793,25 @@ def _tts_cfg_text(request_id: str) -> str:
     cfg = d.get("cfg", {})
     prompt = d.get("prompt", "")[:100]
     label = d.get("label", "TTS")
+    
+    scene = cfg.get("scene", "")[:50]
+    style = cfg.get("style", "")[:50]
+    pace = cfg.get("pace", "")[:50]
+    accent = cfg.get("accent", "")[:50]
+
+    extra = ""
+    if scene: extra += f"\n🎭 Сцена: \"{scene}...\""
+    if style: extra += f"\n🎭 Стиль: \"{style}...\""
+    if pace: extra += f"\n🎭 Темп: \"{pace}...\""
+    if accent: extra += f"\n🎭 Акцент: \"{accent}...\""
+
     return (
         f"🎙️ {label}\n\n"
         f"📝 Текст:\n\"{prompt}\"\n\n"
         f"Голос: {cfg.get('voice', 'Puck')}\n"
         f"Температура: {cfg.get('temp', 1.0)}\n"
         f"Язык: {cfg.get('lang', 'ru-RU')}"
+        f"{extra}"
     )
 
 _TTS_LANGS = [("🇷🇺 RU", "ru-RU"), ("🇬🇧 EN", "en-US"), ("🇯🇵 JA", "ja-JP")]
@@ -1816,6 +1829,16 @@ def _tts_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
 
     rows = []
     
+    rows.append([
+        InlineKeyboardButton(text="✏️ Текст", callback_data=f"ttsinput:{request_id}:prompt"),
+        InlineKeyboardButton(text="🎭 Сцена", callback_data=f"ttsinput:{request_id}:scene"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="🎭 Стиль", callback_data=f"ttsinput:{request_id}:style"),
+        InlineKeyboardButton(text="🎭 Темп", callback_data=f"ttsinput:{request_id}:pace"),
+        InlineKeyboardButton(text="🎭 Акцент", callback_data=f"ttsinput:{request_id}:accent"),
+    ])
+
     rows.append([InlineKeyboardButton(text="— Температура —", callback_data="noop")])
     rows.append([InlineKeyboardButton(text=f"{'✅' if str(t)==str(cur_temp) else ''}{t}", callback_data=f"ttscfg:{request_id}:temp:{t}") for t in _TTS_TEMPS])
     
@@ -1871,6 +1894,73 @@ async def handle_tts_model_select(callback: types.CallbackQuery):
     }
     
     await callback.answer()
+    try:
+        await callback.message.edit_text(_tts_cfg_text(request_id), reply_markup=_tts_cfg_keyboard(request_id))
+    except Exception:
+        pass
+
+
+_tts_awaiting_input: dict = {}
+
+@router.callback_query(F.data.startswith("ttsinput:"))
+async def handle_tts_input(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        return
+    _, request_id, field = parts
+    d = pending_tts_configs.get(request_id)
+    if not d:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != d["user_id"]:
+        await callback.answer("Только автор запроса.", show_alert=True)
+        return
+
+    await callback.answer()
+    
+    field_names = {
+        "prompt": "текст",
+        "scene": "сцену (описание окружения)",
+        "style": "стиль (например: upbeat, energetic)",
+        "pace": "темп (например: fast, slow)",
+        "accent": "акцент (например: british, southern)"
+    }
+    field_name = field_names.get(field, field)
+
+    _tts_awaiting_input[(d["chat_id"], d["user_id"])] = {
+        "request_id": request_id,
+        "field": field,
+        "msg_id": callback.message.message_id,
+    }
+
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"ttscancel:{request_id}")
+    ]])
+    try:
+        await callback.message.edit_text(
+            f"✏️ Напиши {field_name} следующим сообщением:\n\n"
+            f"(просто отправь текст в чат)",
+            reply_markup=cancel_kb,
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("ttscancel:"))
+async def handle_tts_cancel(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        return
+    _, request_id = parts
+    d = pending_tts_configs.get(request_id)
+    if not d:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != d["user_id"]:
+        await callback.answer("Только автор.", show_alert=True)
+        return
+    _tts_awaiting_input.pop((d["chat_id"], d["user_id"]), None)
+    await callback.answer("Отменено")
     try:
         await callback.message.edit_text(_tts_cfg_text(request_id), reply_markup=_tts_cfg_keyboard(request_id))
     except Exception:
@@ -2049,7 +2139,39 @@ async def handle_video(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
         return
-        
+
+    _tts_key = (message.chat.id, message.from_user.id)
+    if _tts_key in _tts_awaiting_input:
+        wait = _tts_awaiting_input.pop(_tts_key)
+        request_id = wait["request_id"]
+        field = wait["field"]
+        msg_id = wait["msg_id"]
+        d = pending_tts_configs.get(request_id)
+        if d:
+            new_val = message.text.strip()
+            if field == "prompt":
+                d["prompt"] = new_val
+            elif field in ("scene", "style", "pace", "accent"):
+                d["cfg"][field] = new_val
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=msg_id,
+                    text=_tts_cfg_text(request_id),
+                    reply_markup=_tts_cfg_keyboard(request_id),
+                )
+            except Exception:
+                await message.bot.send_message(
+                    chat_id=d["chat_id"],
+                    text=_tts_cfg_text(request_id),
+                    reply_markup=_tts_cfg_keyboard(request_id),
+                )
+        return
+
     bot_user = await message.bot.get_me()
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
     is_mentioned = bot_user.username and message.caption and f"@{bot_user.username}" in message.caption
