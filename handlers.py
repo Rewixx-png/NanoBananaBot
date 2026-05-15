@@ -96,27 +96,29 @@ async def cmd_all(message: types.Message):
         await message.reply('Никого не знаю ещё.')
         return
     bot_user = await message.bot.get_me()
-    mentions = []
-    for (user_id, (first_name, username)) in members.items():
-        if user_id == bot_user.id or user_id == uid:
-            continue
-        import html as _html
-        name = f"@{username}" if username else first_name
-        safe_name = _html.escape(name)
-        mentions.append(f'<a href="tg://user?id={user_id}">{safe_name}</a>')
-    if not mentions:
+    targets = [u for u in members.keys() if u != bot_user.id and u != uid]
+    
+    if not targets:
         await message.reply('Не на кого тегать, все и так тут.')
         return
+        
     phrase = _random.choice(_ALL_PHRASES)
+    base_text = f"{phrase} ({len(targets)})"
+    
     chunks = []
-    chunk = phrase + '\n'
-    for m in mentions:
-        if len(chunk) + len(m) + 1 > 4000:
-            chunks.append(chunk)
-            chunk = ''
-        chunk += m + ' '
-    if chunk.strip():
-        chunks.append(chunk)
+    current_chunk = base_text + "\n"
+    
+    for user_id in targets:
+        mention = f'<a href="tg://user?id={user_id}">\u200b</a>'
+        if len(current_chunk) + len(mention) > 4000:
+            chunks.append(current_chunk)
+            current_chunk = mention
+        else:
+            current_chunk += mention
+            
+    if current_chunk.strip():
+        chunks.append(current_chunk)
+        
     for ch in chunks:
         await message.answer(ch, parse_mode='HTML')
 
