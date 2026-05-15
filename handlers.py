@@ -96,7 +96,7 @@ async def cmd_all(message: types.Message):
         await message.reply('Никого не знаю ещё.')
         return
     bot_user = await message.bot.get_me()
-    targets = [u for u in members.keys() if u != bot_user.id and u != uid]
+    targets = [u for u in members.keys() if u != bot_user.id]
     
     if not targets:
         await message.reply('Не на кого тегать, все и так тут.')
