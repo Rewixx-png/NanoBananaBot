@@ -105,22 +105,21 @@ async def cmd_all(message: types.Message):
     phrase = _random.choice(_ALL_PHRASES)
     base_text = f"{phrase} ({len(targets)})"
     
-    chunks = []
-    current_chunk = base_text + "\n"
+    target_chunks = [targets[i:i + 50] for i in range(0, len(targets), 50)]
     
-    for user_id in targets:
-        mention = f'<a href="tg://user?id={user_id}">\u200b</a>'
-        if len(current_chunk) + len(mention) > 4000:
-            chunks.append(current_chunk + '\u200d')
-            current_chunk = mention
-        else:
-            current_chunk += mention
-            
-    if current_chunk.strip():
-        chunks.append(current_chunk + '\u200d')
-        
-    for ch in chunks:
-        await message.answer(ch, parse_mode='HTML')
+    for t_chunk in target_chunks:
+        text = base_text + "\n" + ("\u206c" * len(t_chunk))
+        entities = []
+        offset = len(base_text) + 1
+        for user_id in t_chunk:
+            entities.append(types.MessageEntity(
+                type="text_mention",
+                offset=offset,
+                length=1,
+                user=types.User(id=user_id, is_bot=False, first_name="User")
+            ))
+            offset += 1
+        await message.answer(text, entities=entities)
 
 @router.message(Command('unban'))
 async def cmd_unban(message: types.Message):
