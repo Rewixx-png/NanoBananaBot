@@ -67,20 +67,12 @@ async def cmd_clear(message: types.Message):
     await message.reply('Окей, я забыл всю хуйню, которую мы тут обсуждали. Начинаем с чистого листа.')
 import random as _random
 _ALL_PHRASES = ['Эй вы, уроды, все сюда нахуй! 👇', 'Хуиданте сюда все, живо! 🔔', 'Ау, дебилы, слышите? Все сюда! 📢', 'Все ко мне, быстро, я сказал! 🗣️', 'Ну-ка все собрались, чего расползлись! 👊', 'Стоять всем! Сюда смотреть! 👁️', 'Эй ты, и ты, и ты тоже — все на месте! ⚡']
-_all_cooldowns: dict = {}
-
 @router.message(Command('all'))
 async def cmd_all(message: types.Message):
     if message.chat.type == 'private':
         await message.reply('В личке некого созывать, дурик.')
         return
     uid = message.from_user.id
-    now = time.time()
-    if now - _all_cooldowns.get((message.chat.id, uid), 0) < 300:
-        remaining = int(300 - (now - _all_cooldowns.get((message.chat.id, uid), 0)))
-        await message.reply(f'Не спамь созывом, подожди ещё {remaining} сек.')
-        return
-    _all_cooldowns[message.chat.id, uid] = now
     try:
         admins = await message.bot.get_chat_administrators(message.chat.id)
         if message.chat.id not in chat_members_cache:
