@@ -13,6 +13,9 @@ paid_unlimited_until = {}
 pending_prompt_requests = {}
 pending_nsfw_configs = {}
 
+pending_tts_requests = {}
+pending_tts_configs = {}
+
 chat_members_cache: dict = {}
 
 daily_gen_limits: dict = {}

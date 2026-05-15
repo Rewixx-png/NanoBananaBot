@@ -9,11 +9,11 @@ from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
-from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache, daily_gen_limits, banned_user_ids, chat_custom_limits
+from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache, daily_gen_limits, banned_user_ids, chat_custom_limits, pending_tts_requests, pending_tts_configs
 from database import save_history, save_pending_gen, delete_pending_gen, add_user_stat, get_user_stats, add_banned_user_db, remove_banned_user_db, log_prompt, get_recent_prompts
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned
-from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image, generate_image_prompt, generate_code_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate
+from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image, generate_image_prompt, generate_code_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate, fetch_gemini_tts_models, generate_tts_with_gemini
 from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID, DAILY_GEN_LIMIT, PAYMENT_USERNAME, CHAT_ID
 import logging
 
@@ -1238,6 +1238,10 @@ MODEL_TO_REAL: dict = {
 }
 
 
+TTS_MODELS: dict = {
+    "tts0": ("Gemini Flash TTS Preview", "gemini-3.1-flash-tts-preview"),
+}
+
 async def refresh_models():
     gemini_models = await fetch_gemini_image_models()
     if gemini_models:
@@ -1256,10 +1260,16 @@ async def refresh_models():
         for i, (label, model_id) in enumerate(veo_models):
             VEO_MODELS[f"veo{i}"] = (label, model_id)
 
+    tts_models = await fetch_gemini_tts_models()
+    if tts_models:
+        for i, (label, model_id) in enumerate(tts_models):
+            TTS_MODELS[f"tts{i}"] = (label, model_id)
+
     logger.info(
         f"Models refreshed: Gemini={len(PROVIDER_MODELS['gemini'])} "
         f"GPT={len(PROVIDER_MODELS['gpt'])} "
-        f"Veo={len(VEO_MODELS)}"
+        f"Veo={len(VEO_MODELS)} "
+        f"TTS={len(TTS_MODELS)}"
     )
 
 
@@ -1718,6 +1728,225 @@ async def handle_veo_model_select(callback: types.CallbackQuery):
         reply_to_message_id=request_data["source_message_id"],
         **reply_kwargs
     )
+
+# TTS Handler
+TTS_VOICES = [
+    "Puck", "Charon", "Kore", "Fenrir", "Leda", 
+    "Orus", "Aoede", "Callirrhoe", "Autonoe", "Enceladus", 
+    "Iapetus", "Umbriel", "Algieba", "Despina", "Erinome", 
+    "Algenib", "Rasalgethi", "Laomedeia", "Achernar", "Alnilam", 
+    "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi", 
+    "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat"
+]
+
+@router.message(Command("tts"))
+async def cmd_tts(message: types.Message):
+    _track_user(message)
+    is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
+    if not is_member and message.chat.type != "private":
+        await message.reply("Доступ запрещен.")
+        return
+
+    # Check limits if needed (currently using video cooldowns for simplicity)
+    current_time = time.time()
+    last_time = user_video_cooldowns.get(message.from_user.id, 0)
+    if current_time - last_time < 30:
+        await message.reply(f"Подожди еще {int(30 - (current_time - last_time))} сек.")
+        return
+    user_video_cooldowns[message.from_user.id] = current_time
+
+    prompt = (message.text or "").replace("/tts", "").strip()
+    if not prompt:
+        await message.reply("Напиши текст после команды, например:\n/tts Привет, ублюдок!")
+        return
+
+    request_id = uuid.uuid4().hex[:10]
+    thread_id = message.message_thread_id if message.chat.is_forum else None
+
+    pending_tts_requests[request_id] = {
+        "user_id": message.from_user.id,
+        "chat_id": message.chat.id,
+        "source_message_id": message.message_id,
+        "message_thread_id": thread_id,
+        "prompt": prompt,
+        "username": message.from_user.username or "",
+        "first_name": message.from_user.first_name or "Аноним",
+    }
+
+    if not TTS_MODELS:
+        await message.reply("Нет доступных TTS моделей.")
+        return
+
+    rows = [[InlineKeyboardButton(text=label, callback_data=f"ttssel:{request_id}:{mid}")]
+            for mid, (label, _) in TTS_MODELS.items()]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+
+    reply_kwargs = {}
+    if message.chat.is_forum and thread_id:
+        reply_kwargs["message_thread_id"] = thread_id
+
+    await message.reply("Выберите модель TTS:", reply_markup=keyboard, **reply_kwargs)
+
+
+def _tts_cfg_text(request_id: str) -> str:
+    d = pending_tts_configs.get(request_id, {})
+    cfg = d.get("cfg", {})
+    prompt = d.get("prompt", "")[:100]
+    label = d.get("label", "TTS")
+    return (
+        f"🎙️ {label}\n\n"
+        f"📝 Текст:\n\"{prompt}\"\n\n"
+        f"Голос: {cfg.get('voice', 'Puck')}"
+    )
+
+def _tts_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    d = pending_tts_configs.get(request_id, {})
+    cfg = d.get("cfg", {})
+    cur_voice = cfg.get("voice", "Puck")
+
+    def make_voice_row(voices):
+        return [InlineKeyboardButton(text=f"{'✅' if v==cur_voice else ''}{v}", callback_data=f"ttscfg:{request_id}:voice:{v}") for v in voices]
+
+    rows = []
+    rows.append([InlineKeyboardButton(text="— Голос —", callback_data="noop")])
+    
+    # 3 voices per row for brevity, show only first 15 to fit
+    for i in range(0, 15, 3):
+        rows.append(make_voice_row(TTS_VOICES[i:i+3]))
+
+    rows.append([InlineKeyboardButton(text="🚀 Генерировать", callback_data=f"ttsgen:{request_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("ttssel:"))
+async def handle_tts_model_select(callback: types.CallbackQuery):
+    if not callback.data:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    _, request_id, model_id = parts
+    request_data = pending_tts_requests.get(request_id)
+
+    if not request_data:
+        await callback.answer("Запрос устарел. Отправьте /tts заново.", show_alert=True)
+        return
+
+    if callback.from_user.id != request_data["user_id"]:
+        await callback.answer("Только автор запроса.", show_alert=True)
+        return
+
+    model_info = TTS_MODELS.get(model_id)
+    if not model_info:
+        await callback.answer("Неизвестная модель.", show_alert=True)
+        return
+
+    model_label, real_model = model_info
+    pending_tts_requests.pop(request_id, None)
+
+    pending_tts_configs[request_id] = {
+        **request_data,
+        "model": real_model,
+        "label": model_label,
+        "cfg": {"voice": "Puck"}
+    }
+    
+    await callback.answer()
+    try:
+        await callback.message.edit_text(_tts_cfg_text(request_id), reply_markup=_tts_cfg_keyboard(request_id))
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("ttscfg:"))
+async def handle_tts_config(callback: types.CallbackQuery):
+    parts = callback.data.split(":", 3)
+    if len(parts) != 4:
+        await callback.answer()
+        return
+    _, request_id, field, value = parts
+    d = pending_tts_configs.get(request_id)
+    if not d:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != d["user_id"]:
+        await callback.answer("Только автор запроса.", show_alert=True)
+        return
+
+    if field == "voice":
+        d["cfg"]["voice"] = value
+
+    await callback.answer()
+    try:
+        await callback.message.edit_text(_tts_cfg_text(request_id), reply_markup=_tts_cfg_keyboard(request_id))
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("ttsgen:"))
+async def handle_tts_generate(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        return
+    _, request_id = parts
+    d = pending_tts_configs.pop(request_id, None)
+    if not d:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    if callback.from_user.id != d["user_id"]:
+        await callback.answer("Только автор.", show_alert=True)
+        return
+
+    await callback.answer()
+    
+    reply_kwargs = {"message_thread_id": d.get("message_thread_id")} if d.get("message_thread_id") else {}
+    
+    try:
+        await callback.message.edit_text(f"⏳ Генерирую аудио через {d['label']}...")
+    except Exception:
+        pass
+
+    await callback.bot.send_chat_action(chat_id=d["chat_id"], action="record_voice", message_thread_id=d.get("message_thread_id"))
+
+    wav_bytes, error_msg = await generate_tts_with_gemini(d["prompt"], d["model"], d["cfg"].get("voice", "Puck"))
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    if error_msg:
+        await callback.bot.send_message(
+            chat_id=d["chat_id"],
+            text=f"❌ Ошибка генерации аудио:\n{error_msg}",
+            reply_to_message_id=d["source_message_id"],
+            **reply_kwargs
+        )
+        return
+
+    if wav_bytes:
+        voice_file = BufferedInputFile(wav_bytes, filename="voice.wav")
+        await callback.bot.send_voice(
+            chat_id=d["chat_id"],
+            voice=voice_file,
+            caption=f"🎙️ {d['label']} | Голос: {d['cfg'].get('voice', 'Puck')}",
+            reply_to_message_id=d["source_message_id"],
+            **reply_kwargs
+        )
+        asyncio.create_task(add_user_stat(d["user_id"], d.get("username", ""), d.get("first_name", "Аноним"), "audio"))
+        asyncio.create_task(log_prompt(d["user_id"], d.get("username", ""), d.get("first_name", "Аноним"), "audio", d["prompt"]))
+    else:
+        await callback.bot.send_message(
+            chat_id=d["chat_id"],
+            text="❌ Не удалось получить аудио.",
+            reply_to_message_id=d["source_message_id"],
+            **reply_kwargs
+        )
+
 
 # Хэндлер на видео сообщения
 @router.message(F.video | F.animation | F.document)
