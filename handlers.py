@@ -109,15 +109,15 @@ async def cmd_all(message: types.Message):
     current_chunk = base_text + "\n"
     
     for user_id in targets:
-        mention = f'<a href="tg://user?id={user_id}">\u206c</a>'
+        mention = f'<a href="tg://user?id={user_id}">\u200b</a>'
         if len(current_chunk) + len(mention) > 4000:
-            chunks.append(current_chunk)
+            chunks.append(current_chunk + '\u200d')
             current_chunk = mention
         else:
             current_chunk += mention
             
     if current_chunk.strip():
-        chunks.append(current_chunk)
+        chunks.append(current_chunk + '\u200d')
         
     for ch in chunks:
         await message.answer(ch, parse_mode='HTML')
