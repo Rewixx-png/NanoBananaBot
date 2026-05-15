@@ -749,7 +749,7 @@ async def generate_image_with_replicate(prompt: str, model: str='aisha-ai-offici
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.post('https://api.replicate.com/v1/predictions', json={'version': version, 'input': model_input}, headers=headers, timeout=aiohttp.ClientTimeout(total=90)) as resp:
-                    if resp.status not in (200, 201):
+                    if resp.status not in (200, 201, 202):
                         err = await resp.text()
                         logging.warning(f'Replicate create {resp.status}: {err[:150]}')
                         if resp.status in (401, 403):
@@ -856,5 +856,7 @@ async def generate_tts_with_gemini(text: str, model: str, voice_name: str, tempe
         except asyncio.TimeoutError:
             return (None, 'Сетевая ошибка: Таймаут (API долго думало, попробуй текст поменьше)')
         except Exception as e:
-            return (None, f'Сетевая ошибка: {e}')
+            import traceback
+            logging.error(f"TTS Error: {traceback.format_exc()}")
+            return (None, f'Сетевая ошибка: {type(e).__name__} {e}')
     return (None, 'Все модели недоступны.')
