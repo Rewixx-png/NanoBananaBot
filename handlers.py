@@ -100,10 +100,10 @@ async def cmd_all(message: types.Message):
     for (user_id, (first_name, username)) in members.items():
         if user_id == bot_user.id or user_id == uid:
             continue
-        if username:
-            mentions.append(f'@{username}')
-        else:
-            mentions.append(f'<a href="tg://user?id={user_id}">{first_name}</a>')
+        import html as _html
+        name = f"@{username}" if username else first_name
+        safe_name = _html.escape(name)
+        mentions.append(f'<a href="tg://user?id={user_id}">{safe_name}</a>')
     if not mentions:
         await message.reply('Не на кого тегать, все и так тут.')
         return
