@@ -1228,7 +1228,7 @@ async def generate_tts_with_gemini(
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(
-                url, json=payload, headers={"Content-Type": "application/json"}, timeout=aiohttp.ClientTimeout(total=60)
+                url, json=payload, headers={"Content-Type": "application/json"}, timeout=aiohttp.ClientTimeout(total=300)
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -1276,6 +1276,8 @@ async def generate_tts_with_gemini(
                 else:
                     err = await resp.text()
                     return None, f"Ошибка Gemini TTS ({resp.status}): {err[:150]}"
+        except asyncio.TimeoutError:
+            return None, "Сетевая ошибка: Таймаут (API долго думало, попробуй текст поменьше)"
         except Exception as e:
             return None, f"Сетевая ошибка: {e}"
     
