@@ -2139,47 +2139,6 @@ async def handle_video(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
         return
-
-    _tts_key = (message.chat.id, message.from_user.id)
-    if _tts_key in _tts_awaiting_input:
-        wait = _tts_awaiting_input.pop(_tts_key)
-        request_id = wait["request_id"]
-        field = wait["field"]
-        msg_id = wait["msg_id"]
-        d = pending_tts_configs.get(request_id)
-        if d:
-            new_val = message.text.strip()
-            if field == "prompt":
-                d["prompt"] = new_val
-            elif field in ("scene", "style", "pace", "accent"):
-                d["cfg"][field] = new_val
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            try:
-                await message.bot.edit_message_text(
-                    chat_id=message.chat.id,
-                    message_id=msg_id,
-                    text=_tts_cfg_text(request_id),
-                    reply_markup=_tts_cfg_keyboard(request_id),
-                )
-            except Exception:
-                await message.bot.send_message(
-                    chat_id=d["chat_id"],
-                    text=_tts_cfg_text(request_id),
-                    reply_markup=_tts_cfg_keyboard(request_id),
-                )
-        return
-
-    bot_user = await message.bot.get_me()
-    is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
-    is_mentioned = bot_user.username and message.caption and f"@{bot_user.username}" in message.caption
-    is_private = message.chat.type == "private"
-    
-    # Только если обратились к боту
-    if not (is_reply_to_bot or is_mentioned or is_private):
-        return
         
     vid = message.video or message.animation
     if not vid and message.document:
@@ -2305,6 +2264,38 @@ async def handle_text_messages(message: types.Message):
                     chat_id=d["chat_id"],
                     text=_nsfw_cfg_text(request_id),
                     reply_markup=_nsfw_cfg_keyboard(request_id),
+                )
+        return
+
+    _tts_key = (message.chat.id, message.from_user.id)
+    if _tts_key in _tts_awaiting_input:
+        wait = _tts_awaiting_input.pop(_tts_key)
+        request_id = wait["request_id"]
+        field = wait["field"]
+        msg_id = wait["msg_id"]
+        d = pending_tts_configs.get(request_id)
+        if d:
+            new_val = message.text.strip()
+            if field == "prompt":
+                d["prompt"] = new_val
+            elif field in ("scene", "style", "pace", "accent"):
+                d["cfg"][field] = new_val
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=msg_id,
+                    text=_tts_cfg_text(request_id),
+                    reply_markup=_tts_cfg_keyboard(request_id),
+                )
+            except Exception:
+                await message.bot.send_message(
+                    chat_id=d["chat_id"],
+                    text=_tts_cfg_text(request_id),
+                    reply_markup=_tts_cfg_keyboard(request_id),
                 )
         return
 
