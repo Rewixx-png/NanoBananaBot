@@ -94,11 +94,10 @@ async def cmd_all(message: types.Message):
         await message.reply('Не на кого тегать, все и так тут.')
         return
         
-    phrase = _random.choice(_ALL_PHRASES)
-    
     target_chunks = [targets[i:i + 5] for i in range(0, len(targets), 5)]
     
     for t_chunk in target_chunks:
+        phrase = _random.choice(_ALL_PHRASES)
         mentions = [f'<a href="tg://user?id={uid}">\u200b</a>' for uid in t_chunk]
         text = f"{phrase} ({len(t_chunk)})\n" + "\u200b".join(mentions) + "\u200d"
         await message.answer(text, parse_mode='HTML')
@@ -1494,7 +1493,8 @@ async def handle_text_messages(message: types.Message):
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
     is_mentioned = bot_user.username and f'@{bot_user.username}' in message.text
     is_private = message.chat.type == 'private'
-    if is_reply_to_bot or is_mentioned or is_private:
+    is_full_access = message.chat.id == FULL_ACCESS_CHAT_ID
+    if is_reply_to_bot or is_mentioned or is_private or is_full_access:
         current_time = time.time()
         last_time = user_text_cooldowns.get(message.from_user.id, 0)
         if current_time - last_time < TEXT_COOLDOWN_SECONDS:
