@@ -1796,18 +1796,32 @@ def _tts_cfg_text(request_id: str) -> str:
     return (
         f"🎙️ {label}\n\n"
         f"📝 Текст:\n\"{prompt}\"\n\n"
-        f"Голос: {cfg.get('voice', 'Puck')}"
+        f"Голос: {cfg.get('voice', 'Puck')}\n"
+        f"Температура: {cfg.get('temp', 1.0)}\n"
+        f"Язык: {cfg.get('lang', 'ru-RU')}"
     )
+
+_TTS_LANGS = [("🇷🇺 RU", "ru-RU"), ("🇬🇧 EN", "en-US"), ("🇯🇵 JA", "ja-JP")]
+_TTS_TEMPS = [0.1, 0.5, 1.0, 1.5, 2.0]
 
 def _tts_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
     d = pending_tts_configs.get(request_id, {})
     cfg = d.get("cfg", {})
     cur_voice = cfg.get("voice", "Puck")
+    cur_temp = cfg.get("temp", 1.0)
+    cur_lang = cfg.get("lang", "ru-RU")
 
     def make_voice_row(voices):
         return [InlineKeyboardButton(text=f"{'✅' if v==cur_voice else ''}{v}", callback_data=f"ttscfg:{request_id}:voice:{v}") for v in voices]
 
     rows = []
+    
+    rows.append([InlineKeyboardButton(text="— Температура —", callback_data="noop")])
+    rows.append([InlineKeyboardButton(text=f"{'✅' if str(t)==str(cur_temp) else ''}{t}", callback_data=f"ttscfg:{request_id}:temp:{t}") for t in _TTS_TEMPS])
+    
+    rows.append([InlineKeyboardButton(text="— Язык —", callback_data="noop")])
+    rows.append([InlineKeyboardButton(text=f"{'✅' if l==cur_lang else ''}{name}", callback_data=f"ttscfg:{request_id}:lang:{l}") for name, l in _TTS_LANGS])
+
     rows.append([InlineKeyboardButton(text="— Голос —", callback_data="noop")])
     
     # 3 voices per row for brevity, show only first 15 to fit
@@ -1879,6 +1893,10 @@ async def handle_tts_config(callback: types.CallbackQuery):
 
     if field == "voice":
         d["cfg"]["voice"] = value
+    elif field == "temp":
+        d["cfg"]["temp"] = float(value)
+    elif field == "lang":
+        d["cfg"]["lang"] = value
 
     await callback.answer()
     try:
@@ -1912,7 +1930,14 @@ async def handle_tts_generate(callback: types.CallbackQuery):
 
     await callback.bot.send_chat_action(chat_id=d["chat_id"], action="record_voice", message_thread_id=d.get("message_thread_id"))
 
-    wav_bytes, error_msg = await generate_tts_with_gemini(d["prompt"], d["model"], d["cfg"].get("voice", "Puck"))
+    cfg = d.get("cfg", {})
+    audio_bytes, error_msg = await generate_tts_with_gemini(
+        d["prompt"], 
+        d["model"], 
+        cfg.get("voice", "Puck"), 
+        cfg.get("temp", 1.0), 
+        cfg.get("lang", "ru-RU")
+    )
 
     try:
         await callback.message.delete()
@@ -1928,8 +1953,8 @@ async def handle_tts_generate(callback: types.CallbackQuery):
         )
         return
 
-    if wav_bytes:
-        voice_file = BufferedInputFile(wav_bytes, filename="voice.wav")
+    if audio_bytes:
+        voice_file = BufferedInputFile(audio_bytes, filename="voice.ogg")
         await callback.bot.send_voice(
             chat_id=d["chat_id"],
             voice=voice_file,

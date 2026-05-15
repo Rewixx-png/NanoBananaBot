@@ -1184,7 +1184,7 @@ async def generate_image_with_replicate(
     return None, "Все Replicate ключи недоступны."
 
 
-async def generate_tts_with_gemini(text: str, model: str, voice_name: str) -> Tuple[Optional[bytes], Optional[str]]:
+async def generate_tts_with_gemini(text: str, model: str, voice_name: str, temperature: float = 1.0, language_code: str = "ru-RU") -> Tuple[Optional[bytes], Optional[str]]:
     import wave
     import io
     keys = load_keys()
@@ -1195,8 +1195,10 @@ async def generate_tts_with_gemini(text: str, model: str, voice_name: str) -> Tu
     payload = {
         "contents": [{"parts": [{"text": text}]}],
         "generationConfig": {
+            "temperature": temperature,
             "responseModalities": ["AUDIO"],
             "speechConfig": {
+                "languageCode": language_code,
                 "voiceConfig": {
                     "prebuiltVoiceConfig": {
                         "voiceName": voice_name
@@ -1220,6 +1222,32 @@ async def generate_tts_with_gemini(text: str, model: str, voice_name: str) -> Tu
                             b64_data = part["inlineData"]["data"]
                             pcm_data = base64.b64decode(b64_data)
                             
+                            import tempfile
+                            import subprocess
+                            import os
+                            
+                            fd, temp_wav = tempfile.mkstemp(suffix=".wav")
+                            os.close(fd)
+                            with wave.open(temp_wav, 'wb') as wav_file:
+                                wav_file.setnchannels(1)
+                                wav_file.setsampwidth(2)
+                                wav_file.setframerate(24000)
+                                wav_file.writeframes(pcm_data)
+                                
+                            temp_ogg = temp_wav.replace(".wav", ".ogg")
+                            subprocess.run(["ffmpeg", "-i", temp_wav, "-c:a", "libopus", "-b:a", "48k", "-y", temp_ogg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            
+                            ogg_data = None
+                            if os.path.exists(temp_ogg):
+                                with open(temp_ogg, "rb") as f:
+                                    ogg_data = f.read()
+                                os.remove(temp_ogg)
+                            os.remove(temp_wav)
+                            
+                            if ogg_data:
+                                return ogg_data, None
+                            
+                            # Fallback if ffmpeg fails
                             wav_io = io.BytesIO()
                             with wave.open(wav_io, 'wb') as wav_file:
                                 wav_file.setnchannels(1)
