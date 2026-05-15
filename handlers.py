@@ -559,34 +559,6 @@ async def handle_nsfw_cancel(callback: types.CallbackQuery):
     except Exception:
         pass
 
-@router.message(F.reply_to_message & F.text)
-async def handle_nsfw_text_input(message: types.Message):
-    reply_to_id = message.reply_to_message.message_id if message.reply_to_message else None
-    if reply_to_id not in _nsfw_input_wait:
-        return
-    wait = _nsfw_input_wait.pop(reply_to_id)
-    if message.from_user.id != wait['user_id']:
-        return
-    request_id = wait['request_id']
-    field = wait['field']
-    d = pending_nsfw_configs.get(request_id)
-    if not d:
-        return
-    new_val = message.text.strip()
-    if field == 'prompt':
-        d['prompt'] = new_val
-    else:
-        d['cfg']['neg'] = new_val
-    try:
-        await message.reply_to_message.delete()
-    except Exception:
-        pass
-    try:
-        await message.delete()
-    except Exception:
-        pass
-    cfg_msg = await message.bot.send_message(chat_id=d['chat_id'], text=_nsfw_cfg_text(request_id), reply_markup=_nsfw_cfg_keyboard(request_id))
-    d['cfg_msg_id'] = cfg_msg.message_id
 
 @router.callback_query(F.data == 'noop')
 async def handle_noop(callback: types.CallbackQuery):
