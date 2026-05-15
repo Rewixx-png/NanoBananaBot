@@ -1,9 +1,14 @@
-BOT_TOKEN = 'REDACTED_BOT_TOKEN'
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHAT_ID = -1002033901364
 TEXT_ONLY_CHAT_ID = -1002017590469
 FULL_ACCESS_CHAT_ID = -1002830734467
-API_KEYS_FILE = '/root/Projects/NanoHatani/r.txt'
-OPENAI_API_KEY = ''
+API_KEYS_FILE = "/root/Projects/NanoHatani/r.txt"
+OPENAI_API_KEY = ""
 ALLOWED_USER_IDS = {1358471738, 7622722099, 8421975646}
 BANNED_USER_IDS = set()
 OWNER_USER_ID = 7485721661
