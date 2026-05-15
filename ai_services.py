@@ -904,6 +904,35 @@ async def fetch_gemini_image_models() -> list:
     return []
 
 
+async def fetch_gemini_tts_models() -> list:
+    cache_key = "gemini_tts"
+    now = __import__("time").time()
+    if cache_key in _models_cache and now - _models_cache[cache_key]["ts"] < _MODELS_CACHE_TTL:
+        return _models_cache[cache_key]["data"]
+
+    keys = load_keys()
+    if not keys:
+        return []
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={keys[0]}&pageSize=200"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    result = []
+                    for m in data.get("models", []):
+                        model_id = m["name"].replace("models/", "")
+                        methods = m.get("supportedGenerationMethods", [])
+                        if "tts" in model_id.lower() and "generateContent" in methods:
+                            result.append((_pretty_model_name(model_id), model_id))
+                    _models_cache[cache_key] = {"ts": now, "data": result}
+                    return result
+        except Exception as e:
+            logging.warning(f"fetch_gemini_tts_models: {e}")
+    return []
+
+
 async def fetch_openai_image_models() -> list:
     cache_key = "openai_image"
     now = __import__("time").time()
@@ -1153,3 +1182,56 @@ async def generate_image_with_replicate(
                 return None, str(e)
 
     return None, "Все Replicate ключи недоступны."
+
+
+async def generate_tts_with_gemini(text: str, model: str, voice_name: str) -> Tuple[Optional[bytes], Optional[str]]:
+    import wave
+    import io
+    keys = load_keys()
+    if not keys:
+        return None, "Нет ключей Gemini."
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={keys[0]}"
+    payload = {
+        "contents": [{"parts": [{"text": text}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": voice_name
+                    }
+                }
+            }
+        }
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(
+                url, json=payload, headers={"Content-Type": "application/json"}, timeout=aiohttp.ClientTimeout(total=60)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    candidate = data.get("candidates", [{}])[0]
+                    parts = candidate.get("content", {}).get("parts", [])
+                    for part in parts:
+                        if "inlineData" in part:
+                            b64_data = part["inlineData"]["data"]
+                            pcm_data = base64.b64decode(b64_data)
+                            
+                            wav_io = io.BytesIO()
+                            with wave.open(wav_io, 'wb') as wav_file:
+                                wav_file.setnchannels(1)
+                                wav_file.setsampwidth(2)
+                                wav_file.setframerate(24000)
+                                wav_file.writeframes(pcm_data)
+                            return wav_io.getvalue(), None
+                    return None, "Gemini не вернул аудио."
+                else:
+                    err = await resp.text()
+                    return None, f"Ошибка Gemini TTS ({resp.status}): {err[:150]}"
+        except Exception as e:
+            return None, f"Сетевая ошибка: {e}"
+    
+    return None, "Все модели недоступны."
