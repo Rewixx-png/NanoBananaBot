@@ -15,6 +15,7 @@ pending_nsfw_configs = {}
 
 pending_tts_requests = {}
 pending_tts_configs = {}
+tts_voice_previews = {}
 
 chat_members_cache: dict = {}
 
