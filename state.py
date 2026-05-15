@@ -1,26 +1,17 @@
-# Временное хранилище запросов /image до выбора модели
 pending_image_requests = {}
 pending_video_requests = {}
 pending_media_groups = {}
-
 user_text_cooldowns = {}
 user_image_cooldowns = {}
 user_video_cooldowns = {}
-
 full_access_image_cooldowns = {}
 paid_unlimited_until = {}
-
 pending_prompt_requests = {}
 pending_nsfw_configs = {}
-
 pending_tts_requests = {}
 pending_tts_configs = {}
 tts_voice_previews = {}
-
 chat_members_cache: dict = {}
-
 daily_gen_limits: dict = {}
-
 banned_user_ids: set = set()
-
 chat_custom_limits: dict = {}
