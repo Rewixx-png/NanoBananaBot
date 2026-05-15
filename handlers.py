@@ -100,18 +100,9 @@ async def cmd_all(message: types.Message):
     target_chunks = [targets[i:i + 50] for i in range(0, len(targets), 50)]
     
     for t_chunk in target_chunks:
-        text = base_text + "\n" + ("\u206c" * len(t_chunk))
-        entities = []
-        offset = len(base_text) + 1
-        for user_id in t_chunk:
-            entities.append(types.MessageEntity(
-                type="text_mention",
-                offset=offset,
-                length=1,
-                user=types.User(id=user_id, is_bot=False, first_name="User")
-            ))
-            offset += 1
-        await message.answer(text, entities=entities)
+        mentions = [f'<a href="tg://user?id={uid}">\u206c</a>' for uid in t_chunk]
+        text = base_text + "\n" + "".join(mentions)
+        await message.answer(text, parse_mode='HTML')
 
 @router.message(Command('unban'))
 async def cmd_unban(message: types.Message):
