@@ -977,6 +977,38 @@ async def handle_image_model_select(callback: types.CallbackQuery):
 VEO_MODELS: dict = {'veo0': ('Veo 2', 'veo-2.0-generate-001'), 'veo1': ('Veo 3.1 Fast', 'veo-3.1-fast-generate-preview'), 'veo2': ('Veo 3.1', 'veo-3.1-generate-preview'), 'veo3': ('Veo 3.1 Lite', 'veo-3.1-lite-generate-preview')}
 VIDEO_COOLDOWN = 60
 
+@router.message(Command("up"))
+async def cmd_up(message: types.Message):
+    if message.chat.type != "private" or message.from_user.id != 7485721661:
+        return
+    
+    if not message.photo:
+        await message.reply("Прикрепи фото для апскейла.")
+        return
+        
+    wait_msg = await message.reply("⏳ Скачиваю фото...")
+    photo = message.photo[-1]
+    file_info = await message.bot.get_file(photo.file_id)
+    downloaded = await message.bot.download_file(file_info.file_path)
+    image_bytes = downloaded.read()
+    
+    await wait_msg.edit_text("⬆️ Улучшаю качество через AI upscaler...")
+    
+    upscaled, up_err = await upscale_image(image_bytes)
+    
+    try:
+        await wait_msg.delete()
+    except Exception:
+        pass
+        
+    if upscaled:
+        await message.reply_document(
+            document=BufferedInputFile(upscaled, filename="upscaled.png"),
+            caption="✨ Улучшенная версия 2x — без сжатия"
+        )
+    else:
+        await message.reply(f"❌ Ошибка апскейла: {up_err}")
+
 @router.message(Command('video'))
 async def cmd_video(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
