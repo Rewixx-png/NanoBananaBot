@@ -4,18 +4,212 @@ import uuid
 import tempfile
 import os
 import time
+import io
+import json
+import zipfile
+import subprocess
+import sys
+import secrets
+from html.parser import HTMLParser
+from typing import Any
 from aiogram import Router, F, types
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
-from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache, daily_gen_limits, banned_user_ids, chat_custom_limits, pending_tts_requests, pending_tts_configs, tts_voice_previews
+from aiogram.types import BufferedInputFile, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache, daily_gen_limits, banned_user_ids, chat_custom_limits, pending_tts_requests, pending_tts_configs, tts_voice_previews, generated_draw_messages
 from database import save_history, save_pending_gen, delete_pending_gen, add_user_stat, get_user_stats, add_banned_user_db, remove_banned_user_db, log_prompt, get_recent_prompts
 from ai_services import start_veo_generation, poll_veo_operation
-from utils import check_membership, is_banned
-from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, is_openai_verification_error, is_openai_timeout_error, generate_video_with_gemini, generate_text_with_gemini, upscale_image, generate_image_prompt, generate_code_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate, fetch_gemini_tts_models, generate_tts_with_gemini
-from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID, DAILY_GEN_LIMIT, PAYMENT_USERNAME, CHAT_ID
+from utils import check_membership, is_banned, make_safe_caption
+from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, generate_video_with_gemini, generate_text_with_gemini, classify_code_intent_with_gemini, classify_draw_intent_with_gemini, generate_image_via_code, upscale_image, generate_image_prompt, generate_code_with_gemini, generate_project_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate, fetch_gemini_tts_models, generate_tts_with_gemini, fetch_replicate_image_models, generate_bull_roast
+from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID, DAILY_GEN_LIMIT, PAYMENT_USERNAME, CHAT_ID, GEMINI_IMAGE_TIMEOUT
 import logging
 logger = logging.getLogger(__name__)
 router = Router()
+
+async def safe_send(coro_func, *args, **kwargs):
+    for attempt in range(3):
+        try:
+            return await coro_func(*args, **kwargs)
+        except Exception as e:
+            err_str = str(e).lower()
+            if "retry after" in err_str or "flood" in err_str or "too many requests" in err_str:
+                import re as _re
+                secs_match = _re.search(r'retry after (\d+)', err_str)
+                secs = int(secs_match.group(1)) if secs_match else 10
+                logging.warning(f"Telegram Flood Control hit. Waiting {secs}s before retry...")
+                await asyncio.sleep(secs)
+            else:
+                raise
+
+
+def _clean_plain_reply(text: str) -> str:
+    text = re.sub(r'</?(?:b|strong|i|em|u|s|code|pre|blockquote|a)(?:\s+[^>]*)?>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^\s{0,3}#{1,6}\s*', '', text, flags=re.MULTILINE)
+    text = text.replace('```', '').replace('`', '')
+    text = re.sub(r'\*\*([^*\n]+)\*\*', r'\1', text)
+    text = re.sub(r'\*([^*\n]+)\*', r'\1', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def _project_filename(name: str, fallback: str = 'project') -> str:
+    cleaned = re.sub(r'[^a-zA-Z0-9_.-]+', '_', name.strip())[:80].strip('._-')
+    return cleaned or fallback
+
+
+def _validate_generated_files(files: list[dict[str, str]]) -> tuple[bool, list[str]]:
+    errors = []
+    for file_item in files:
+        path = file_item['path']
+        content = file_item['content']
+        ext = os.path.splitext(path.lower())[1]
+        try:
+            if ext == '.py':
+                proc = subprocess.run(
+                    [sys.executable, '-c', 'import sys; compile(sys.stdin.read(), sys.argv[1], "exec")', path],
+                    input=content,
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                )
+                if proc.returncode != 0:
+                    errors.append(f'{path}: {proc.stderr.strip()[:300] or "Python syntax error"}')
+            elif ext == '.json':
+                json.loads(content)
+            elif ext in ('.html', '.htm'):
+                parser = HTMLParser()
+                parser.feed(content)
+                lowered = content.lower()
+                if '<meta charset=' not in lowered and "charset='utf-8'" not in lowered and 'charset="utf-8"' not in lowered and 'charset=utf-8' not in lowered:
+                    errors.append(f'{path}: нет meta charset')
+        except subprocess.TimeoutExpired:
+            errors.append(f'{path}: Python compile timeout')
+        except Exception as e:
+            errors.append(f'{path}: {type(e).__name__}: {e}')
+    return (not errors, errors)
+
+
+def _fallback_generation_error_explanation(error_msg: str) -> str:
+    lowered = (error_msg or '').lower()
+    if 'ключ' in lowered or 'quota' in lowered or '429' in lowered or 'исчерпан' in lowered:
+        return 'Ключи или квота на генерацию сейчас сдохли. Это не твой промпт, это сервисы опять легли мордой в пол.'
+    if 'policy' in lowered or 'safety' in lowered or 'цензур' in lowered or 'blocked' in lowered:
+        return 'Похоже, генератор словил цензуру или safety-фильтр. Переформулируй мягче, а то он обосрался раньше меня.'
+    return 'Генератор вернул ошибку, а мозги для пояснения тоже не ответили. Короче, сервис тупит — попробуй позже или упрости запрос.'
+
+
+async def _send_generated_project(message: types.Message, project: dict[str, Any], reply_kwargs: dict[str, Any]):
+    files = project.get('files', [])
+    if not isinstance(files, list):
+        files = []
+    is_valid, validation_errors = _validate_generated_files(files)
+    project_name = _project_filename(str(project.get('project_name', 'project')))
+    summary = _clean_plain_reply(str(project.get('summary', 'Собрал файлы проекта.')))
+    instructions = _clean_plain_reply(str(project.get('run_instructions', '')))
+    status = '✅ Проверил через Python/парсеры — синтаксис живой.' if is_valid else '⚠️ Собрал, но проверка нашла косяки:\n' + '\n'.join(validation_errors[:5])
+    caption_parts = [summary, status]
+    if instructions:
+        caption_parts.append('Запуск: ' + instructions)
+    caption = '\n\n'.join(caption_parts)[:1000]
+    bot = message.bot
+    if bot is None:
+        return
+    if len(files) == 1:
+        file_item = files[0]
+        filename = os.path.basename(file_item['path']) or f'{project_name}.txt'
+        doc = BufferedInputFile(file_item['content'].encode('utf-8'), filename=filename)
+        await bot.send_document(chat_id=message.chat.id, document=doc, caption=caption, reply_to_message_id=message.message_id, **reply_kwargs)
+        return
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for file_item in files:
+            archive.writestr(file_item['path'], file_item['content'])
+    _ = zip_buffer.seek(0)
+    doc = BufferedInputFile(zip_buffer.read(), filename=f'{project_name}.zip')
+    await bot.send_document(chat_id=message.chat.id, document=doc, caption=caption, reply_to_message_id=message.message_id, **reply_kwargs)
+
+
+def _has_kick_execution_signal(message: types.Message, reason: str, rest: str) -> bool:
+    source = f'{message.text or message.caption or ""}\n{reason}\n{rest}'.casefold()
+    explicit_target = bool(message.reply_to_message) or bool(re.search(r'@[A-Za-z0-9_]{3,32}', source))
+    kick_words = ('кик', 'кикн', 'выкин', 'вышвыр', 'kick')
+    owner_words = ('я ревикс', 'я rewix', 'я rewixx', 'я rewi', 'я владелец', 'я создатель', 'притворяется rewix', 'притворяется ревикс', 'косит под rewix', 'косит под ревикс', 'закос под rewix', 'закос под ревикс')
+    severe_words = ('спам', 'флуд', 'скам', 'реклама', 'бот-спам', 'докс', 'деанон', 'угроз', 'рейд')
+    return any(word in source for word in owner_words) or any(word in source for word in severe_words) or (explicit_target and any(word in source for word in kick_words))
+
+
+async def _kick_chat_member(bot, chat_id: int, user_id: int):
+    until_date = int(time.time() + 35)
+    await bot.ban_chat_member(chat_id=chat_id, user_id=user_id, until_date=until_date, revoke_messages=False)
+    try:
+        await bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
+    except Exception:
+        await asyncio.sleep(1)
+        await bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=False)
+
+
+async def _handle_kick_directive(message: types.Message, text: str, reply_kwargs: dict[str, Any]) -> str:
+    if not text.strip().upper().startswith('KICK_USER:'):
+        return text
+    lines = text.splitlines()
+    reason = lines[0].split(':', 1)[1].strip() if ':' in lines[0] else 'тупое мудило'
+    if not reason:
+        reason = 'тупое мудило'
+    rest = '\n'.join(lines[1:]).strip()
+    bot = message.bot
+    requester = message.from_user
+    if bot is None or requester is None or message.chat.type == 'private':
+        return rest or f'Я бы тебя кикнул за «{reason}», но тут личка, некуда выкидывать.'
+    target_id = None
+    target_name = ''
+    if message.reply_to_message and message.reply_to_message.from_user and not message.reply_to_message.from_user.is_bot:
+        replied_user = message.reply_to_message.from_user
+        if replied_user.id != requester.id:
+            target_id = replied_user.id
+            target_name = replied_user.first_name or replied_user.username or str(replied_user.id)
+    if target_id is None:
+        directive_text = f'{reason}\n{rest}'
+        mentions = [m.casefold() for m in re.findall(r'@([A-Za-z0-9_]{3,32})', directive_text)]
+        if mentions:
+            for uid, (first_name, username) in chat_members_cache.get(message.chat.id, {}).items():
+                if username and username.casefold() in mentions and uid != requester.id:
+                    target_id = uid
+                    target_name = first_name or username or str(uid)
+                    break
+    if target_id is None:
+        target_id = requester.id
+        target_name = requester.first_name or requester.username or str(requester.id)
+    if target_id is None:
+        return (rest or 'Я понял, что кого-то надо выкинуть, но не понял кого именно. Ответь реплаем на цель или напиши его @username, а не заставляй меня гадать.')
+    if target_id == OWNER_USER_ID:
+        return (rest or 'Создателя я кикать не буду, не ебу себе мозги.')
+    if not _has_kick_execution_signal(message, reason, rest):
+        return (rest or 'С киком я перегнул. За такое только словами обосру, без выкидывания.')
+    try:
+        member = await bot.get_chat_member(message.chat.id, target_id)
+        if member.status in ('administrator', 'creator'):
+            admin_text = f'Я бы выкинул {target_name}, но у него админка, облом.'
+            return f'{admin_text}\n{rest}'.strip()
+        await _kick_chat_member(bot, message.chat.id, target_id)
+        kick_text = f'Выкинул {target_name} нахуй за: {reason}'
+        return f'{kick_text}\n{rest}'.strip()
+    except Exception as e:
+        logging.warning(f'Kick attempt failed for user {target_id}: {e}')
+        fail_text = f'Попытался выкинуть {target_name or target_id} за «{reason}», но не вышло.'
+        return f'{fail_text}\n{rest}'.strip()
+
+
+def _is_code_generation_request(prompt: str) -> bool:
+    lower_prompt = prompt.lower()
+    direct_phrases = ['напиши код', 'напиши скрипт', 'сделай скрипт', 'напиши программу', 'напиши функцию', 'создай скрипт', 'создай код', 'напиши бота', 'сделай бота', 'напиши сайт', 'сделай сайт', 'напиши приложение', 'создай сайт', 'создай приложение', 'создай проект', 'сделай проект', 'напиши проект', 'собери проект', 'новый мессенджер', 'напиши парсер', 'сделай парсер', 'напиши апи', 'сделай апи', 'напиши api', 'напиши хэндлер', 'реализуй', 'write code', 'write a script', 'write a bot', 'write a site', 'write a website', 'write an app', 'create project', 'build project']
+    if any(phrase in lower_prompt for phrase in direct_phrases):
+        return True
+    talk_only_markers = ['что такое', 'как работает', 'объясни', 'расскажи', 'найди', 'поищи', 'загугли', 'что нового', 'почему', 'зачем', 'кто такой', 'что за']
+    if any(marker in lower_prompt for marker in talk_only_markers):
+        return False
+    actions = ['напиши', 'сделай', 'создай', 'собери', 'накидай', 'скинь', 'кинь', 'дай', 'нужен', 'нужна', 'нужно']
+    artifacts = ['код', 'скрипт', 'проект', 'сайт', 'бот', 'приложение', 'прогу', 'программа', 'zip', 'зип', 'архив', 'pydroid', 'pydroid3', '.py']
+    return any(action in lower_prompt for action in actions) and any(artifact in lower_prompt for artifact in artifacts)
 
 async def delete_message_after_delay(bot, chat_id: int, message_id: int, delay: int=DELETE_MESSAGE_DELAY_SECONDS):
     await asyncio.sleep(delay)
@@ -24,7 +218,7 @@ async def delete_message_after_delay(bot, chat_id: int, message_id: int, delay: 
     except Exception as e:
         logger.warning(f'Не удалось удалить сообщение {message_id}: {e}')
 
-async def run_progress_bar(bot, chat_id: int, message_id: int, model_label: str):
+async def run_progress_bar(bot, chat_id: int, message_id: int, model_label: str, state_data: dict = None):
     import random
     BAR_LEN = 10
     start = asyncio.get_event_loop().time()
@@ -37,12 +231,13 @@ async def run_progress_bar(bot, chat_id: int, message_id: int, model_label: str)
             time_str = f'{elapsed // 60}:{elapsed % 60:02d}'
         filled = pos % BAR_LEN
         bar = '■' * filled + '□' * (BAR_LEN - filled)
-        text = f'⏳ Генерация...\n[{bar}]\nПрошло: {time_str}\nМодель: {model_label}'
+        status_info = f"\nℹ️ {state_data['status']}" if state_data and state_data.get('status') else ""
+        text = f'⏳ Генерация...\n[{bar}]\nПрошло: {time_str}\nМодель: {model_label}{status_info}'
         try:
             await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
         except Exception:
             pass
-        await asyncio.sleep(random.uniform(1, 10))
+        await asyncio.sleep(random.uniform(3.5, 5.5))
         pos += 1
 
 @router.message(Command('start'))
@@ -56,7 +251,55 @@ async def cmd_start(message: types.Message):
 
 @router.message(Command('help'))
 async def cmd_help(message: types.Message):
-    await message.reply('Что умеет этот бот:\n\n🎨 ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ\n/image ваш промпт\nВыбор провайдера и модели:\n• Gemini — Flash 3.1 Image / Flash 2.0 Image\n• GPT — GPT-Image-2 / DALL-E 3\n• FLUX — Schnell / Dev / Klein 4B\n• NSFW 🔞 — WAI Illustrious v12/v11 / NSFW FLUX Dev (полная настройка: шаги, CFG, Sampler, CLIP skip, PAG, batch до 4 фото, негативный промпт)\nМожно прикрепить до 10 фото альбомом — все будут использованы как референсы.\n💡 Если отправить /image с текстом и фото — бот предложит AI-оптимизацию промпта через Gemini Pro!\n✨ Все сгенерированные фото автоматически проходят 2x AI Upscale и отправляются файлом без сжатия.\n\n🎬 ГЕНЕРАЦИЯ ВИДЕО\n/video ваш промпт\nМодели Veo 2 и Veo 3.1 от Google (включая аудио). Можно прикрепить фото для анимации.\n\n🎙 ОЗВУЧКА ТЕКСТА (TTS)\n/tts ваш текст\nГенерация реалистичного голоса через Gemini 3.1 Flash TTS. Огромный выбор из 30+ голосов, 3 языка (RU, EN, JA), настройка температуры.\n🎭 Поддерживает режиссёрские настройки: Сцена, Стиль, Темп и Акцент!\n\n🧠 ТЕКСТОВЫЕ ОТВЕТЫ И КОД\n• Тегни меня или ответь на моё сообщение — отвечу через Gemini Flash Lite с токсичным характером.\n• Попроси написать код (например: "напиши скрипт") — бот переключится на мощную модель Gemini 3.1 Pro Preview (с максимальным временем на раздумья) и выдаст профессиональный, рабочий код без обрезки.\n• Отправь видео/GIF — разберу покадрово и расскажу что происходит.\n\n💾 ПАМЯТЬ И КОНТЕКСТ\nЗапоминаю последние 100 сообщений. Понимаю, если ты делаешь reply на мои старые ответы.\n/clear — очистить историю диалога в текущем чате.\n\n🛡 ЗАЩИТА ОТ СПАМА И ЛИМИТЫ\n• Дневной лимит: 3 генерации GPT/Gemini в день для обычных юзеров (в основной беседе — безлимит!).\n• Кулдаун на фото: 5 минут (300 сек).\n• ЛС: Генерация картинок и аудио работает в ЛС для всех, текстовый чат — только в беседах.\n\n👑 АДМИН-КОМАНДЫ\n/all — агрессивный созыв всех участников чата.\n/stats — статистика генераций.\n/prompts — логи промптов.\n/limit — установка кастомных лимитов.\n/ban и /unban — управление доступом.\n/vip — выдать безлимит на 24ч.')
+    text = '''🍌 Hatani AI — справка
+
+> Тегни меня или ответь на моё сообщение — и я влезу в разговор.
+> Пишу резко, коротко и без стерильной корпоративной хуйни.
+
+🎨 КАРТИНКИ
+/image ваш промпт
+Генерация через Gemini / GPT / FLUX / NSFW. Можно прикреплять фото и альбомы.
+
+🎬 ВИДЕО
+/video ваш промпт
+Генерация через Veo. Фото можно прикрепить как основу для анимации.
+
+🎙 ОЗВУЧКА
+/tts ваш текст
+Gemini TTS: голос, стиль, сцена, темп, акцент.
+
+🧠 ТЕКСТ И ПАМЯТЬ
+• Помню последние 100 сообщений в чате.
+• /clear — стереть историю.
+• Понимаю реплаи и контекст, если не пишешь как кирпич.
+
+🌐 ИНТЕРНЕТ / FIRECRAWL
+Напиши типа:
+» найди в инете инфу по TPEBOP.FX
+» что нового у Gemini
+» поищи свежие новости по теме
+
+Как это работает:
+1. Я не кидаю сырой текст пользователя в поиск.
+2. Сначала сам формулирую несколько точных Firecrawl-запросов.
+3. Ищу по разным источникам: web, Telegram, VK, X/Twitter, Instagram, TikTok, YouTube, Reddit, GitHub/GitLab, Habr/VC/DTF, Boosty, форумы.
+4. Читаю до 8 результатов за запрос, лезу по ссылкам до третьего уровня и вытаскиваю новые зацепки.
+5. По найденным данным составляю новые запросы и гоняю цикл до 16 попыток.
+6. Коплю несколько релевантных источников, потом синтезирую ответ.
+7. Если достоверной инфы нет — честно скажу, а не высру сказку.
+
+💻 КОД И ПРОЕКТЫ
+Попроси код/проект — один файл отправлю документом, полноценный проект упакую в .zip.
+Перед отправкой проверяю Python / JSON / HTML, а не кидаю тебе недоделанный мусор.
+
+👑 АДМИНКА
+/all — созвать всех участников
+/stats — статистика
+/prompts — логи промптов
+/limit — лимиты
+/ban и /unban — доступ
+/vip — безлимит на 24 часа'''
+    await message.reply(text)
 
 @router.message(Command('clear'))
 async def cmd_clear(message: types.Message):
@@ -66,7 +309,73 @@ async def cmd_clear(message: types.Message):
     await save_history(message.chat.id, [])
     await message.reply('Окей, я забыл всю хуйню, которую мы тут обсуждали. Начинаем с чистого листа.')
 import random as _random
+_KIRIESHKI_CHAT_ID = -1002830734467
+_KIRIESHKI_STICKER_SET = 'kirieshkikirieshki'
+_KIRIESHKI_STICKER_CHANCE = 0.10
+_KIRIESHKI_STICKER_CACHE_TTL = 86400
+_kirieshki_sticker_file_ids: list[str] = []
+_kirieshki_sticker_cache_ts = 0.0
+_RANDOM_GIF_CHANCE = 0.10
+_RANDOM_MEDIA_MIN_INTERVAL = 30
+_random_media_last_ts_by_chat: dict[int, float] = {}
+_RANDOM_GIF_PATHS = [
+    os.path.join(os.path.dirname(__file__), 'media', 'random_gifs', 'kirieshki_1.mp4'),
+    os.path.join(os.path.dirname(__file__), 'media', 'random_gifs', 'kirieshki_2.mp4'),
+    os.path.join(os.path.dirname(__file__), 'media', 'random_gifs', 'kirieshki_3.mp4'),
+]
 _ALL_PHRASES = ['Эй вы, уроды, все сюда нахуй! 👇', 'Хуиданте сюда все, живо! 🔔', 'Ау, дебилы, слышите? Все сюда! 📢', 'Все ко мне, быстро, я сказал! 🗣️', 'Ну-ка все собрались, чего расползлись! 👊', 'Стоять всем! Сюда смотреть! 👁️', 'Эй ты, и ты, и ты тоже — все на месте! ⚡']
+
+async def _send_kirieshki_sticker(message: types.Message) -> bool:
+    global _kirieshki_sticker_file_ids, _kirieshki_sticker_cache_ts
+    if message.chat.id != _KIRIESHKI_CHAT_ID:
+        return False
+    bot = message.bot
+    if bot is None:
+        return False
+    try:
+        now = time.monotonic()
+        if not _kirieshki_sticker_file_ids or now - _kirieshki_sticker_cache_ts > _KIRIESHKI_STICKER_CACHE_TTL:
+            sticker_set = await bot.get_sticker_set(name=_KIRIESHKI_STICKER_SET)
+            _kirieshki_sticker_file_ids = [sticker.file_id for sticker in sticker_set.stickers if sticker.file_id]
+            _kirieshki_sticker_cache_ts = now
+        if _kirieshki_sticker_file_ids:
+            sent = await safe_send(message.reply_sticker, sticker=_random.choice(_kirieshki_sticker_file_ids))
+            return bool(sent)
+    except Exception as e:
+        logging.warning(f'Kirieshki sticker reply failed: {type(e).__name__}: {e}')
+    return False
+
+async def _send_random_gif(message: types.Message) -> bool:
+    if message.chat.id != _KIRIESHKI_CHAT_ID:
+        return False
+    path = _random.choice(_RANDOM_GIF_PATHS)
+    if not os.path.exists(path):
+        logging.warning(f'Random gif file missing: {path}')
+        return False
+    try:
+        sent = await safe_send(message.reply_animation, animation=FSInputFile(path))
+        return bool(sent)
+    except Exception as e:
+        logging.warning(f'Random gif reply failed: {type(e).__name__}: {e}')
+    return False
+
+async def _maybe_send_random_chat_media(message: types.Message):
+    if message.chat.id != _KIRIESHKI_CHAT_ID:
+        return
+    now = time.monotonic()
+    if now - _random_media_last_ts_by_chat.get(message.chat.id, 0.0) < _RANDOM_MEDIA_MIN_INTERVAL:
+        return
+    roll = secrets.randbelow(100)
+    sticker_threshold = int(_KIRIESHKI_STICKER_CHANCE * 100)
+    gif_threshold = sticker_threshold + int(_RANDOM_GIF_CHANCE * 100)
+    sent = False
+    if roll < sticker_threshold:
+        sent = await _send_kirieshki_sticker(message)
+    elif roll < gif_threshold:
+        sent = await _send_random_gif(message)
+    if sent:
+        _random_media_last_ts_by_chat[message.chat.id] = now
+
 @router.message(Command('all'))
 async def cmd_all(message: types.Message):
     if message.chat.type == 'private':
@@ -101,6 +410,27 @@ async def cmd_all(message: types.Message):
         mentions = [f'<a href="tg://user?id={uid}">\u200b</a>' for uid in t_chunk]
         text = f"{phrase} ({len(t_chunk)})\n" + "\u200b".join(mentions) + "\u200d"
         await message.answer(text, parse_mode='HTML')
+
+@router.message(Command('bull'))
+async def cmd_bull(message: types.Message):
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        await message.reply('Реплаем на юзера используй, дебил.')
+        return
+    target = message.reply_to_message.from_user
+    if target.is_bot:
+        await message.reply('На бота нельзя, придурок.')
+        return
+    name = target.first_name or 'Аноним'
+    username = target.username or ''
+    lines = await generate_bull_roast(name, username)
+    reply_to_id = message.reply_to_message.message_id
+    for line in lines:
+        await message.bot.send_message(
+            chat_id=message.chat.id,
+            text=line,
+            reply_to_message_id=reply_to_id,
+        )
+        await asyncio.sleep(0.3)
 
 @router.message(Command('unban'))
 async def cmd_unban(message: types.Message):
@@ -300,6 +630,142 @@ def _check_daily_limit(user_id: int, chat_id: int) -> tuple:
     daily_gen_limits[chat_id, user_id] = entry
     return (True, req_limit - entry['count'])
 
+
+_MAX_TRACKED_DRAW_MESSAGES = 120
+
+
+def _remember_generated_draw_message(chat_id: int, message_id: int, image_bytes: bytes, prompt: str, user_id: int, username: str='', first_name: str='Аноним'):
+    if not image_bytes:
+        return
+    generated_draw_messages[(chat_id, message_id)] = {
+        'image_bytes': image_bytes,
+        'prompt': prompt or '',
+        'user_id': user_id,
+        'username': username or '',
+        'first_name': first_name or 'Аноним',
+        'created_at': time.time(),
+    }
+    while len(generated_draw_messages) > _MAX_TRACKED_DRAW_MESSAGES:
+        oldest_key = min(generated_draw_messages, key=lambda k: generated_draw_messages[k].get('created_at', 0))
+        generated_draw_messages.pop(oldest_key, None)
+
+
+async def _download_message_photo(bot, photo_message: types.Message) -> bytes | None:
+    if not photo_message or not photo_message.photo:
+        return None
+    try:
+        photo = photo_message.photo[-1]
+        file_info = await bot.get_file(photo.file_id)
+        downloaded = await bot.download_file(file_info.file_path)
+        return downloaded.read()
+    except Exception as e:
+        logger.warning(f'Failed to download replied draw image: {type(e).__name__}: {e}')
+        return None
+
+
+async def _ensure_image_generation_allowed(message: types.Message) -> bool:
+    current_time = time.time()
+    uid = message.from_user.id
+    if uid in ALLOWED_USER_IDS:
+        return True
+    if message.chat.id == FULL_ACCESS_CHAT_ID:
+        is_main_member = True
+        try:
+            m = await message.bot.get_chat_member(chat_id=CHAT_ID, user_id=uid)
+            is_main_member = m.status in ('member', 'administrator', 'creator', 'restricted')
+        except Exception as e:
+            logger.warning(f'is_main_member check failed for {uid}: {e}')
+        if not is_main_member and current_time >= paid_unlimited_until.get(uid, 0):
+            last_fa = full_access_image_cooldowns.get(uid, 0)
+            remaining = FULL_ACCESS_CHAT_IMAGE_COOLDOWN - (current_time - last_fa)
+            if remaining > 0:
+                await message.reply(f'Не спамь блять картинками, подожди ещё {int(remaining)} сек.')
+                return False
+        full_access_image_cooldowns[uid] = current_time
+    else:
+        last_time = user_image_cooldowns.get(uid, 0)
+        remaining = IMAGE_COOLDOWN_SECONDS - (current_time - last_time)
+        if remaining > 0:
+            await message.reply(f'Не спамь блять картинками, подожди еще {int(remaining)} сек.')
+            return False
+        user_image_cooldowns[uid] = current_time
+    if current_time < paid_unlimited_until.get(uid, 0):
+        return True
+    is_main_member = True
+    try:
+        m = await message.bot.get_chat_member(chat_id=CHAT_ID, user_id=uid)
+        is_main_member = m.status in ('member', 'administrator', 'creator', 'restricted')
+    except Exception:
+        is_main_member = True
+    if not is_main_member:
+        (allowed, _) = _check_daily_limit(uid, message.chat.id)
+        if not allowed:
+            (req_limit, days) = chat_custom_limits.get(message.chat.id, (DAILY_GEN_LIMIT, 1))
+            await message.reply(f'❌ Лимит {req_limit} генерации за {days} дн. исчерпан. Для безлимита свяжись с {PAYMENT_USERNAME}.')
+            return False
+    return True
+
+
+async def _handle_natural_draw_request(message: types.Message, prompt: str, draw_info: dict[str, Any], replied_draw: dict[str, Any] | None, reply_kwargs: dict[str, Any], thinking_msg: types.Message) -> bool:
+    draw_prompt = (draw_info.get('prompt') or prompt or '').strip()
+    is_edit = bool(draw_info.get('edit_request') and replied_draw)
+    if is_edit and replied_draw:
+        base_prompt = replied_draw.get('prompt') or ''
+        edit_instruction = draw_prompt or prompt
+        draw_prompt = f'Edit the existing image. Original prompt: {base_prompt}. User edit request: {edit_instruction}'
+    if not draw_prompt:
+        return False
+    if not await _ensure_image_generation_allowed(message):
+        try:
+            await thinking_msg.delete()
+        except Exception:
+            pass
+        return True
+    try:
+        await thinking_msg.edit_text('🎨 Рисую и сам проверяю результат...', **reply_kwargs)
+    except Exception:
+        pass
+    await message.bot.send_chat_action(chat_id=message.chat.id, action='upload_photo', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
+    state_data = {'status': 'Инициализация...'}
+    result_img = None
+    error_msg = None
+    critique = ''
+    try:
+        (result_img, error_msg, critique) = await asyncio.wait_for(
+            generate_image_via_code(draw_prompt, state_data=state_data, max_attempts=5),
+            timeout=GEMINI_IMAGE_TIMEOUT * 5,
+        )
+    except asyncio.TimeoutError:
+        error_msg = 'Генерация зависла по таймауту.'
+    except Exception as e:
+        logger.exception(f'Natural draw generation failed: {type(e).__name__}')
+        error_msg = f'Внутренняя ошибка генерации: {type(e).__name__}: {e}'
+    try:
+        await thinking_msg.delete()
+    except Exception:
+        pass
+    if not result_img:
+        short_error = (error_msg or 'Gemini не вернул картинку.')[:200]
+        await message.reply(f'❌ Не смог нарисовать: {short_error}', **reply_kwargs)
+        return True
+    caption_prefix = '🎨 Изменил по запросу: ' if is_edit else '🎨 Нарисовал по запросу: '
+    caption = make_safe_caption(caption_prefix, prompt)
+    sent_photo = await safe_send(
+        message.bot.send_photo,
+        chat_id=message.chat.id,
+        photo=BufferedInputFile(result_img, filename='generated.png'),
+        caption=caption,
+        reply_to_message_id=message.message_id,
+        **reply_kwargs,
+    )
+    if sent_photo:
+        _remember_generated_draw_message(message.chat.id, sent_photo.message_id, result_img, draw_prompt, message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним')
+    asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'image'))
+    asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'image', draw_prompt))
+    if critique:
+        logging.info(f'Natural draw final critique: {critique[:200]}')
+    return True
+
 @router.message(Command('image'))
 async def cmd_image(message: types.Message):
     _track_user(message)
@@ -385,7 +851,7 @@ def _temp_keyboard(request_id: str) -> InlineKeyboardMarkup:
 
 def _providers_keyboard(request_id: str, chat_id: int, photo_count: int=0) -> InlineKeyboardMarkup:
     providers = ['gemini', 'flux', 'nsfw'] if chat_id == TEXT_ONLY_CHAT_ID else ['gemini', 'gpt', 'flux', 'nsfw']
-    labels = {'gemini': 'Gemini', 'gpt': 'GPT', 'flux': 'FLUX', 'nsfw': 'NSFW 🔞'}
+    labels = {'gemini': 'Gemini', 'gpt': 'GPT', 'flux': 'FLUX', 'nsfw': 'Replicate'}
     photo_label = f' 📎{photo_count} фото' if photo_count > 1 else ''
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=labels[p] + (photo_label if p not in ('flux', 'nsfw') else ''), callback_data=f'imgprov:{request_id}:{p}') for p in providers]])
 
@@ -414,22 +880,28 @@ async def handle_temp_select(callback: types.CallbackQuery):
         reply_kwargs = {'message_thread_id': message_thread_id} if message_thread_id else {}
         await callback.bot.send_chat_action(chat_id=req['chat_id'], action='upload_photo', message_thread_id=message_thread_id)
         progress_task = None
+        state_data = {'status': 'Инициализация...'}
         try:
             await callback.message.edit_text(f'🌡️ {temp_label} ({temp_val})\n⏳ Запускаю генерацию...')
-            progress_task = asyncio.create_task(run_progress_bar(callback.bot, req['chat_id'], callback.message.message_id, selected_label))
+            progress_task = asyncio.create_task(run_progress_bar(callback.bot, req['chat_id'], callback.message.message_id, selected_label, state_data=state_data))
         except Exception:
             pass
         imgs = req.get('images_bytes') or ([req['image_bytes']] if req.get('image_bytes') else None)
         gen_id = f'img_{request_id}'
-        await save_pending_gen(gen_id=gen_id, gen_type='image', user_id=req['user_id'], chat_id=req['chat_id'], source_message_id=req['source_message_id'], message_thread_id=message_thread_id, prompt=req['prompt'], model=real_model, provider='gemini', file_ids=req.get('file_ids', []), model_label=selected_label)
-        (result_img, error_msg) = await generate_image_with_gemini(req['prompt'], images_bytes=imgs, model=real_model, temperature=temp_val)
-        if progress_task:
-            progress_task.cancel()
-            try:
-                await progress_task
-            except asyncio.CancelledError:
-                pass
-        await delete_pending_gen(gen_id)
+        try:
+            await save_pending_gen(gen_id=gen_id, gen_type='image', user_id=req['user_id'], chat_id=req['chat_id'], source_message_id=req['source_message_id'], message_thread_id=message_thread_id, prompt=req['prompt'], model=real_model, provider='gemini', file_ids=req.get('file_ids', []), model_label=selected_label)
+            (result_img, error_msg) = await generate_image_with_gemini(req['prompt'], images_bytes=imgs, model=real_model, temperature=temp_val, state_data=state_data)
+        except Exception as e:
+            logger.exception(f"Критическая ошибка во время генерации Gemini: {e}")
+            (result_img, error_msg) = (None, f"Внутренняя ошибка сервера: {type(e).__name__}: {e}")
+        finally:
+            if progress_task:
+                progress_task.cancel()
+                try:
+                    await progress_task
+                except asyncio.CancelledError:
+                    pass
+            await delete_pending_gen(gen_id)
         await _send_generation_result(callback.bot, req, request_id, result_img, error_msg, selected_label, imgs, reply_kwargs)
         return
     imgs = req.get('images_bytes') or ([req['image_bytes']] if req.get('image_bytes') else [])
@@ -440,27 +912,34 @@ async def handle_temp_select(callback: types.CallbackQuery):
 
 async def _send_generation_result(bot, request_data, request_id, result_img, error_msg, model_label, imgs, reply_kwargs):
     if error_msg:
-        err_msg = await bot.send_message(chat_id=request_data['chat_id'], text=f'❌ Ошибка:\n{error_msg}\n\n⏳ Ща спрошу у мозгов, че не так...', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
+        err_msg = await safe_send(bot.send_message, chat_id=request_data['chat_id'], text=f'❌ Ошибка:\n{error_msg}\n\n⏳ Ща спрошу у мозгов, че не так...', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
         first_image = imgs[0] if imgs else None
-        explanation = await explain_generation_error(request_data['prompt'] or '', error_msg, image_bytes=first_image)
-        if not explanation or 'Ебать, гугл зацензурил' in explanation:
-            explanation = 'Пиздец, твой промпт или фото настолько больное, что Гугл забанил даже попытку объяснить!'
         try:
-            await bot.edit_message_text(chat_id=request_data['chat_id'], message_id=err_msg.message_id, text=f'❌ Ошибка:\n{error_msg}\n\n🧠 Пояснение:\n{explanation}')
-        except Exception:
-            pass
+            explanation = await asyncio.wait_for(explain_generation_error(request_data['prompt'] or '', error_msg, image_bytes=first_image), timeout=30)
+        except Exception as e:
+            logging.warning(f'Image error explanation failed: {type(e).__name__}: {e}')
+            explanation = ''
+        if not explanation or 'Ебать, гугл зацензурил' in explanation:
+            explanation = _fallback_generation_error_explanation(error_msg)
+        if err_msg:
+            try:
+                await safe_send(bot.edit_message_text, chat_id=request_data['chat_id'], message_id=err_msg.message_id, text=f'❌ Ошибка:\n{error_msg}\n\n🧠 Пояснение:\n{explanation}')
+            except Exception:
+                pass
         return
     if result_img:
-        caption = f"🎨 Ваш результат ({model_label}) по запросу: {request_data['prompt']}" if request_data['prompt'] else f'🎨 Ваш результат ({model_label}) готов.'
-        await bot.send_photo(chat_id=request_data['chat_id'], photo=BufferedInputFile(result_img, filename='generated.jpg'), caption=caption, reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
-        upscale_msg = await bot.send_message(chat_id=request_data['chat_id'], text='⬆️ Улучшаю качество через AI upscaler...', **reply_kwargs)
+        caption = make_safe_caption(f"🎨 Ваш результат ({model_label}) по запросу: ", request_data['prompt']) if request_data['prompt'] else f'🎨 Ваш результат ({model_label}) готов.'
+        sent_photo = await safe_send(bot.send_photo, chat_id=request_data['chat_id'], photo=BufferedInputFile(result_img, filename='generated.jpg'), caption=caption, reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
+        if sent_photo:
+            _remember_generated_draw_message(request_data['chat_id'], sent_photo.message_id, result_img, request_data.get('prompt', ''), request_data.get('user_id', 0), request_data.get('username', ''), request_data.get('first_name', 'Аноним'))
+        upscale_msg = await safe_send(bot.send_message, chat_id=request_data['chat_id'], text='⬆️ Улучшаю качество через AI upscaler...', **reply_kwargs)
         (upscaled, up_err) = await upscale_image(result_img)
         try:
             await bot.delete_message(chat_id=request_data['chat_id'], message_id=upscale_msg.message_id)
         except Exception:
             pass
         if upscaled:
-            await bot.send_document(chat_id=request_data['chat_id'], document=BufferedInputFile(upscaled, filename='upscaled.png'), caption=f'✨ Улучшенная версия ({model_label}) 2x — без сжатия', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
+            await safe_send(bot.send_document, chat_id=request_data['chat_id'], document=BufferedInputFile(upscaled, filename='upscaled.png'), caption=f'✨ Улучшенная версия ({model_label}) 2x — без сжатия', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
         asyncio.create_task(add_user_stat(request_data.get('user_id', 0), request_data.get('username', ''), request_data.get('first_name', 'Аноним'), 'image'))
         asyncio.create_task(log_prompt(request_data.get('user_id', 0), request_data.get('username', ''), request_data.get('first_name', 'Аноним'), 'image', request_data.get('prompt', '')))
         return
@@ -638,18 +1117,24 @@ async def handle_nsfw_generate(callback: types.CallbackQuery):
                 return {'prompt': p, 'negative_prompt': _n if _n else _NSFW_DEFAULT_NEG, 'width': _w, 'height': _h, 'steps': _s, _ck: _c, 'scheduler': _sched, 'clip_skip': _clip, 'pag_scale': _pag, 'guidance_rescale': _resc, 'prepend_preprompt': _pre, 'seed': _seed, 'batch_size': _b}
             _REPLICATE_MODELS[model]['input'] = _sdxl_input
     progress_task = None
+    state_data = {'status': 'Инициализация...'}
     try:
         await callback.message.edit_text(f'⏳ Генерирую через {label}...')
-        progress_task = asyncio.create_task(run_progress_bar(callback.bot, d['chat_id'], callback.message.message_id, label))
+        progress_task = asyncio.create_task(run_progress_bar(callback.bot, d['chat_id'], callback.message.message_id, label, state_data=state_data))
     except Exception:
         pass
-    (results, error_msg) = await generate_image_with_replicate(d['prompt'], model=model)
-    if progress_task:
-        progress_task.cancel()
-        try:
-            await progress_task
-        except asyncio.CancelledError:
-            pass
+    try:
+        (results, error_msg) = await generate_image_with_replicate(d['prompt'], model=model, state_data=state_data)
+    except Exception as e:
+        logger.exception(f"Критическая ошибка во время генерации NSFW: {e}")
+        (results, error_msg) = (None, f"Внутренняя ошибка сервера: {type(e).__name__}: {e}")
+    finally:
+        if progress_task:
+            progress_task.cancel()
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                pass
     if error_msg or not results:
         await _send_generation_result(callback.bot, d, request_id, None, error_msg or 'Нет результата', label, None, reply_kwargs)
         return
@@ -771,8 +1256,34 @@ async def handle_prompt_base(callback: types.CallbackQuery):
         await callback.message.edit_text('Через какую модель генерировать?', reply_markup=_providers_keyboard(request_id, req.get('chat_id', data['chat_id']), len(data.get('images_bytes') or [])))
     except Exception:
         pass
-PROVIDER_MODELS: dict = {'gemini': [('Flash 3.1 Image', 'g31flash'), ('Flash 2.0 Image', 'g20flash')], 'gpt': [('GPT-Image-2', 'gpt2'), ('DALL-E 3', 'dalle3')], 'flux': [('FLUX Schnell (быстро)', 'schnell'), ('FLUX Dev (качество)', 'fluxdev'), ('FLUX Klein 4B', 'klein')], 'nsfw': [('WAI Illustrious v12', 'wai12'), ('WAI Illustrious v11', 'wai11'), ('NSFW FLUX Dev', 'nsfwflux')]}
-MODEL_TO_REAL: dict = {'g31flash': ('gemini', 'gemini-3.1-flash-image-preview'), 'g20flash': ('gemini', 'gemini-2.0-flash-preview-image-generation'), 'gpt2': ('gpt', 'gpt-image-2'), 'dalle3': ('gpt', 'dall-e-3'), 'schnell': ('flux', 'black-forest-labs/flux.1-schnell'), 'fluxdev': ('flux', 'black-forest-labs/flux.1-dev'), 'klein': ('flux', 'black-forest-labs/flux_2-klein-4b'), 'wai12': ('nsfw', 'aisha-ai-official/wai-nsfw-illustrious-v12'), 'wai11': ('nsfw', 'aisha-ai-official/wai-nsfw-illustrious-v11'), 'nsfwflux': ('nsfw', 'aisha-ai-official/nsfw-flux-dev')}
+PROVIDER_MODELS: dict = {
+    'gemini': [('Flash 3.1 Image', 'g31flash'), ('Flash 2.0 Image', 'g20flash')],
+    'gpt': [('GPT-Image-2', 'gpt2'), ('DALL-E 3', 'dalle3')],
+    'flux': [('FLUX Schnell (быстро)', 'schnell'), ('FLUX Dev (качество)', 'fluxdev'), ('FLUX Klein 4B', 'klein')],
+    'nsfw': [
+        ('Recraft V3 (Дизайн)', 'recraft3'),
+        ('FLUX.1 Dev (Реализм)', 'fluxdevr'),
+        ('FLUX.1 Schnell (Быстро)', 'fluxschnellr'),
+        ('WAI Illustrious v12 🔞', 'wai12'),
+        ('WAI Illustrious v11 🔞', 'wai11'),
+        ('NSFW FLUX Dev 🔞', 'nsfwflux')
+    ]
+}
+MODEL_TO_REAL: dict = {
+    'g31flash': ('gemini', 'gemini-3.1-flash-image-preview'),
+    'g20flash': ('gemini', 'gemini-2.0-flash-preview-image-generation'),
+    'gpt2': ('gpt', 'gpt-image-2'),
+    'dalle3': ('gpt', 'dall-e-3'),
+    'schnell': ('flux', 'black-forest-labs/flux.1-schnell'),
+    'fluxdev': ('flux', 'black-forest-labs/flux.1-dev'),
+    'klein': ('flux', 'black-forest-labs/flux_2-klein-4b'),
+    'recraft3': ('nsfw', 'recraft-ai/recraft-v3'),
+    'fluxdevr': ('nsfw', 'black-forest-labs/flux-dev'),
+    'fluxschnellr': ('nsfw', 'black-forest-labs/flux-schnell'),
+    'wai12': ('nsfw', 'aisha-ai-official/wai-nsfw-illustrious-v12'),
+    'wai11': ('nsfw', 'aisha-ai-official/wai-nsfw-illustrious-v11'),
+    'nsfwflux': ('nsfw', 'aisha-ai-official/nsfw-flux-dev')
+}
 TTS_MODELS: dict = {'tts0': ('Gemini Flash TTS Preview', 'gemini-3.1-flash-tts-preview')}
 
 async def refresh_models():
@@ -786,6 +1297,25 @@ async def refresh_models():
         PROVIDER_MODELS['gpt'] = [(label, f'oi{i}') for (i, (label, _)) in enumerate(openai_models)]
         for (i, (_, model_id)) in enumerate(openai_models):
             MODEL_TO_REAL[f'oi{i}'] = ('gpt', model_id)
+    replicate_models = await fetch_replicate_image_models()
+    if replicate_models:
+        custom_models = [
+            ('Recraft V3 (Дизайн)', 'recraft-ai/recraft-v3'),
+            ('FLUX.1 Dev (Реализм)', 'black-forest-labs/flux-dev'),
+            ('FLUX.1 Schnell (Быстро)', 'black-forest-labs/flux-schnell'),
+            ('WAI Illustrious v12 🔞', 'aisha-ai-official/wai-nsfw-illustrious-v12'),
+            ('WAI Illustrious v11 🔞', 'aisha-ai-official/wai-nsfw-illustrious-v11'),
+            ('NSFW FLUX Dev 🔞', 'aisha-ai-official/nsfw-flux-dev')
+        ]
+        all_models = custom_models.copy()
+        custom_paths = {p for (_, p) in custom_models}
+        for (label, path) in replicate_models:
+            if path not in custom_paths:
+                all_models.append((label, path))
+        all_models = all_models[:25]
+        PROVIDER_MODELS['nsfw'] = [(label, f'rep{i}') for (i, (label, _)) in enumerate(all_models)]
+        for (i, (_, model_id)) in enumerate(all_models):
+            MODEL_TO_REAL[f'rep{i}'] = ('nsfw', model_id)
     veo_models = await fetch_veo_models()
     if veo_models:
         for (i, (label, model_id)) in enumerate(veo_models):
@@ -858,7 +1388,7 @@ async def handle_provider_select(callback: types.CallbackQuery):
     for (label, mid) in models:
         rows.append([InlineKeyboardButton(text=label, callback_data=f'imgsel:{request_id}:{mid}')])
     rows.append([InlineKeyboardButton(text='← Назад', callback_data=f'imgback:{request_id}')])
-    provider_names = {'gemini': 'Gemini', 'gpt': 'GPT', 'flux': 'FLUX (NVIDIA)'}
+    provider_names = {'gemini': 'Gemini', 'gpt': 'GPT', 'flux': 'FLUX (NVIDIA)', 'nsfw': 'Replicate'}
     await callback.answer()
     try:
         await callback.message.edit_text(f'Выберите модель {provider_names.get(provider, provider)}:', reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -881,7 +1411,7 @@ async def handle_provider_back(callback: types.CallbackQuery):
         await callback.answer('Только автор запроса.', show_alert=True)
         return
     await callback.answer()
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Gemini', callback_data=f'imgprov:{request_id}:gemini'), InlineKeyboardButton(text='GPT', callback_data=f'imgprov:{request_id}:gpt'), InlineKeyboardButton(text='FLUX', callback_data=f'imgprov:{request_id}:flux')]])
+    keyboard = _providers_keyboard(request_id, request_data['chat_id'], len(request_data.get('images_bytes') or []))
     try:
         await callback.message.edit_text('Через какую модель хотите сгенерировать фото?', reply_markup=keyboard)
     except Exception:
@@ -941,47 +1471,47 @@ async def handle_image_model_select(callback: types.CallbackQuery):
         reply_kwargs['message_thread_id'] = message_thread_id
     await callback.bot.send_chat_action(chat_id=request_data['chat_id'], action='upload_photo', message_thread_id=message_thread_id)
     progress_task = None
+    state_data = {'status': 'Инициализация...'}
     if callback.message:
         try:
             await callback.message.edit_text('⏳ Запускаю генерацию...')
-            progress_task = asyncio.create_task(run_progress_bar(callback.bot, request_data['chat_id'], callback.message.message_id, selected_label))
+            progress_task = asyncio.create_task(run_progress_bar(callback.bot, request_data['chat_id'], callback.message.message_id, selected_label, state_data=state_data))
         except Exception:
             pass
     imgs = request_data.get('images_bytes') or ([request_data['image_bytes']] if request_data.get('image_bytes') else None)
     gen_id = f'img_{request_id}'
-    await save_pending_gen(gen_id=gen_id, gen_type='image', user_id=request_data['user_id'], chat_id=request_data['chat_id'], source_message_id=request_data['source_message_id'], message_thread_id=request_data['message_thread_id'], prompt=request_data['prompt'], model=real_model, provider=provider, file_ids=request_data.get('file_ids', []), model_label=selected_label)
-    if provider == 'gpt':
-        (result_img, error_msg) = await generate_image_with_gpt(request_data['prompt'], images_bytes=imgs, model=real_model)
-        if error_msg and is_openai_verification_error(error_msg):
-            await callback.bot.send_message(chat_id=request_data['chat_id'], text='⚠️ GPT сейчас недоступен: организация OpenAI не верифицирована. Переключаюсь на Gemini.', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
-            selected_label = 'Gemini Flash 3.1'
-            (result_img, error_msg) = await generate_image_with_gemini(request_data['prompt'], images_bytes=imgs, temperature=request_data.get('temperature', 1.0))
-        elif error_msg and is_openai_timeout_error(error_msg):
-            await callback.bot.send_message(chat_id=request_data['chat_id'], text='⚠️ GPT не ответил вовремя. Переключаюсь на Gemini.', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
-            selected_label = 'Gemini Flash 3.1'
-            (result_img, error_msg) = await generate_image_with_gemini(request_data['prompt'], images_bytes=imgs, temperature=request_data.get('temperature', 1.0))
-    elif provider == 'flux':
-        (result_img, error_msg) = await generate_image_with_nvidia(request_data['prompt'], model=real_model)
-    elif provider == 'nsfw':
-        (result_img, error_msg) = await generate_image_with_replicate(request_data['prompt'], model=real_model)
-    else:
-        (result_img, error_msg) = await generate_image_with_gemini(request_data['prompt'], images_bytes=imgs, model=real_model, temperature=request_data.get('temperature', 1.0))
-    if progress_task:
-        progress_task.cancel()
-        try:
-            await progress_task
-        except asyncio.CancelledError:
-            pass
-    await delete_pending_gen(gen_id)
+    try:
+        await save_pending_gen(gen_id=gen_id, gen_type='image', user_id=request_data['user_id'], chat_id=request_data['chat_id'], source_message_id=request_data['source_message_id'], message_thread_id=request_data['message_thread_id'], prompt=request_data['prompt'], model=real_model, provider=provider, file_ids=request_data.get('file_ids', []), model_label=selected_label)
+        if provider == 'gpt':
+            (result_img, error_msg) = await generate_image_with_gpt(request_data['prompt'], images_bytes=imgs, model=real_model, state_data=state_data)
+        elif provider == 'flux':
+            (result_img, error_msg) = await generate_image_with_nvidia(request_data['prompt'], model=real_model, state_data=state_data)
+        elif provider == 'nsfw':
+            (result_img, error_msg) = await generate_image_with_replicate(request_data['prompt'], model=real_model, state_data=state_data)
+        else:
+            (result_img, error_msg) = await generate_image_with_gemini(request_data['prompt'], images_bytes=imgs, model=real_model, temperature=request_data.get('temperature', 1.0), state_data=state_data)
+    except Exception as e:
+        logger.exception(f"Критическая ошибка во время генерации изображения: {e}")
+        (result_img, error_msg) = (None, f"Внутренняя ошибка сервера: {type(e).__name__}: {e}")
+    finally:
+        if progress_task:
+            progress_task.cancel()
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                pass
+        await delete_pending_gen(gen_id)
     await _send_generation_result(callback.bot, request_data, request_id, result_img, error_msg, selected_label, imgs, reply_kwargs)
 VEO_MODELS: dict = {'veo0': ('Veo 2', 'veo-2.0-generate-001'), 'veo1': ('Veo 3.1 Fast', 'veo-3.1-fast-generate-preview'), 'veo2': ('Veo 3.1', 'veo-3.1-generate-preview'), 'veo3': ('Veo 3.1 Lite', 'veo-3.1-lite-generate-preview')}
 VIDEO_COOLDOWN = 60
 
 @router.message(Command("up"))
 async def cmd_up(message: types.Message):
-    if message.chat.type != "private" or message.from_user.id != 7485721661:
+    is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
+    if not is_member:
+        await message.reply('Доступ запрещен.')
         return
-    
+
     if not message.photo:
         await message.reply("Прикрепи фото для апскейла.")
         return
@@ -1076,40 +1606,52 @@ async def handle_veo_model_select(callback: types.CallbackQuery):
     if message_thread_id:
         reply_kwargs['message_thread_id'] = message_thread_id
     progress_task = None
+    state_data = {'status': 'Инициализация...'}
     if callback.message:
         try:
             await callback.message.edit_text('⏳ Запускаю генерацию видео...')
-            progress_task = asyncio.create_task(run_progress_bar(callback.bot, request_data['chat_id'], callback.message.message_id, model_label))
+            progress_task = asyncio.create_task(run_progress_bar(callback.bot, request_data['chat_id'], callback.message.message_id, model_label, state_data=state_data))
         except Exception:
             pass
     await callback.bot.send_chat_action(chat_id=request_data['chat_id'], action='upload_video', message_thread_id=message_thread_id)
-    (op_name, api_key, start_err) = await start_veo_generation(request_data['prompt'], model=real_model, image_bytes=request_data.get('image_bytes'))
     gen_id = f'veo_{request_id}'
-    if op_name:
-        await save_pending_gen(gen_id=gen_id, gen_type='video', user_id=request_data['user_id'], chat_id=request_data['chat_id'], source_message_id=request_data['source_message_id'], message_thread_id=request_data['message_thread_id'], prompt=request_data['prompt'], model=real_model, provider='veo', veo_operation_name=op_name, veo_api_key=api_key, model_label=model_label)
-        (video_bytes, error_msg) = await poll_veo_operation(op_name, api_key)
-    else:
-        (video_bytes, error_msg) = (None, start_err)
-    if progress_task:
-        progress_task.cancel()
-        try:
-            await progress_task
-        except asyncio.CancelledError:
-            pass
-    await delete_pending_gen(gen_id)
-    if error_msg:
-        error_sent_msg = await callback.bot.send_message(chat_id=request_data['chat_id'], text=f'❌ Ошибка генерации видео:\n{error_msg}\n\n⏳ Ща спрошу у мозгов, че не так...', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
-        image_for_explain = request_data.get('image_bytes')
-        explanation = await explain_generation_error(request_data['prompt'], error_msg, image_bytes=image_for_explain)
-        if explanation:
+    try:
+        (op_name, api_key, start_err) = await start_veo_generation(request_data['prompt'], model=real_model, image_bytes=request_data.get('image_bytes'), state_data=state_data)
+        if op_name:
+            await save_pending_gen(gen_id=gen_id, gen_type='video', user_id=request_data['user_id'], chat_id=request_data['chat_id'], source_message_id=request_data['source_message_id'], message_thread_id=request_data['message_thread_id'], prompt=request_data['prompt'], model=real_model, provider='veo', veo_operation_name=op_name, veo_api_key=api_key, model_label=model_label)
+            (video_bytes, error_msg) = await poll_veo_operation(op_name, api_key, state_data=state_data)
+        else:
+            (video_bytes, error_msg) = (None, start_err)
+    except Exception as e:
+        logger.exception(f"Критическая ошибка во время генерации Veo: {e}")
+        (video_bytes, error_msg) = (None, f"Внутренняя ошибка сервера: {type(e).__name__}: {e}")
+    finally:
+        if progress_task:
+            progress_task.cancel()
             try:
-                await callback.bot.edit_message_text(chat_id=request_data['chat_id'], message_id=error_sent_msg.message_id, text=f'❌ Ошибка генерации видео:\n{error_msg}\n\n🧠 Пояснение:\n{explanation}')
+                await progress_task
+            except asyncio.CancelledError:
+                pass
+        await delete_pending_gen(gen_id)
+    if error_msg:
+        error_sent_msg = await safe_send(callback.bot.send_message, chat_id=request_data['chat_id'], text=f'❌ Ошибка генерации видео:\n{error_msg}\n\n⏳ Ща спрошу у мозгов, че не так...', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
+        image_for_explain = request_data.get('image_bytes')
+        try:
+            explanation = await asyncio.wait_for(explain_generation_error(request_data['prompt'], error_msg, image_bytes=image_for_explain), timeout=30)
+        except Exception as e:
+            logging.warning(f'Video error explanation failed: {type(e).__name__}: {e}')
+            explanation = ''
+        if not explanation:
+            explanation = _fallback_generation_error_explanation(error_msg)
+        if error_sent_msg:
+            try:
+                await safe_send(callback.bot.edit_message_text, chat_id=request_data['chat_id'], message_id=error_sent_msg.message_id, text=f'❌ Ошибка генерации видео:\n{error_msg}\n\n🧠 Пояснение:\n{explanation}')
             except Exception:
                 pass
         return
     if video_bytes:
         video_file = BufferedInputFile(video_bytes, filename='generated.mp4')
-        caption = f"🎬 Видео ({model_label}) по запросу: {request_data['prompt']}"
+        caption = make_safe_caption(f"🎬 Видео ({model_label}) по запросу: ", request_data['prompt'])
         await callback.bot.send_video(chat_id=request_data['chat_id'], video=video_file, caption=caption, reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
         asyncio.create_task(add_user_stat(request_data.get('user_id', 0), request_data.get('username', ''), request_data.get('first_name', 'Аноним'), 'video'))
         asyncio.create_task(log_prompt(request_data.get('user_id', 0), request_data.get('username', ''), request_data.get('first_name', 'Аноним'), 'video', request_data.get('prompt', '')))
@@ -1370,12 +1912,18 @@ async def handle_video(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
         return
+    bot_user = await message.bot.get_me()
+    is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
+    is_private = message.chat.type == 'private'
+    if not is_private and not is_reply_to_bot:
+        return
     vid = message.video or message.animation
     if not vid and message.document:
         if not message.document.mime_type or not message.document.mime_type.startswith('video/'):
             return
         vid = message.document
     prompt = message.caption or ''
+    bot_user = await message.bot.get_me()
     if bot_user.username:
         prompt = prompt.replace(f'@{bot_user.username}', '').strip()
     if not prompt:
@@ -1427,8 +1975,8 @@ async def handle_video(message: types.Message):
             filename = f'говняный_код_{uuid.uuid4().hex[:4]}.{ext}'
             doc = BufferedInputFile(code.strip().encode('utf-8'), filename=filename)
             await message.bot.send_document(chat_id=message.chat.id, document=doc, reply_to_message_id=sent_msg.message_id, **reply_kwargs)
-    asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'video'))
-    asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'video', prompt))
+    asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text'))
+    asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text', prompt))
 
 def _track_user(message: types.Message):
     if message.from_user and message.chat.type != 'private':
@@ -1438,8 +1986,36 @@ def _track_user(message: types.Message):
             chat_members_cache[cid] = {}
         chat_members_cache[cid][uid] = (message.from_user.first_name or 'Аноним', message.from_user.username)
 
+@router.message(Command("dual"))
+async def cmd_dual(message: Message):
+    from dual_bot import start_dual, BOT1_DUAL_NAME, BOT2_DUAL_NAME
+    if message.chat.id != FULL_ACCESS_CHAT_ID:
+        return
+    chat_id = message.chat.id
+    thread_id = message.message_thread_id
+    started = start_dual(chat_id, thread_id)
+    if started:
+        await message.reply(f"🤖 {BOT1_DUAL_NAME} vs {BOT2_DUAL_NAME} — начали базарить. /stopdual чтобы заткнуть.")
+    else:
+        await message.reply("Уже идёт, тупой.")
+
+
+@router.message(Command("stopdual"))
+async def cmd_stopdual(message: Message):
+    from dual_bot import stop_dual
+    if message.chat.id != FULL_ACCESS_CHAT_ID:
+        return
+    stopped = stop_dual(message.chat.id)
+    if stopped:
+        await message.reply("Заткнулись.")
+    else:
+        await message.reply("Никто не говорит.")
+
+
 @router.message(F.text)
 async def handle_text_messages(message: types.Message):
+    if message.from_user and message.from_user.is_bot:
+        return
     _track_user(message)
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
@@ -1493,6 +2069,7 @@ async def handle_text_messages(message: types.Message):
             except Exception:
                 await message.bot.send_message(chat_id=d['chat_id'], text=_tts_cfg_text(request_id), reply_markup=_tts_cfg_keyboard(request_id))
         return
+    asyncio.create_task(_maybe_send_random_chat_media(message))
     bot_user = await message.bot.get_me()
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
     is_mentioned = bot_user.username and f'@{bot_user.username}' in message.text
@@ -1509,6 +2086,7 @@ async def handle_text_messages(message: types.Message):
             prompt = prompt.replace(f'@{bot_user.username}', '').strip()
         if not prompt:
             prompt = 'Что тебе надо, хуйло?'
+        web_query = prompt
         if is_reply_to_bot and message.reply_to_message.text:
             replied_text = message.reply_to_message.text[:500]
             prompt = f'[Контекст — ты написал ранее: «{replied_text}»]\n{prompt}'
@@ -1518,27 +2096,97 @@ async def handle_text_messages(message: types.Message):
             reply_kwargs['message_thread_id'] = message.message_thread_id
         thinking_msg = await message.reply('⏳ Думаю...', **reply_kwargs)
         await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
-        _code_kw = ['напиши код', 'напиши скрипт', 'сделай скрипт', 'напиши программу', 'напиши функцию', 'создай скрипт', 'создай код', 'напиши бота', 'сделай бота', 'напиши сайт', 'сделай сайт', 'напиши приложение', 'создай сайт', 'создай приложение', 'напиши парсер', 'сделай парсер', 'напиши апи', 'сделай апи', 'напиши api', 'напиши хэндлер', 'реализуй', 'write code', 'write a script', 'write a bot', 'write a site', 'write a website', 'write an app']
-        is_code_request = any((kw in prompt.lower() for kw in _code_kw))
+        replied_draw = None
+        if is_reply_to_bot and message.reply_to_message and message.reply_to_message.photo:
+            replied_draw = generated_draw_messages.get((message.chat.id, message.reply_to_message.message_id))
+            if replied_draw is None:
+                replied_image = await _download_message_photo(message.bot, message.reply_to_message)
+                if replied_image:
+                    replied_draw = {'image_bytes': replied_image, 'prompt': message.reply_to_message.caption or ''}
+        draw_info = await classify_draw_intent_with_gemini(web_query, has_replied_image=bool(replied_draw))
+        if draw_info.get('draw_request') or draw_info.get('edit_request'):
+            handled = await _handle_natural_draw_request(message, web_query, draw_info, replied_draw, reply_kwargs, thinking_msg)
+            if handled:
+                return
+        is_code_request = _is_code_generation_request(prompt)
+        if not is_code_request:
+            is_code_request = await classify_code_intent_with_gemini(prompt)
         if is_code_request:
-            text_response = await generate_code_with_gemini(prompt)
+            lower_prompt = prompt.lower()
+            wants_archive = any(marker in lower_prompt for marker in ['zip', 'зип', 'архив', 'не 1 монолит', 'не одним файлом', 'проект', 'pydroid', 'pydroid3'])
+            try:
+                await thinking_msg.edit_text('⏳ Собираю файлы/zip, это может занять до 100 сек...', **reply_kwargs)
+            except Exception:
+                pass
+            try:
+                project_payload = await asyncio.wait_for(generate_project_with_gemini(prompt), timeout=300)
+            except asyncio.TimeoutError:
+                project_payload = {'ok': False, 'error': 'timeout'}
             asyncio.create_task(add_user_stat(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'code'))
             asyncio.create_task(log_prompt(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'code', prompt))
+            if project_payload.get('ok'):
+                try:
+                    await thinking_msg.delete()
+                except Exception:
+                    pass
+                await _send_generated_project(message, project_payload, reply_kwargs)
+                return
+            if wants_archive:
+                try:
+                    await thinking_msg.delete()
+                except Exception:
+                    pass
+                await message.reply('Gemini сейчас тупит или перегружен, zip не собрался. Попробуй ещё раз через минуту — я не буду врать sandbox-ссылкой и не буду держать тебя на вечном “Думаю...”.', **reply_kwargs)
+                return
+            logging.warning(f"Project gen failed, fallback to code markdown: {project_payload.get('error')}")
+            text_response = await generate_code_with_gemini(prompt)
         else:
-            text_response = await generate_text_with_gemini(prompt, message.chat.id, username=username)
+            last_status_edit = 0.0
+            last_status_text = ''
+
+            async def _status_cb(text: str):
+                nonlocal last_status_edit, last_status_text
+                now = time.monotonic()
+                if text == last_status_text or now - last_status_edit < 3:
+                    return
+                try:
+                    await thinking_msg.edit_text(text)
+                    last_status_edit = time.monotonic()
+                    last_status_text = text
+                except TelegramRetryAfter as e:
+                    retry_after = float(getattr(e, 'retry_after', 3) or 3)
+                    last_status_edit = time.monotonic() + retry_after
+                    logging.warning(f'Status edit flood wait {retry_after:.0f}s; skipping status update')
+                except Exception as e:
+                    logging.debug(f'Status edit skipped: {type(e).__name__}')
+            try:
+                text_response = await asyncio.wait_for(
+                    generate_text_with_gemini(prompt, message.chat.id, username=username, web_query=web_query, status_cb=_status_cb),
+                    timeout=240,
+                )
+            except asyncio.TimeoutError:
+                logging.warning(f'Text generation timed out after 240s for chat={message.chat.id}, user={message.from_user.id}')
+                text_response = 'Интернет-поиск затянулся и я его прибил, чтобы не держать вечное “Думаю...”. Попробуй сузить запрос или повтори через минуту.'
+            except Exception as e:
+                logging.exception(f'Text generation failed: {type(e).__name__}')
+                text_response = 'Мозги споткнулись об ошибку, но вечное “Думаю...” я тебе не оставлю. Попробуй ещё раз.'
             asyncio.create_task(add_user_stat(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'text'))
             asyncio.create_task(log_prompt(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'text', prompt))
         try:
             await thinking_msg.delete()
         except Exception:
             pass
+        text_response = await _handle_kick_directive(message, text_response, reply_kwargs)
         code_blocks = re.findall('```(\\w*)\\n(.*?)```', text_response, re.DOTALL)
-        cleaned_text = re.sub('```(\\w*)\\n(.*?)```', '', text_response, flags=re.DOTALL).strip()
+        cleaned_text = _clean_plain_reply(re.sub('```(\\w*)\\n(.*?)```', '', text_response, flags=re.DOTALL).strip())
         if not cleaned_text and code_blocks:
             cleaned_text = 'Вот твой ебаный код, подавись нахуй.'
         elif not cleaned_text:
             cleaned_text = 'Нихуя не понял, но иди в пизду.'
-        sent_msg = await message.reply(cleaned_text, **reply_kwargs)
+        sent_msg = await safe_send(message.reply, cleaned_text, **reply_kwargs)
+        if not sent_msg:
+            logging.warning('Final text reply was not sent after flood-control retries')
+            return
         if code_blocks:
             for (lang, code) in code_blocks:
                 ext = lang.strip().lower() or 'txt'
@@ -1566,4 +2214,4 @@ async def handle_text_messages(message: types.Message):
                     ext = 'xml'
                 filename = f'говняный_код_{uuid.uuid4().hex[:4]}.{ext}'
                 doc = BufferedInputFile(code.strip().encode('utf-8'), filename=filename)
-                await message.bot.send_document(chat_id=message.chat.id, document=doc, reply_to_message_id=sent_msg.message_id, **reply_kwargs)
+                await safe_send(message.bot.send_document, chat_id=message.chat.id, document=doc, reply_to_message_id=sent_msg.message_id, **reply_kwargs)
