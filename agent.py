@@ -139,7 +139,7 @@ class _ToolBudget:
         "web_search": 8, "scrape_url": 10, "generate_project": 2,
         "think": 30, "reply": 3, "generate_image": 3,
         "search_and_send_image": 3, "download_image": 5,
-        "download_video": 2, "text_to_speech": 3,
+        "search_and_send_video": 2, "download_video": 2, "text_to_speech": 3,
         "run_python": 6, "run_shell": 8,
         "write_file": 10, "read_file": 10,
         "fetch_json": 8, "calculate": 20,
@@ -431,6 +431,91 @@ async def _tool_download_video(url: str, caption: str, send_cb: Callable) -> str
         return f"Video ({size // 1024 // 1024} MB) sent."
 
 
+async def _find_video_urls(query: str) -> list[str]:
+    """Extract YouTube / TikTok / VK URLs from Firecrawl search results."""
+    results = await _fc_search(f"{query} site:youtube.com OR site:tiktok.com OR site:vk.com")
+    patterns = [
+        r'https?://(?:www\.)?youtube\.com/watch\?[^\s\)"\'<>]+',
+        r'https?://youtu\.be/[^\s\)"\'<>]+',
+        r'https?://(?:www\.)?tiktok\.com/@[^\s\)"\'<>]+/video/[^\s\)"\'<>]+',
+        r'https?://vm\.tiktok\.com/[^\s\)"\'<>]+',
+        r'https?://vk\.com/video[^\s\)"\'<>]+',
+    ]
+    urls: list[str] = []
+    for pat in patterns:
+        urls.extend(re.findall(pat, results))
+    seen: set[str] = set()
+    clean: list[str] = []
+    for u in urls:
+        u = u.rstrip('.,;)"\'>]')
+        if u not in seen:
+            seen.add(u)
+            clean.append(u)
+    return clean[:8]
+
+
+async def _tool_search_video(
+    query: str, description: str, send_cb: Callable, status_cb: Callable
+) -> str:
+    """Autonomous video search: find URL → yt-dlp download → retry with refined query."""
+    keys = load_keys()
+    max_rounds = 3
+    tried_queries: list[str] = []
+
+    async def _st(t: str):
+        try: await status_cb(t)
+        except Exception: pass
+
+    for rnd in range(max_rounds):
+        if rnd == 0:
+            current_query = query
+        else:
+            if keys:
+                payload = {
+                    "contents": [{"parts": [{"text":
+                        f"Give a better YouTube/TikTok search query to find: '{description or query}'. "
+                        f"Previous failed: {tried_queries}. Return ONLY the query."
+                    }]}],
+                    "generationConfig": {"temperature": 0.5, "maxOutputTokens": 30},
+                }
+                url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+                try:
+                    async with aiohttp.ClientSession() as s:
+                        async with s.post(
+                            url, json=payload,
+                            headers={"Content-Type": "application/json", "x-goog-api-key": keys[0]},
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                current_query = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                            else:
+                                current_query = f"{query} official edit"
+                except Exception:
+                    current_query = f"{query} edit"
+            else:
+                current_query = f"{query} edit"
+
+        tried_queries.append(current_query)
+        await _st(f"🔎 Ищу видео: «{current_query}» (попытка {rnd + 1}/{max_rounds})")
+
+        video_urls = await _find_video_urls(current_query)
+        if not video_urls:
+            await _st(f"⚠️ Ссылок не нашёл, меняю запрос...")
+            continue
+
+        await _st(f"📥 Нашёл {len(video_urls)} ссылок, пробую скачать...")
+        for vid_url in video_urls[:5]:
+            result = await _tool_download_video(vid_url, description or query, send_cb)
+            if "sent" in result.lower() or "mb)" in result.lower():
+                return f"Video found and sent (query: '{current_query}')."
+            logger.debug(f"search_video: {vid_url!r} → {result[:80]}")
+
+        await _st(f"⚠️ Ни одно видео не скачалось, ищу лучше...")
+
+    return f"Не смог найти и скачать видео за {max_rounds} попытки. Пробовал: {tried_queries}"
+
+
 async def _tool_tts(text: str, voice: str, lang: str, send_cb: Callable) -> str:
     audio, err = await generate_tts_with_gemini(
         text, model="gemini-3.5-flash-tts",
@@ -658,8 +743,24 @@ _TOOLS = [
         "parameters": {"type": "object", "properties": {"url": {"type": "string"}, "caption": {"type": "string"}}, "required": ["url"]},
     },
     {
+        "name": "search_and_send_video",
+        "description": (
+            "Autonomously search for a video by description, find its URL on YouTube/TikTok/VK, "
+            "download via yt-dlp and send to chat. Retries with refined queries if download fails. "
+            "Use this when user asks to FIND and send a video — don't use web_search+download_video manually."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query for the video"},
+                "description": {"type": "string", "description": "What a good result should look like"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "download_video",
-        "description": "Download video from YouTube, TikTok, Instagram, Twitter/X, VK via yt-dlp and send. Max 48MB / 720p.",
+        "description": "Download video from a specific known URL via yt-dlp and send. Max 48MB / 720p.",
         "parameters": {"type": "object", "properties": {"url": {"type": "string"}, "caption": {"type": "string"}}, "required": ["url"]},
     },
     {
@@ -772,8 +873,10 @@ _SYSTEM = (
     "  → run_python для Python-кода (вычисления, data, matplotlib и т.д.)\n"
     "  НЕ generate_project — это для создания файлов, не для выполнения команд\n\n"
     "ЕСЛИ просят НАЙТИ картинку/фото:\n"
-    "  → search_and_send_image — сам найдёт, проверит Gemini vision, пришлёт лучшую\n"
-    "  НЕ web_search + download_image — это медленнее и тупее\n\n"
+    "  → search_and_send_image — сам найдёт, проверит Gemini vision, пришлёт лучшую\n\n"
+    "ЕСЛИ просят НАЙТИ видео/эдит/клип по описанию:\n"
+    "  → search_and_send_video — сам найдёт YouTube/TikTok ссылку, скачает, пришлёт\n"
+    "  НЕ web_search + download_video вручную\n\n"
     "ЕСЛИ просят СОЗДАТЬ проект/сайт/программу:\n"
     "  → web_search (если нужен контекст) → generate_project\n\n"
     "ЕСЛИ просят СКАЧАТЬ видео:\n"
@@ -871,6 +974,11 @@ async def _execute_tool(
 
     if name == "search_and_send_image":
         return await _tool_search_image(
+            args.get("query", ""), args.get("description", ""), _send, status_cb
+        ), None
+
+    if name == "search_and_send_video":
+        return await _tool_search_video(
             args.get("query", ""), args.get("description", ""), _send, status_cb
         ), None
 
