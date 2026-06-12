@@ -495,7 +495,8 @@ async def _verify_video_creator(url: str, creator: str) -> tuple[bool, str]:
         re.search(r'@([a-zA-Z0-9_.]{2,32})', page) or
         re.search(r'(?:channel|author|by|creator)[:\s]+([a-zA-Z0-9_. -]{2,40})', page, re.IGNORECASE)
     )
-    found_name = author_match.group(1).strip() if author_match else ""
+    raw_name = author_match.group(1).strip() if author_match else ""
+    found_name = re.sub(r'[^\w\s.@\-]', '', raw_name)[:80]
     found_slug = re.sub(r'[^a-z0-9]', '', found_name.lower())
 
     if slug_lower and (slug_lower in page_lower or found_slug == slug_lower):
@@ -568,7 +569,8 @@ async def _tool_search_video(
             result = await _tool_download_video(vid_url, description or query, send_cb)
             if "sent" in result.lower() or "mb)" in result.lower():
                 safe_url = vid_url.replace('\n', '').replace('\r', '').replace('\t', '')[:200]
-                creator_info = f", автор: {creator}" if creator else ""
+                safe_creator = re.sub(r'[^\w\s.@\-]', '', creator)[:80]
+                creator_info = f", автор: {safe_creator}" if safe_creator else ""
                 return f"[ОТПРАВЛЕНО] Видео скачано и отправлено{creator_info}. Источник: {safe_url}"
             logger.debug(f"search_video dl failed: {vid_url!r} → {result[:80]}")
 
