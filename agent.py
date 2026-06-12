@@ -1034,8 +1034,10 @@ async def classify_agent_intent(prompt: str) -> bool:
         "contents": [{"role": "user", "parts": [{"text": prompt[:800]}]}],
         "generationConfig": {
             "temperature": 0,
-            "maxOutputTokens": 10,
-            # No thinkingConfig — thinking tokens consume the tiny output budget
+            # thinkingLevel "minimal" uses ~5-20 thinking tokens from the same budget.
+            # maxOutputTokens must be large enough to leave room for actual output.
+            "maxOutputTokens": 64,
+            "thinkingConfig": {"thinkingLevel": "minimal"},
         },
     }
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"

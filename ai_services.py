@@ -25,8 +25,11 @@ _FIRECRAWL_TRANSIENT_STATUSES = {408, 429, 500, 502, 503, 504}
 
 
 def _thinking_config(model_name: str, level: str) -> dict[str, object]:
-    if model_name.startswith('gemini-3.5'):
+    # Gemini 3.x series (3.1, 3.5, …) → thinkingLevel (minimal/low/medium/high)
+    # Thinking tokens count against maxOutputTokens — keep budget large enough
+    if model_name.startswith('gemini-3'):
         return {'thinkingLevel': level}
+    # Gemini 2.5 series → thinkingBudget (-1 = dynamic, 0 = off)
     return {'thinkingBudget': -1}
 
 
