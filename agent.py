@@ -226,41 +226,76 @@ async def _fc_scrape(url: str) -> str:
 
 # ── Image search with self-evaluation ───────────────────────────
 
-async def _ddg_image_urls(query: str) -> list[str]:
-    """DuckDuckGo unofficial image search — no API key needed."""
-    hdrs = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                "https://duckduckgo.com/",
-                params={"q": query, "iax": "images", "ia": "images"},
-                headers=hdrs,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                text = await resp.text()
+async def _search_image_urls(query: str) -> list[str]:
+    """Find image URLs via Firecrawl search + page scraping for ogImage metadata."""
+    seen: set[str] = set()
+    result: list[str] = []
+    img_pattern = re.compile(
+        r'https?://[^\s\)"\'>]+\.(?:jpg|jpeg|png|webp)(?:\?[^\s\)"\'>]*)?',
+        re.IGNORECASE,
+    )
+    skip_words = ('icon', 'logo', 'favicon', 'avatar', '1x1', 'pixel', 'sprite', 'button')
 
-            m = (re.search(r'vqd="([^"]+)"', text)
-                 or re.search(r"vqd='([^']+)'", text)
-                 or re.search(r'vqd=([\d-]+)', text))
-            if not m:
-                return []
-            vqd = m.group(1)
+    def _add(url: str):
+        url = url.rstrip('.,;)>"\']')
+        if url and url not in seen and not any(s in url.lower() for s in skip_words):
+            seen.add(url)
+            result.append(url)
 
-            async with s.get(
-                "https://duckduckgo.com/i.js",
-                params={"q": query, "vqd": vqd, "l": "us-en",
-                        "o": "json", "f": ",,,,,", "p": "1"},
-                headers=hdrs,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                data = await resp.json(content_type=None)
-                return [r["image"] for r in data.get("results", [])[:12] if r.get("image")]
-    except Exception as e:
-        logger.warning(f"DDG image search: {e}")
-        return []
+    # Step 1: Firecrawl search — extract ogImage from metadata + image URLs from markdown
+    search_queries = [
+        f"{query} hd wallpaper screenshot",
+        f"{query} image",
+    ]
+    fc_keys = load_firecrawl_keys()
+    if fc_keys:
+        for q in search_queries:
+            payload = {"query": q[:400], "limit": 6, "sources": [{"type": "web"}],
+                       "scrapeOptions": {"formats": ["markdown"], "onlyMainContent": True}}
+            for key in fc_keys:
+                headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+                try:
+                    async with aiohttp.ClientSession() as s:
+                        async with s.post(
+                            "https://api.firecrawl.dev/v2/search",
+                            json=payload, headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=_SEARCH_TIMEOUT),
+                        ) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                pages = data.get("data", [])
+                                if isinstance(pages, dict):
+                                    pages = pages.get("results", []) or pages.get("web", [])
+                                for page in pages:
+                                    # ogImage is often a high-quality representative image
+                                    og = (page.get("metadata") or {}).get("ogImage", "")
+                                    if og:
+                                        _add(og)
+                                    # Also extract from markdown
+                                    md = page.get("markdown", "") or page.get("description", "")
+                                    for u in img_pattern.findall(md or ""):
+                                        _add(u)
+                            elif resp.status in (401, 402):
+                                remove_key(key, resp.status)
+                                continue
+                            break
+                except Exception as e:
+                    logger.warning(f"_search_image_urls search: {e}")
+            if len(result) >= 6:
+                break
+
+    # Step 2: If still short, scrape top result pages directly for more images
+    if len(result) < 4 and fc_keys:
+        fc_text = await _fc_search(f"{query} wiki OR fandom OR game")
+        page_urls = re.findall(r'https?://[^\s\)"\'<>]+(?:wiki|fandom|igdb|steam)[^\s\)"\'<>]*', fc_text, re.IGNORECASE)
+        for page_url in page_urls[:3]:
+            page_content = await _fc_scrape(page_url)
+            for u in img_pattern.findall(page_content):
+                _add(u)
+            if len(result) >= 8:
+                break
+
+    return result[:12]
 
 
 async def _download_bytes(url: str, max_bytes: int = _TG_MAX_BYTES) -> Optional[bytes]:
@@ -346,14 +381,7 @@ async def _tool_search_image(
         tried_queries.append(current_query)
         await _st(f"🔍 Ищу картинку: «{current_query}» (попытка {rnd + 1}/{max_rounds})")
 
-        image_urls = await _ddg_image_urls(current_query)
-        if not image_urls:
-            # Fallback: extract image URLs from Firecrawl results
-            fc_results = await _fc_search(f"{current_query} image")
-            image_urls = re.findall(
-                r'https?://[^\s\)"\'>]+\.(?:jpg|jpeg|png|webp)(?:\?[^\s\)"\'>]*)?',
-                fc_results, re.IGNORECASE,
-            )[:8]
+        image_urls = await _search_image_urls(current_query)
 
         await _st(f"📥 Нашёл {len(image_urls)} кандидатов, проверяю...")
 
