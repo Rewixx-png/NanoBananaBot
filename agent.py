@@ -370,7 +370,8 @@ async def _tool_search_image(
                     "type": "photo", "data": img_bytes,
                     "caption": f"🖼 {search_desc[:900]}", "filename": fname,
                 })
-                return f"[ОТПРАВЛЕНО] Картинка найдена и отправлена. Источник: {img_url} (запрос: '{current_query}')"
+                safe_url = img_url.replace('\n', '').replace('\r', '').replace('\t', '')[:200]
+                return f"[ОТПРАВЛЕНО] Картинка найдена и отправлена. Источник: {safe_url} (запрос: '{current_query}')"
 
         await _st(f"⚠️ Ни одна картинка не подошла, формулирую лучший запрос...")
 
@@ -508,7 +509,8 @@ async def _tool_search_video(
         for vid_url in video_urls[:5]:
             result = await _tool_download_video(vid_url, description or query, send_cb)
             if "sent" in result.lower() or "mb)" in result.lower():
-                return f"[ОТПРАВЛЕНО] Видео скачано и отправлено. Источник: {vid_url} (запрос: '{current_query}')"
+                safe_url = vid_url.replace('\n', '').replace('\r', '').replace('\t', '')[:200]
+                return f"[ОТПРАВЛЕНО] Видео скачано и отправлено. Источник: {safe_url} (запрос: '{current_query}')"
             logger.debug(f"search_video: {vid_url!r} → {result[:80]}")
 
         await _st(f"⚠️ Ни одно видео не скачалось, ищу лучше...")
