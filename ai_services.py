@@ -1174,9 +1174,10 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
                             data = await resp.json()
                             try:
                                 return data['candidates'][0]['content']['parts'][0]['text']
-                            except KeyError:
-                                error_details = json.dumps(data, ensure_ascii=False)
-                                return f'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу. Ответ API: {error_details}'
+                            except (KeyError, IndexError, TypeError):
+                                block = (data.get('promptFeedback') or {}).get('blockReason', '')
+                                logging.warning(f'Gemini blocked/empty response: blockReason={block!r}')
+                                return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
                         elif resp.status in [429, 403, 400]:
                             resp_text = await resp.text()
                             logging.warning(f'Ошибка ключа (текст) {key[:10]}... Код: {resp.status}. Текст: {resp_text}')

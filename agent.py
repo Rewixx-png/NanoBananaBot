@@ -55,15 +55,25 @@ class AgentWorkspace:
     def cleanup(self):
         shutil.rmtree(self.host_path, ignore_errors=True)
 
+    def _safe_path(self, rel_path: str) -> str:
+        base = os.path.realpath(self.host_path)
+        candidate = os.path.realpath(os.path.join(base, rel_path.lstrip("/")))
+        if not (candidate == base or candidate.startswith(base + os.sep)):
+            raise ValueError(f"Path traversal blocked: {rel_path!r}")
+        return candidate
+
     def write(self, rel_path: str, content: str | bytes):
-        full = os.path.join(self.host_path, rel_path.lstrip("/"))
+        full = self._safe_path(rel_path)
         os.makedirs(os.path.dirname(full), exist_ok=True)
         mode = "wb" if isinstance(content, bytes) else "w"
         with open(full, mode, encoding=None if isinstance(content, bytes) else "utf-8") as f:
             f.write(content)
 
     def read(self, rel_path: str) -> str:
-        full = os.path.join(self.host_path, rel_path.lstrip("/"))
+        try:
+            full = self._safe_path(rel_path)
+        except ValueError as exc:
+            return f"Access denied: {exc}"
         if not os.path.exists(full):
             return f"File not found: {rel_path}"
         with open(full, "r", encoding="utf-8", errors="replace") as f:
