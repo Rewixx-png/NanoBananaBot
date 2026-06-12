@@ -21,6 +21,7 @@ from database import save_history, save_pending_gen, delete_pending_gen, add_use
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned, make_safe_caption
 from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, generate_video_with_gemini, generate_text_with_gemini, classify_code_intent_with_gemini, classify_draw_intent_with_gemini, generate_image_via_code, upscale_image, generate_image_prompt, generate_code_with_gemini, generate_project_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate, fetch_gemini_tts_models, generate_tts_with_gemini, fetch_replicate_image_models, generate_bull_roast, analyze_photo_with_gemini, analyze_voice_with_gemini
+from agent import run_agent, is_agent_task
 from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID, DAILY_GEN_LIMIT, PAYMENT_USERNAME, CHAT_ID, GEMINI_IMAGE_TIMEOUT
 import logging
 logger = logging.getLogger(__name__)
@@ -2634,6 +2635,49 @@ async def handle_text_messages(message: types.Message):
             reply_kwargs['message_thread_id'] = message.message_thread_id
         thinking_msg = await message.reply('⏳ Думаю...', **reply_kwargs)
         await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
+
+        last_status_edit = 0.0
+        last_status_text = ''
+
+        async def _status_cb(text: str):
+            nonlocal last_status_edit, last_status_text
+            now = time.monotonic()
+            if text == last_status_text or now - last_status_edit < 3:
+                return
+            try:
+                await thinking_msg.edit_text(text)
+                last_status_edit = time.monotonic()
+                last_status_text = text
+            except TelegramRetryAfter as e:
+                last_status_edit = time.monotonic() + float(getattr(e, 'retry_after', 3) or 3)
+            except Exception:
+                pass
+
+        if is_agent_task(web_query) and not replied_code:
+            try:
+                (agent_text, agent_project) = await asyncio.wait_for(
+                    run_agent(web_query, message.chat.id, username, _status_cb),
+                    timeout=300,
+                )
+            except asyncio.TimeoutError:
+                agent_text = 'Агент завис — слишком долго. Разбей задачу на части.'
+                agent_project = None
+            except Exception as _agent_err:
+                logger.exception(f'Agent crashed: {_agent_err}')
+                agent_text = 'Агент упал. Попробуй ещё раз.'
+                agent_project = None
+            try:
+                await thinking_msg.delete()
+            except Exception:
+                pass
+            if agent_project:
+                await _send_generated_project(message, agent_project, reply_kwargs)
+            elif agent_text:
+                await safe_send(message.reply, _clean_plain_reply(agent_text), **reply_kwargs)
+            asyncio.create_task(add_user_stat(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'text'))
+            asyncio.create_task(log_prompt(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'text', web_query))
+            return
+
         replied_draw = None
         if is_reply_to_bot and message.reply_to_message and message.reply_to_message.photo:
             replied_draw = generated_draw_messages.get((message.chat.id, message.reply_to_message.message_id))
@@ -2683,24 +2727,6 @@ async def handle_text_messages(message: types.Message):
             logging.warning(f"Project gen failed, fallback to code markdown: {project_payload.get('error')}")
             text_response = await generate_code_with_gemini(prompt)
         else:
-            last_status_edit = 0.0
-            last_status_text = ''
-
-            async def _status_cb(text: str):
-                nonlocal last_status_edit, last_status_text
-                now = time.monotonic()
-                if text == last_status_text or now - last_status_edit < 3:
-                    return
-                try:
-                    await thinking_msg.edit_text(text)
-                    last_status_edit = time.monotonic()
-                    last_status_text = text
-                except TelegramRetryAfter as e:
-                    retry_after = float(getattr(e, 'retry_after', 3) or 3)
-                    last_status_edit = time.monotonic() + retry_after
-                    logging.warning(f'Status edit flood wait {retry_after:.0f}s; skipping status update')
-                except Exception as e:
-                    logging.debug(f'Status edit skipped: {type(e).__name__}')
             try:
                 text_response = await asyncio.wait_for(
                     generate_text_with_gemini(prompt, message.chat.id, username=username, web_query=web_query, status_cb=_status_cb, is_owner=message.from_user.id == OWNER_USER_ID),
