@@ -2654,9 +2654,24 @@ async def handle_text_messages(message: types.Message):
                 pass
 
         if is_agent_task(web_query) and not replied_code:
+            async def _agent_send_cb(media: dict):
+                mtype    = media.get("type", "document")
+                data     = media.get("data", b"")
+                caption  = (media.get("caption") or "")[:1024]
+                filename = media.get("filename") or "file"
+                buf      = BufferedInputFile(data, filename=filename)
+                kw       = {"reply_to_message_id": message.message_id, **reply_kwargs}
+                if mtype == "photo":
+                    await safe_send(message.bot.send_photo, chat_id=message.chat.id, photo=buf, caption=caption, **kw)
+                elif mtype == "video":
+                    await safe_send(message.bot.send_video, chat_id=message.chat.id, video=buf, caption=caption, **kw)
+                elif mtype == "audio":
+                    await safe_send(message.bot.send_audio, chat_id=message.chat.id, audio=buf, caption=caption, **kw)
+                else:
+                    await safe_send(message.bot.send_document, chat_id=message.chat.id, document=buf, caption=caption, **kw)
             try:
                 (agent_text, agent_project) = await asyncio.wait_for(
-                    run_agent(web_query, message.chat.id, username, _status_cb),
+                    run_agent(web_query, message.chat.id, username, _status_cb, _agent_send_cb),
                     timeout=300,
                 )
             except asyncio.TimeoutError:
