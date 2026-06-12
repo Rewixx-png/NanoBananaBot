@@ -1,0 +1,10 @@
+FROM python:3.11-slim
+
+RUN pip install --no-cache-dir \
+    numpy pandas matplotlib pillow scipy sympy \
+    requests beautifulsoup4 lxml \
+    && rm -rf /root/.cache
+
+RUN useradd -m -u 1000 -s /bin/bash sandbox
+USER sandbox
+WORKDIR /workspace

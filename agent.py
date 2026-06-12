@@ -1,6 +1,9 @@
 """
-Agentic loop for NanoHatani bot — 16 tools.
-ReAct pattern: think → [tools] → reply/generate_project
+Agentic loop for NanoHatani bot — 20 tools.
+ReAct: think → [tools] → reply / generate_project
+
+Docker sandbox (hatani-sandbox:latest) for isolated code/shell execution.
+Temp workspace shared between tool calls via bind-mount.
 """
 import asyncio
 import hashlib
@@ -11,16 +14,16 @@ import math
 import operator
 import os
 import re
-import subprocess
-import sys
+import shutil
 import tempfile
-import time
+import uuid
 from collections import deque
 from typing import Any, Callable, Optional, Tuple
 
 import aiohttp
 
 from ai_services import (
+    analyze_photo_with_gemini,
     generate_image_with_gemini,
     generate_project_with_gemini,
     generate_tts_with_gemini,
@@ -29,13 +32,78 @@ from keys_manager import load_keys, load_firecrawl_keys, remove_key
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS = 16
-_SEARCH_TIMEOUT  = 20.0
-_SCRAPE_TIMEOUT  = 25.0
-_LLM_TIMEOUT     = 60.0
-_PROJECT_TIMEOUT = 180.0
-_VDL_TIMEOUT     = 120.0   # yt-dlp
-_TG_MAX_BYTES    = 48 * 1024 * 1024   # 48 MB Telegram upload limit
+MAX_STEPS       = 18
+_SEARCH_TIMEOUT = 20.0
+_SCRAPE_TIMEOUT = 25.0
+_LLM_TIMEOUT    = 60.0
+_PROJECT_TIMEOUT= 180.0
+_VDL_TIMEOUT    = 120.0
+_DOCKER_TIMEOUT = 30.0
+_TG_MAX_BYTES   = 48 * 1024 * 1024
+_SANDBOX_IMAGE  = "hatani-sandbox:latest"
+
+
+# ── Docker workspace ─────────────────────────────────────────────
+
+class AgentWorkspace:
+    """Temp directory on host, bind-mounted into Docker for isolated execution."""
+
+    def __init__(self):
+        self.host_path = tempfile.mkdtemp(prefix="agent_ws_")
+        logger.info(f"Workspace created: {self.host_path}")
+
+    def cleanup(self):
+        shutil.rmtree(self.host_path, ignore_errors=True)
+
+    def write(self, rel_path: str, content: str | bytes):
+        full = os.path.join(self.host_path, rel_path.lstrip("/"))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        mode = "wb" if isinstance(content, bytes) else "w"
+        with open(full, mode, encoding=None if isinstance(content, bytes) else "utf-8") as f:
+            f.write(content)
+
+    def read(self, rel_path: str) -> str:
+        full = os.path.join(self.host_path, rel_path.lstrip("/"))
+        if not os.path.exists(full):
+            return f"File not found: {rel_path}"
+        with open(full, "r", encoding="utf-8", errors="replace") as f:
+            return f.read(16_000)
+
+    def list_files(self) -> list[str]:
+        result = []
+        for root, dirs, files in os.walk(self.host_path):
+            for fname in files:
+                rel = os.path.relpath(os.path.join(root, fname), self.host_path)
+                result.append(rel)
+        return result[:50]
+
+    async def docker_run(self, cmd: list[str], stdin: str = "") -> Tuple[str, str, int]:
+        """Run cmd inside sandbox container with workspace mounted."""
+        docker_cmd = [
+            "docker", "run", "--rm",
+            "--network=none",
+            "--memory=512m", "--cpus=0.5",
+            "--user=sandbox",
+            "--workdir=/workspace",
+            "-v", f"{self.host_path}:/workspace",
+            _SANDBOX_IMAGE,
+        ] + cmd
+
+        proc = await asyncio.create_subprocess_exec(
+            *docker_cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(
+                proc.communicate(stdin.encode() if stdin else b""),
+                timeout=_DOCKER_TIMEOUT,
+            )
+            return out.decode(errors="replace"), err.decode(errors="replace"), proc.returncode
+        except asyncio.TimeoutError:
+            proc.kill()
+            return "", f"Timeout ({int(_DOCKER_TIMEOUT)}s)", 124
 
 
 # ── Loop safety ──────────────────────────────────────────────────
@@ -49,7 +117,7 @@ class _DebounceHook:
         fp = hashlib.md5(f"{name}:{sorted(args.items())}".encode()).hexdigest()
         if sum(1 for f in self._win if f == fp) >= self._max:
             return (
-                f"LOOP DETECTED: '{name}' called with identical args {self._max}+ times. "
+                f"LOOP: '{name}' called with same args {self._max}+ times. "
                 "Change your approach."
             )
         self._win.append(fp)
@@ -59,10 +127,14 @@ class _DebounceHook:
 class _ToolBudget:
     LIMITS = {
         "web_search": 8, "scrape_url": 10, "generate_project": 2,
-        "think": 30, "reply": 3, "generate_image": 3, "download_image": 5,
-        "download_video": 2, "text_to_speech": 3, "run_python": 5,
-        "fetch_json": 8, "calculate": 20, "qr_code": 3,
-        "create_chart": 3, "translate": 5, "create_file": 5,
+        "think": 30, "reply": 3, "generate_image": 3,
+        "search_and_send_image": 3, "download_image": 5,
+        "download_video": 2, "text_to_speech": 3,
+        "run_python": 6, "run_shell": 8,
+        "write_file": 10, "read_file": 10,
+        "fetch_json": 8, "calculate": 20,
+        "qr_code": 3, "create_chart": 3,
+        "translate": 5, "create_file": 5,
     }
 
     def __init__(self):
@@ -73,11 +145,11 @@ class _ToolBudget:
         count = self._counts.get(name, 0) + 1
         self._counts[name] = count
         if count > limit:
-            return f"BUDGET: '{name}' exceeded limit {limit}. Use a different tool."
+            return f"BUDGET: '{name}' exceeded limit {limit}."
         return None
 
 
-# ── Tool implementations ─────────────────────────────────────────
+# ── Firecrawl helpers ────────────────────────────────────────────
 
 async def _fc_search(query: str) -> str:
     keys = load_firecrawl_keys()
@@ -142,127 +214,235 @@ async def _fc_scrape(url: str) -> str:
     return "Could not read page."
 
 
+# ── Image search with self-evaluation ───────────────────────────
+
+async def _ddg_image_urls(query: str) -> list[str]:
+    """DuckDuckGo unofficial image search — no API key needed."""
+    hdrs = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://duckduckgo.com/",
+                params={"q": query, "iax": "images", "ia": "images"},
+                headers=hdrs,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                text = await resp.text()
+
+            m = (re.search(r'vqd="([^"]+)"', text)
+                 or re.search(r"vqd='([^']+)'", text)
+                 or re.search(r'vqd=([\d-]+)', text))
+            if not m:
+                return []
+            vqd = m.group(1)
+
+            async with s.get(
+                "https://duckduckgo.com/i.js",
+                params={"q": query, "vqd": vqd, "l": "us-en",
+                        "o": "json", "f": ",,,,,", "p": "1"},
+                headers=hdrs,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                data = await resp.json(content_type=None)
+                return [r["image"] for r in data.get("results", [])[:12] if r.get("image")]
+    except Exception as e:
+        logger.warning(f"DDG image search: {e}")
+        return []
+
+
+async def _download_bytes(url: str, max_bytes: int = _TG_MAX_BYTES) -> Optional[bytes]:
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.read()
+                return data if len(data) <= max_bytes else None
+    except Exception:
+        return None
+
+
+async def _image_is_relevant(img_bytes: bytes, description: str) -> bool:
+    """Ask Gemini if this image matches the description."""
+    try:
+        answer = await analyze_photo_with_gemini(
+            img_bytes,
+            f"Does this image show or relate to: {description}? "
+            "Reply with only YES or NO.",
+        )
+        return answer.strip().upper().startswith("YES")
+    except Exception:
+        return False
+
+
+async def _tool_search_image(
+    query: str,
+    description: str,
+    send_cb: Callable,
+    status_cb: Callable,
+) -> str:
+    """Autonomous image search: formulate query → find URLs → evaluate → retry."""
+    keys = load_keys()
+    search_desc = description or query
+    tried_queries: list[str] = []
+    max_rounds = 3
+
+    async def _st(text: str):
+        try:
+            await status_cb(text)
+        except Exception:
+            pass
+
+    for rnd in range(max_rounds):
+        # Refine query if previous rounds failed
+        if rnd == 0:
+            current_query = query
+        else:
+            # Ask Gemini to suggest a better image search query
+            if keys:
+                payload = {
+                    "contents": [{"parts": [{"text":
+                        f"Generate a better Google Images search query to find: '{search_desc}'. "
+                        f"Previous failed queries: {tried_queries}. "
+                        "Return ONLY the query string, no explanations."
+                    }]}],
+                    "generationConfig": {"temperature": 0.5, "maxOutputTokens": 30},
+                }
+                url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+                try:
+                    async with aiohttp.ClientSession() as s:
+                        async with s.post(
+                            url, json=payload,
+                            headers={"Content-Type": "application/json", "x-goog-api-key": keys[0]},
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                current_query = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                            else:
+                                current_query = f"{query} hd high quality"
+                except Exception:
+                    current_query = f"{query} hd high quality"
+            else:
+                current_query = f"{query} hd"
+
+        tried_queries.append(current_query)
+        await _st(f"🔍 Ищу картинку: «{current_query}» (попытка {rnd + 1}/{max_rounds})")
+
+        image_urls = await _ddg_image_urls(current_query)
+        if not image_urls:
+            # Fallback: extract image URLs from Firecrawl results
+            fc_results = await _fc_search(f"{current_query} image")
+            image_urls = re.findall(
+                r'https?://[^\s\)"\'>]+\.(?:jpg|jpeg|png|webp)(?:\?[^\s\)"\'>]*)?',
+                fc_results, re.IGNORECASE,
+            )[:8]
+
+        await _st(f"📥 Нашёл {len(image_urls)} кандидатов, проверяю...")
+
+        for img_url in image_urls[:8]:
+            img_bytes = await _download_bytes(img_url, max_bytes=10 * 1024 * 1024)
+            if not img_bytes or len(img_bytes) < 1000:
+                continue
+            relevant = await _image_is_relevant(img_bytes, search_desc)
+            if relevant:
+                await _st("✅ Нашёл подходящую картинку, отправляю...")
+                ext = img_url.split("?")[0].rsplit(".", 1)[-1].lower()
+                fname = f"image.{ext}" if ext in ("jpg", "jpeg", "png", "webp") else "image.jpg"
+                await send_cb({
+                    "type": "photo", "data": img_bytes,
+                    "caption": f"🖼 {search_desc[:900]}", "filename": fname,
+                })
+                return f"Found and sent image for '{current_query}'."
+
+        await _st(f"⚠️ Ни одна картинка не подошла, формулирую лучший запрос...")
+
+    return f"Could not find a relevant image after {max_rounds} attempts. Tried: {tried_queries}"
+
+
+# ── Other tool implementations ───────────────────────────────────
+
 async def _tool_generate_image(prompt: str, send_cb: Callable) -> str:
     img_bytes, err = await generate_image_with_gemini(prompt)
     if err or not img_bytes:
         return f"Image generation failed: {err or 'no data'}"
     await send_cb({"type": "photo", "data": img_bytes,
                    "caption": f"🎨 {prompt[:900]}", "filename": "image.jpg"})
-    return "Image generated and sent to chat."
+    return "Image generated and sent."
 
 
 async def _tool_download_image(url: str, caption: str, send_cb: Callable) -> str:
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status != 200:
-                    return f"HTTP {resp.status} downloading image."
-                data = await resp.read()
-        if len(data) > _TG_MAX_BYTES:
-            return f"Image too large ({len(data) // 1024} KB > 48 MB)."
-        ext = url.split("?")[0].rsplit(".", 1)[-1].lower()
-        fname = f"image.{ext}" if ext in ("jpg", "jpeg", "png", "webp", "gif") else "image.jpg"
-        await send_cb({"type": "photo", "data": data,
-                       "caption": caption[:1024] or url[:200], "filename": fname})
-        return "Image downloaded and sent."
-    except Exception as e:
-        return f"Failed to download image: {e}"
+    data = await _download_bytes(url)
+    if not data:
+        return "Failed to download image."
+    ext = url.split("?")[0].rsplit(".", 1)[-1].lower()
+    fname = f"image.{ext}" if ext in ("jpg", "jpeg", "png", "webp", "gif") else "image.jpg"
+    await send_cb({"type": "photo", "data": data,
+                   "caption": caption[:1024] or url[:200], "filename": fname})
+    return "Image downloaded and sent."
 
 
 async def _tool_download_video(url: str, caption: str, send_cb: Callable) -> str:
     with tempfile.TemporaryDirectory() as tmpdir:
-        out_tmpl = os.path.join(tmpdir, "video.%(ext)s")
+        out = os.path.join(tmpdir, "video.%(ext)s")
         cmd = [
             "yt-dlp", "--no-playlist", "--no-warnings",
             "-f", "bestvideo[height<=720][filesize<45M]+bestaudio/best[height<=720]/best[height<=480]",
-            "--merge-output-format", "mp4",
-            "-o", out_tmpl, url,
+            "--merge-output-format", "mp4", "-o", out, url,
         ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_VDL_TIMEOUT)
-            except asyncio.TimeoutError:
-                proc.kill()
-                return "Video download timed out (2 min limit)."
-
-            if proc.returncode != 0:
-                err = stderr.decode()[:300]
-                return f"yt-dlp error: {err}"
-
-            # Find the downloaded file
-            files = [f for f in os.listdir(tmpdir) if f.startswith("video.")]
-            if not files:
-                return "yt-dlp finished but no file found."
-
-            fpath = os.path.join(tmpdir, files[0])
-            size  = os.path.getsize(fpath)
-            if size > _TG_MAX_BYTES:
-                return f"Video too large ({size // 1024 // 1024} MB > 48 MB). Try a shorter clip."
-
-            with open(fpath, "rb") as f:
-                data = f.read()
-
-            await send_cb({"type": "video", "data": data,
-                           "caption": caption[:1024] or "📹 Видео",
-                           "filename": files[0]})
-            return f"Video downloaded ({size // 1024 // 1024} MB) and sent."
-
-        except FileNotFoundError:
-            return "yt-dlp not installed."
-        except Exception as e:
-            return f"Video download failed: {e}"
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_VDL_TIMEOUT)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return "Video download timed out (2 min)."
+        if proc.returncode != 0:
+            return f"yt-dlp error: {stderr.decode()[:300]}"
+        files = [f for f in os.listdir(tmpdir) if f.startswith("video.")]
+        if not files:
+            return "yt-dlp: no output file."
+        fpath = os.path.join(tmpdir, files[0])
+        size  = os.path.getsize(fpath)
+        if size > _TG_MAX_BYTES:
+            return f"Video too large ({size // 1024 // 1024} MB > 48 MB)."
+        with open(fpath, "rb") as f:
+            data = f.read()
+        await send_cb({"type": "video", "data": data,
+                       "caption": caption[:1024] or "📹 Видео", "filename": files[0]})
+        return f"Video ({size // 1024 // 1024} MB) sent."
 
 
-async def _tool_tts(text: str, voice: str, language: str, send_cb: Callable) -> str:
-    voice    = voice    or "Kore"
-    language = language or "ru-RU"
+async def _tool_tts(text: str, voice: str, lang: str, send_cb: Callable) -> str:
     audio, err = await generate_tts_with_gemini(
-        text, model="gemini-3.5-flash-tts", voice_name=voice, language_code=language
+        text, model="gemini-3.5-flash-tts",
+        voice_name=voice or "Kore", language_code=lang or "ru-RU",
     )
     if err or not audio:
         return f"TTS failed: {err or 'no audio'}"
     await send_cb({"type": "audio", "data": audio,
                    "caption": f"🎙 {text[:200]}", "filename": "speech.ogg"})
-    return "Audio generated and sent."
+    return "Audio sent."
 
 
-def _run_python_sync(code: str) -> str:
-    """Execute Python code in sandbox; return stdout (max 3000 chars)."""
-    buf = io.StringIO()
-    allowed_builtins = {
-        "abs": abs, "all": all, "any": any, "bin": bin, "bool": bool,
-        "chr": chr, "dict": dict, "dir": dir, "divmod": divmod,
-        "enumerate": enumerate, "filter": filter, "float": float,
-        "format": format, "frozenset": frozenset, "getattr": getattr,
-        "hasattr": hasattr, "hash": hash, "hex": hex, "int": int,
-        "isinstance": isinstance, "issubclass": issubclass, "iter": iter,
-        "len": len, "list": list, "map": map, "max": max, "min": min,
-        "next": next, "oct": oct, "ord": ord, "pow": pow, "print": lambda *a, **k: print(*a, **k, file=buf),
-        "range": range, "repr": repr, "reversed": reversed, "round": round,
-        "set": set, "slice": slice, "sorted": sorted, "str": str,
-        "sum": sum, "tuple": tuple, "type": type, "zip": zip,
-        "True": True, "False": False, "None": None,
-    }
-    sandbox = {
-        "__builtins__": allowed_builtins,
-        "math": math, "json": json, "re": re,
-    }
-    try:
-        exec(compile(code, "<agent>", "exec"), sandbox)  # noqa: S102
-        output = buf.getvalue()
-        return output[:3000] if output else "(no output — use print() to show results)"
-    except Exception as e:
-        return f"Error: {type(e).__name__}: {e}"
+async def _tool_run_python(code: str, ws: "AgentWorkspace") -> str:
+    stdout, stderr, rc = await ws.docker_run(["python", "-c", code])
+    out = (stdout[:2000] + ("\n[stderr]: " + stderr[:500] if stderr.strip() else "")).strip()
+    return out or f"(exit {rc}, no output)"
 
 
-async def _tool_run_python(code: str) -> str:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _run_python_sync, code)
+async def _tool_run_shell(command: str, ws: "AgentWorkspace") -> str:
+    stdout, stderr, rc = await ws.docker_run(["bash", "-c", command])
+    out = (stdout[:2000] + ("\n[stderr]: " + stderr[:500] if stderr.strip() else "")).strip()
+    return out or f"(exit {rc}, no output)"
 
 
 async def _tool_fetch_json(url: str) -> str:
@@ -273,62 +453,49 @@ async def _tool_fetch_json(url: str) -> str:
                 if resp.status != 200:
                     return f"HTTP {resp.status}"
                 data = await resp.json(content_type=None)
-                text = json.dumps(data, ensure_ascii=False, indent=2)
-                return text[:5000]
+                return json.dumps(data, ensure_ascii=False, indent=2)[:5000]
     except Exception as e:
         return f"fetch_json error: {e}"
 
 
-def _safe_eval(expr: str) -> str:
-    """Evaluate a math expression safely using AST — no eval/exec."""
+def _ast_eval(expr: str) -> str:
+    """Safe math evaluator — AST only, no eval/exec."""
     import ast as _ast
-
-    _MATH_FUNCS = {k: getattr(math, k) for k in dir(math) if not k.startswith("_")}
-    _SAFE_NAMES = {"abs": abs, "round": round, "min": min, "max": max,
-                   "pow": pow, "sum": sum, "len": len, **_MATH_FUNCS}
-
-    _SAFE_OPS = {
+    _MF = {k: getattr(math, k) for k in dir(math) if not k.startswith("_")}
+    _N = {"abs": abs, "round": round, "min": min, "max": max, "pow": pow, **_MF}
+    _OPS = {
         _ast.Add: operator.add, _ast.Sub: operator.sub,
         _ast.Mult: operator.mul, _ast.Div: operator.truediv,
         _ast.FloorDiv: operator.floordiv, _ast.Mod: operator.mod,
         _ast.Pow: operator.pow, _ast.USub: operator.neg, _ast.UAdd: operator.pos,
     }
 
-    def _eval_node(node):
-        if isinstance(node, _ast.Expression):
-            return _eval_node(node.body)
+    def ev(node):
+        if isinstance(node, _ast.Expression): return ev(node.body)
         if isinstance(node, _ast.Constant):
-            if isinstance(node.value, (int, float, complex)):
-                return node.value
-            raise ValueError(f"Unsupported constant: {node.value!r}")
+            if isinstance(node.value, (int, float, complex)): return node.value
+            raise ValueError(f"Bad constant: {node.value!r}")
         if isinstance(node, _ast.BinOp):
-            op = _SAFE_OPS.get(type(node.op))
-            if op is None:
-                raise ValueError(f"Unsupported operator: {node.op!r}")
-            return op(_eval_node(node.left), _eval_node(node.right))
+            op = _OPS.get(type(node.op))
+            if not op: raise ValueError(f"Bad op: {node.op!r}")
+            return op(ev(node.left), ev(node.right))
         if isinstance(node, _ast.UnaryOp):
-            op = _SAFE_OPS.get(type(node.op))
-            if op is None:
-                raise ValueError(f"Unsupported unary: {node.op!r}")
-            return op(_eval_node(node.operand))
+            op = _OPS.get(type(node.op))
+            if not op: raise ValueError(f"Bad unary: {node.op!r}")
+            return op(ev(node.operand))
         if isinstance(node, _ast.Call):
-            if not isinstance(node.func, _ast.Name):
-                raise ValueError("Only named functions allowed")
-            fn = _SAFE_NAMES.get(node.func.id)
-            if fn is None:
-                raise ValueError(f"Unknown function: {node.func.id!r}")
-            return fn(*[_eval_node(a) for a in node.args])
+            if not isinstance(node.func, _ast.Name): raise ValueError("Only named funcs")
+            fn = _N.get(node.func.id)
+            if not fn: raise ValueError(f"Unknown: {node.func.id!r}")
+            return fn(*[ev(a) for a in node.args])
         if isinstance(node, _ast.Name):
-            val = _SAFE_NAMES.get(node.id)
-            if val is None:
-                raise ValueError(f"Unknown name: {node.id!r}")
-            return val
-        raise ValueError(f"Unsupported expression type: {type(node).__name__}")
+            v = _N.get(node.id)
+            if v is None: raise ValueError(f"Unknown name: {node.id!r}")
+            return v
+        raise ValueError(f"Unsupported: {type(node).__name__}")
 
     try:
-        tree = _ast.parse(expr.strip(), mode="eval")
-        result = _eval_node(tree)
-        return str(result)
+        return str(ev(_ast.parse(expr.strip(), mode="eval")))
     except Exception as e:
         return f"Error: {e}"
 
@@ -336,49 +503,42 @@ def _safe_eval(expr: str) -> str:
 async def _tool_qr_code(text: str, caption: str, send_cb: Callable) -> str:
     try:
         import qrcode
-        from PIL import Image as PILImage
         qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L)
         qr.add_data(text)
         qr.make(fit=True)
         img = qr.make_image(fill_color="black", back_color="white")
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        data = buf.getvalue()
-        await send_cb({"type": "photo", "data": data,
-                       "caption": caption[:1024] or f"QR: {text[:200]}",
-                       "filename": "qr.png"})
-        return "QR code generated and sent."
+        await send_cb({"type": "photo", "data": buf.getvalue(),
+                       "caption": caption[:1024] or f"QR: {text[:200]}", "filename": "qr.png"})
+        return "QR code sent."
     except Exception as e:
-        return f"QR code failed: {e}"
+        return f"QR failed: {e}"
 
 
 async def _tool_create_chart(
-    chart_type: str, title: str,
-    labels: list, values: list,
-    xlabel: str, ylabel: str,
-    send_cb: Callable,
+    chart_type: str, title: str, labels: list, values: list,
+    xlabel: str, ylabel: str, send_cb: Callable,
 ) -> str:
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.set_title(title or "Chart", fontsize=14, pad=12)
-
-        ctype = (chart_type or "bar").lower()
-        if ctype == "bar":
+        ct = (chart_type or "bar").lower()
+        if ct == "bar":
             ax.bar(range(len(values)), values, color="#4C9BE8")
             ax.set_xticks(range(len(labels)))
             ax.set_xticklabels(labels, rotation=30, ha="right")
-        elif ctype == "line":
+        elif ct == "line":
             ax.plot(range(len(values)), values, marker="o", color="#4C9BE8", linewidth=2)
             ax.set_xticks(range(len(labels)))
             ax.set_xticklabels(labels, rotation=30, ha="right")
-        elif ctype == "pie":
+        elif ct == "pie":
             ax.pie(values, labels=labels, autopct="%1.1f%%", startangle=90)
             ax.axis("equal")
-        elif ctype == "scatter":
+        elif ct == "scatter":
             ax.scatter(range(len(values)), values, color="#4C9BE8", s=80)
             ax.set_xticks(range(len(labels)))
             ax.set_xticklabels(labels, rotation=30, ha="right")
@@ -386,23 +546,16 @@ async def _tool_create_chart(
             ax.bar(range(len(values)), values)
             ax.set_xticks(range(len(labels)))
             ax.set_xticklabels(labels, rotation=30, ha="right")
-
-        if xlabel:
-            ax.set_xlabel(xlabel)
-        if ylabel:
-            ax.set_ylabel(ylabel)
-
+        if xlabel: ax.set_xlabel(xlabel)
+        if ylabel: ax.set_ylabel(ylabel)
         ax.grid(axis="y", linestyle="--", alpha=0.4)
         plt.tight_layout()
-
         buf = io.BytesIO()
         plt.savefig(buf, format="PNG", dpi=150)
         plt.close(fig)
-        data = buf.getvalue()
-
-        await send_cb({"type": "photo", "data": data,
+        await send_cb({"type": "photo", "data": buf.getvalue(),
                        "caption": f"📊 {title}", "filename": "chart.png"})
-        return "Chart created and sent."
+        return "Chart sent."
     except Exception as e:
         return f"Chart failed: {e}"
 
@@ -413,19 +566,16 @@ async def _tool_translate(text: str, target_lang: str) -> str:
         return "No Gemini keys."
     payload = {
         "contents": [{"parts": [{"text":
-            f"Translate the following text to {target_lang}. "
-            f"Return ONLY the translation, nothing else:\n\n{text[:3000]}"
+            f"Translate to {target_lang}. Return ONLY the translation:\n\n{text[:3000]}"
         }]}],
         "generationConfig": {"temperature": 0.1},
     }
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.post(
-                url, json=payload,
-                headers={"Content-Type": "application/json", "x-goog-api-key": keys[0]},
-                timeout=aiohttp.ClientTimeout(total=20),
-            ) as resp:
+            async with s.post(url, json=payload,
+                             headers={"Content-Type": "application/json", "x-goog-api-key": keys[0]},
+                             timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return data["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -439,8 +589,7 @@ async def _tool_create_file(filename: str, content: str, caption: str, send_cb: 
     if len(data) > _TG_MAX_BYTES:
         return f"File too large ({len(data) // 1024} KB)."
     await send_cb({"type": "document", "data": data,
-                   "caption": caption[:1024] or filename,
-                   "filename": filename or "file.txt"})
+                   "caption": caption[:1024] or filename, "filename": filename or "file.txt"})
     return f"File '{filename}' sent."
 
 
@@ -449,194 +598,174 @@ async def _tool_create_file(filename: str, content: str, caption: str, send_cb: 
 _TOOLS = [
     {
         "name": "think",
-        "description": (
-            "Internal reasoning scratchpad. Think about the task, plan next steps, "
-            "analyze gathered info. ALWAYS use before first search and before generate_project. "
-            "Invisible to user."
-        ),
-        "parameters": {"type": "object",
-                       "properties": {"thought": {"type": "string"}},
-                       "required": ["thought"]},
+        "description": "Internal reasoning — plan, analyze, decide next step. Use before first search and before generate_project.",
+        "parameters": {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]},
     },
     {
         "name": "web_search",
-        "description": (
-            "Search the internet via Firecrawl. Use multiple different queries to cover "
-            "the topic from different angles. Do NOT repeat the same query twice."
-        ),
-        "parameters": {"type": "object",
-                       "properties": {"query": {"type": "string",
-                                                "description": "Precise search query (3-10 words)"}},
-                       "required": ["query"]},
+        "description": "Search the internet. Use 2-4 different queries per topic for comprehensive coverage.",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
     },
     {
         "name": "scrape_url",
-        "description": "Read the full content of a specific web page. Use after web_search.",
-        "parameters": {"type": "object",
-                       "properties": {"url": {"type": "string"}},
-                       "required": ["url"]},
+        "description": "Read full content of a web page.",
+        "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     },
     {
         "name": "generate_project",
-        "description": (
-            "Generate a complete project (website, program, bot) and send as files. "
-            "Include ALL gathered research in prompt. Minimum 300 chars."
-        ),
-        "parameters": {"type": "object",
-                       "properties": {"prompt": {"type": "string"}},
-                       "required": ["prompt"]},
+        "description": "Generate a complete project (website/program/bot) and send as files. Include ALL research in prompt.",
+        "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}}, "required": ["prompt"]},
     },
     {
         "name": "reply",
-        "description": "Send a final text reply to the user. Use when no files/media needed.",
-        "parameters": {"type": "object",
-                       "properties": {"text": {"type": "string"}},
-                       "required": ["text"]},
+        "description": "Send final text reply. Use only when no files/media needed.",
+        "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+    },
+    {
+        "name": "search_and_send_image",
+        "description": (
+            "Autonomously search for an image, evaluate relevance with AI vision, "
+            "retry with better queries if needed, and send the best result. "
+            "Use this instead of download_image when you need to FIND an image by description."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query for the image"},
+                "description": {"type": "string", "description": "What a good result should look like"},
+            },
+            "required": ["query"],
+        },
     },
     {
         "name": "generate_image",
-        "description": (
-            "Generate an AI image from a text prompt and send it to the chat. "
-            "Use when user asks to draw, create, visualize something."
-        ),
-        "parameters": {"type": "object",
-                       "properties": {"prompt": {"type": "string",
-                                                 "description": "Detailed image description in English"}},
-                       "required": ["prompt"]},
+        "description": "Generate an AI image from a text prompt and send to chat.",
+        "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "Detailed image description in English"}}, "required": ["prompt"]},
     },
     {
         "name": "download_image",
-        "description": "Download an image from a URL and send it to the chat.",
-        "parameters": {"type": "object",
-                       "properties": {
-                           "url": {"type": "string", "description": "Direct image URL"},
-                           "caption": {"type": "string", "description": "Caption for the image"},
-                       },
-                       "required": ["url"]},
+        "description": "Download image from a specific known URL and send to chat.",
+        "parameters": {"type": "object", "properties": {"url": {"type": "string"}, "caption": {"type": "string"}}, "required": ["url"]},
     },
     {
         "name": "download_video",
-        "description": (
-            "Download a video from YouTube, TikTok, Instagram, Twitter/X, VK "
-            "or any yt-dlp supported URL and send to chat. Max 48 MB / 720p."
-        ),
-        "parameters": {"type": "object",
-                       "properties": {
-                           "url": {"type": "string", "description": "Video page URL"},
-                           "caption": {"type": "string"},
-                       },
-                       "required": ["url"]},
+        "description": "Download video from YouTube, TikTok, Instagram, Twitter/X, VK via yt-dlp and send. Max 48MB / 720p.",
+        "parameters": {"type": "object", "properties": {"url": {"type": "string"}, "caption": {"type": "string"}}, "required": ["url"]},
     },
     {
         "name": "text_to_speech",
-        "description": "Convert text to speech audio and send as voice message.",
-        "parameters": {"type": "object",
-                       "properties": {
-                           "text": {"type": "string"},
-                           "voice": {"type": "string",
-                                     "description": "Voice name, e.g. Kore, Aoede, Charon, Fenrir, Puck"},
-                           "language": {"type": "string",
-                                        "description": "Language code, e.g. ru-RU, en-US"},
-                       },
-                       "required": ["text"]},
+        "description": "Convert text to speech and send as voice message.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "voice": {"type": "string", "description": "Kore, Aoede, Charon, Fenrir, Puck"},
+                "language": {"type": "string", "description": "ru-RU, en-US, etc."},
+            },
+            "required": ["text"],
+        },
     },
     {
         "name": "run_python",
         "description": (
-            "Execute Python code in a sandboxed environment and return stdout output. "
-            "Use for calculations, data processing, generating text, parsing data. "
-            "Use print() to output results. Available: math, json, re."
+            "Execute Python code in isolated Docker sandbox (no network, 512MB RAM). "
+            "Files written to /workspace persist between calls. "
+            "Has: numpy, pandas, matplotlib, pillow, scipy, sympy. Use print() for output."
         ),
-        "parameters": {"type": "object",
-                       "properties": {"code": {"type": "string",
-                                               "description": "Python code to execute"}},
-                       "required": ["code"]},
+        "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]},
+    },
+    {
+        "name": "run_shell",
+        "description": (
+            "Execute shell commands in isolated Docker sandbox (no network, 512MB RAM). "
+            "Files in /workspace persist between calls. "
+            "Use for: file operations, data processing, compiling, converting."
+        ),
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+    },
+    {
+        "name": "write_file",
+        "description": "Write a file to the agent workspace (persists between tool calls).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative file path, e.g. data.csv"},
+                "content": {"type": "string"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "Read a file from the agent workspace.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
     },
     {
         "name": "fetch_json",
-        "description": "Fetch JSON data from any URL or API endpoint via HTTP GET.",
-        "parameters": {"type": "object",
-                       "properties": {"url": {"type": "string"}},
-                       "required": ["url"]},
+        "description": "Fetch JSON from any URL or API endpoint via HTTP GET.",
+        "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     },
     {
         "name": "calculate",
-        "description": (
-            "Evaluate a mathematical expression. Supports math functions (sin, cos, sqrt, log, etc.). "
-            "Example: '2**10 + math.sqrt(144)'"
-        ),
-        "parameters": {"type": "object",
-                       "properties": {"expression": {"type": "string"}},
-                       "required": ["expression"]},
+        "description": "Evaluate math expression. Supports all math functions (sin, cos, sqrt, log, etc.).",
+        "parameters": {"type": "object", "properties": {"expression": {"type": "string"}}, "required": ["expression"]},
     },
     {
         "name": "qr_code",
-        "description": "Generate a QR code for any text or URL and send as image.",
-        "parameters": {"type": "object",
-                       "properties": {
-                           "text": {"type": "string", "description": "Text or URL to encode"},
-                           "caption": {"type": "string"},
-                       },
-                       "required": ["text"]},
+        "description": "Generate QR code for text or URL and send as image.",
+        "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "caption": {"type": "string"}}, "required": ["text"]},
     },
     {
         "name": "create_chart",
-        "description": (
-            "Create a chart/graph from data and send as image. "
-            "Types: bar, line, pie, scatter."
-        ),
-        "parameters": {"type": "object",
-                       "properties": {
-                           "chart_type": {"type": "string", "enum": ["bar", "line", "pie", "scatter"]},
-                           "title": {"type": "string"},
-                           "labels": {"type": "array", "items": {"type": "string"},
-                                      "description": "Category labels"},
-                           "values": {"type": "array", "items": {"type": "number"}},
-                           "xlabel": {"type": "string"},
-                           "ylabel": {"type": "string"},
-                       },
-                       "required": ["chart_type", "labels", "values"]},
+        "description": "Create chart (bar/line/pie/scatter) from data and send as image.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "chart_type": {"type": "string", "enum": ["bar", "line", "pie", "scatter"]},
+                "title": {"type": "string"},
+                "labels": {"type": "array", "items": {"type": "string"}},
+                "values": {"type": "array", "items": {"type": "number"}},
+                "xlabel": {"type": "string"},
+                "ylabel": {"type": "string"},
+            },
+            "required": ["chart_type", "labels", "values"],
+        },
     },
     {
         "name": "translate",
         "description": "Translate text to any language.",
-        "parameters": {"type": "object",
-                       "properties": {
-                           "text": {"type": "string"},
-                           "target_language": {"type": "string",
-                                               "description": "Target language, e.g. English, Spanish, Japanese"},
-                       },
-                       "required": ["text", "target_language"]},
+        "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "target_language": {"type": "string"}}, "required": ["text", "target_language"]},
     },
     {
         "name": "create_file",
-        "description": "Create a text or code file with given content and send as document.",
-        "parameters": {"type": "object",
-                       "properties": {
-                           "filename": {"type": "string", "description": "Filename with extension"},
-                           "content": {"type": "string", "description": "File content"},
-                           "caption": {"type": "string"},
-                       },
-                       "required": ["filename", "content"]},
+        "description": "Create a text/code file and send to chat as document.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string"},
+                "content": {"type": "string"},
+                "caption": {"type": "string"},
+            },
+            "required": ["filename", "content"],
+        },
     },
 ]
 
 
-# ── Gemini LLM call ──────────────────────────────────────────────
+# ── Gemini call ──────────────────────────────────────────────────
 
 _SYSTEM = (
-    "Ты — Hatani AI, мощный агент. Выполняешь задачи через инструменты.\n\n"
+    "Ты — Hatani AI, мощный агент с доступом к 20 инструментам.\n\n"
     "ПРОТОКОЛ:\n"
-    "1. think → обдумай, составь план\n"
-    "2. Используй нужные инструменты (можно несколько за шаг)\n"
-    "3. think → синтезируй результаты\n"
-    "4. reply или generate_project для финального результата\n\n"
-    "ДОСТУПНЫЕ ИНСТРУМЕНТЫ:\n"
-    "- Поиск: web_search, scrape_url, fetch_json\n"
-    "- Медиа: generate_image, download_image, download_video, text_to_speech\n"
-    "- Утилиты: run_python, calculate, qr_code, create_chart, translate, create_file\n"
-    "- Выход: generate_project (код/проект файлами), reply (текст)\n\n"
-    "Не повторяй одинаковые вызовы. Используй think перед generate_project."
+    "1. think → план\n"
+    "2. Инструменты (поиск, медиа, код, данные)\n"
+    "3. think → синтез\n"
+    "4. reply или generate_project\n\n"
+    "КЛЮЧЕВЫЕ ПРАВИЛА:\n"
+    "- Для поиска картинки используй search_and_send_image — он сам найдёт, проверит и пришлёт\n"
+    "- Для кода/команд используй run_python/run_shell — изолированный Docker sandbox\n"
+    "- write_file/read_file — для передачи данных между шагами\n"
+    "- Не повторяй одинаковые вызовы"
 )
 
 
@@ -646,10 +775,7 @@ async def _gemini_call(keys: list, contents: list) -> dict:
         "contents": contents,
         "tools": [{"functionDeclarations": _TOOLS}],
         "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
-        "generationConfig": {
-            "temperature": 0.7,
-            "thinkingConfig": {"thinkingLevel": "minimal"},
-        },
+        "generationConfig": {"temperature": 0.7, "thinkingConfig": {"thinkingLevel": "minimal"}},
     }
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
     for key in keys:
@@ -666,152 +792,125 @@ async def _gemini_call(keys: list, contents: list) -> dict:
                     if resp.status in (429, 403):
                         remove_key(key, resp.status)
                         continue
-                    logger.warning(f"agent gemini {resp.status}: {(await resp.text())[:200]}")
         except Exception as e:
-            logger.warning(f"agent gemini: {type(e).__name__}: {e}")
+            logger.warning(f"agent gemini: {e}")
     return {}
 
 
-# ── Execute one tool safely ──────────────────────────────────────
+# ── Execute one tool ─────────────────────────────────────────────
 
 async def _execute_tool(
-    name: str,
-    args: dict,
-    debounce: _DebounceHook,
-    budget: _ToolBudget,
-    status_cb: Callable,
-    send_cb: Optional[Callable],
+    name: str, args: dict,
+    debounce: _DebounceHook, budget: _ToolBudget,
+    status_cb: Callable, send_cb: Optional[Callable],
+    ws: AgentWorkspace,
 ) -> Tuple[str, Optional[dict]]:
-    """Returns (result_text, project_dict_or_None)."""
 
-    async def _st(text: str):
-        try:
-            await status_cb(text)
-        except Exception:
-            pass
+    async def _st(t):
+        try: await status_cb(t)
+        except Exception: pass
 
-    async def _send(media: dict):
+    async def _send(m):
         if send_cb:
-            try:
-                await send_cb(media)
-            except Exception as e:
-                logger.warning(f"send_cb failed: {e}")
+            try: await send_cb(m)
+            except Exception as e: logger.warning(f"send_cb: {e}")
 
-    if err := debounce.check(name, args):
-        return err, None
-    if err := budget.charge(name):
-        return err, None
-
-    # ── Core tools ──
+    if e := debounce.check(name, args): return e, None
+    if e := budget.charge(name):        return e, None
 
     if name == "think":
-        thought = args.get("thought", "")
-        logger.info(f"[agent:think] {thought[:300]}")
-        await _st(f"💭 {thought[:120]}...")
+        t = args.get("thought", "")
+        logger.info(f"[think] {t[:300]}")
+        await _st(f"💭 {t[:120]}...")
         return "ok", None
 
     if name == "web_search":
-        query = args.get("query", "")
-        await _st(f"🔎 Ищу: «{query[:80]}»")
-        return await _fc_search(query), None
+        q = args.get("query", "")
+        await _st(f"🔎 Ищу: «{q[:80]}»")
+        return await _fc_search(q), None
 
     if name == "scrape_url":
         await _st("📄 Читаю страницу...")
         return await _fc_scrape(args.get("url", "")), None
 
     if name == "generate_project":
-        prompt = args.get("prompt", "")
         await _st("⚙️ Генерирую проект...")
         try:
-            project = await asyncio.wait_for(
-                generate_project_with_gemini(prompt), timeout=_PROJECT_TIMEOUT
-            )
+            p = await asyncio.wait_for(generate_project_with_gemini(args.get("prompt", "")), timeout=_PROJECT_TIMEOUT)
         except asyncio.TimeoutError:
             return "generate_project timed out.", None
-        if project.get("ok"):
-            return "__PROJECT_DONE__", project
-        return f"Project gen failed: {project.get('error', '?')}", None
+        if p.get("ok"):
+            return "__PROJECT_DONE__", p
+        return f"Project gen failed: {p.get('error', '?')}", None
 
     if name == "reply":
         return args.get("text", "Done."), None
 
-    # ── Image tools ──
+    if name == "search_and_send_image":
+        return await _tool_search_image(
+            args.get("query", ""), args.get("description", ""), _send, status_cb
+        ), None
 
     if name == "generate_image":
-        prompt = args.get("prompt", "")
-        await _st(f"🎨 Генерирую изображение...")
-        return await _tool_generate_image(prompt, _send), None
+        await _st("🎨 Генерирую картинку...")
+        return await _tool_generate_image(args.get("prompt", ""), _send), None
 
     if name == "download_image":
-        await _st("⬇️ Скачиваю изображение...")
-        return await _tool_download_image(
-            args.get("url", ""), args.get("caption", ""), _send
-        ), None
-
-    # ── Video ──
+        await _st("⬇️ Скачиваю картинку...")
+        return await _tool_download_image(args.get("url", ""), args.get("caption", ""), _send), None
 
     if name == "download_video":
-        url = args.get("url", "")
-        await _st(f"📹 Скачиваю видео (до 2 мин)...")
-        return await _tool_download_video(url, args.get("caption", ""), _send), None
-
-    # ── Audio ──
+        await _st("📹 Скачиваю видео (до 2 мин)...")
+        return await _tool_download_video(args.get("url", ""), args.get("caption", ""), _send), None
 
     if name == "text_to_speech":
-        await _st("🎙 Озвучиваю текст...")
-        return await _tool_tts(
-            args.get("text", ""),
-            args.get("voice", "Kore"),
-            args.get("language", "ru-RU"),
-            _send,
-        ), None
-
-    # ── Code / data ──
+        await _st("🎙 Озвучиваю...")
+        return await _tool_tts(args.get("text", ""), args.get("voice", "Kore"), args.get("language", "ru-RU"), _send), None
 
     if name == "run_python":
-        code = args.get("code", "")
-        await _st("🐍 Выполняю код...")
-        return await _tool_run_python(code), None
+        await _st("🐍 Запускаю Python в Docker...")
+        return await _tool_run_python(args.get("code", ""), ws), None
+
+    if name == "run_shell":
+        await _st("💻 Выполняю команду в Docker...")
+        return await _tool_run_shell(args.get("command", ""), ws), None
+
+    if name == "write_file":
+        path, content = args.get("path", "file.txt"), args.get("content", "")
+        ws.write(path, content)
+        return f"Written: {path} ({len(content)} chars)", None
+
+    if name == "read_file":
+        return ws.read(args.get("path", "")), None
 
     if name == "fetch_json":
-        await _st(f"🌐 Запрашиваю {args.get('url', '')[:60]}...")
+        await _st(f"🌐 {args.get('url', '')[:60]}...")
         return await _tool_fetch_json(args.get("url", "")), None
 
     if name == "calculate":
-        result = _safe_eval(args.get("expression", "0"))
-        return f"Result: {result}", None
-
-    # ── Utilities ──
+        return _ast_eval(args.get("expression", "0")), None
 
     if name == "qr_code":
-        await _st("🔲 Генерирую QR-код...")
+        await _st("🔲 Генерирую QR...")
         return await _tool_qr_code(args.get("text", ""), args.get("caption", ""), _send), None
 
     if name == "create_chart":
-        await _st("📊 Создаю график...")
+        await _st("📊 Рисую график...")
         return await _tool_create_chart(
-            args.get("chart_type", "bar"),
-            args.get("title", ""),
-            args.get("labels", []),
-            args.get("values", []),
-            args.get("xlabel", ""),
-            args.get("ylabel", ""),
-            _send,
+            args.get("chart_type", "bar"), args.get("title", ""),
+            args.get("labels", []), args.get("values", []),
+            args.get("xlabel", ""), args.get("ylabel", ""), _send,
         ), None
 
     if name == "translate":
         await _st(f"🌍 Перевожу на {args.get('target_language', '?')}...")
-        return await _tool_translate(
-            args.get("text", ""), args.get("target_language", "English")
-        ), None
+        return await _tool_translate(args.get("text", ""), args.get("target_language", "English")), None
 
     if name == "create_file":
-        await _st(f"📄 Создаю файл {args.get('filename', '')}...")
+        await _st(f"📄 Создаю {args.get('filename', '')}...")
         return await _tool_create_file(
-            args.get("filename", "file.txt"),
-            args.get("content", ""),
-            args.get("caption", ""),
-            _send,
+            args.get("filename", "file.txt"), args.get("content", ""),
+            args.get("caption", ""), _send,
         ), None
 
     return f"Unknown tool: {name}", None
@@ -826,88 +925,72 @@ async def run_agent(
     status_cb: Callable[[str], Any],
     send_media_cb: Optional[Callable] = None,
 ) -> Tuple[Optional[str], Optional[dict]]:
-    """
-    Agentic loop. Returns (text_reply, project_payload) — one of them set.
-    Media is sent directly via send_media_cb during execution.
-    """
     keys = load_keys()
     if not keys:
         return "Gemini keys are dead.", None
 
+    ws       = AgentWorkspace()
     debounce = _DebounceHook()
     budget   = _ToolBudget()
-    contents: list = [
-        {"role": "user", "parts": [{"text": f"Задача от {username}:\n{task}"}]}
-    ]
+    contents: list = [{"role": "user", "parts": [{"text": f"Задача от {username}:\n{task}"}]}]
 
-    async def _st(text: str):
-        try:
-            await status_cb(text)
-        except Exception:
-            pass
+    async def _st(t):
+        try: await status_cb(t)
+        except Exception: pass
 
-    for step in range(MAX_STEPS):
-        await _st(f"🤖 Шаг {step + 1}/{MAX_STEPS}...")
+    try:
+        for step in range(MAX_STEPS):
+            await _st(f"🤖 Шаг {step + 1}/{MAX_STEPS}...")
 
-        if MAX_STEPS - step <= 3:
-            contents.append({"role": "user", "parts": [{"text":
-                f"\n[СИСТЕМА: осталось {MAX_STEPS - step} шагов. "
-                "Завершай: вызови reply или generate_project.]"
-            }]})
+            if MAX_STEPS - step <= 3:
+                contents.append({"role": "user", "parts": [{"text":
+                    f"\n[СИСТЕМА: осталось {MAX_STEPS - step} шагов. Завершай.]"
+                }]})
 
-        candidate = await _gemini_call(keys, contents)
-        if not candidate:
-            return "Agent failed — Gemini did not respond.", None
+            candidate = await _gemini_call(keys, contents)
+            if not candidate:
+                return "Agent failed — Gemini did not respond.", None
 
-        parts = candidate.get("content", {}).get("parts", [])
-        if not parts:
-            return "Agent returned empty response.", None
+            parts = candidate.get("content", {}).get("parts", [])
+            if not parts:
+                return "Agent returned empty response.", None
 
-        contents.append({"role": "model", "parts": parts})
-        fn_calls = [p["functionCall"] for p in parts if "functionCall" in p]
+            contents.append({"role": "model", "parts": parts})
+            fn_calls = [p["functionCall"] for p in parts if "functionCall" in p]
 
-        if not fn_calls:
-            text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
-            return text or "Done.", None
+            if not fn_calls:
+                text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
+                return text or "Done.", None
 
-        tool_responses: list = []
-        for fn in fn_calls:
-            name = fn.get("name", "")
-            args = fn.get("args", {})
+            tool_responses: list = []
+            for fn in fn_calls:
+                name = fn.get("name", "")
+                args = fn.get("args", {})
+                result, project = await _execute_tool(
+                    name, args, debounce, budget, status_cb, send_media_cb, ws
+                )
+                if name == "generate_project" and project is not None:
+                    return None, project
+                if name == "reply":
+                    return result, None
+                tool_responses.append({
+                    "functionResponse": {"name": name, "response": {"result": result}}
+                })
+            contents.append({"role": "user", "parts": tool_responses})
 
-            result_text, project = await _execute_tool(
-                name, args, debounce, budget, status_cb, send_media_cb
-            )
-
-            if name == "generate_project" and project is not None:
-                return None, project
-            if name == "reply":
-                return result_text, None
-
-            tool_responses.append({
-                "functionResponse": {
-                    "name": name,
-                    "response": {"result": result_text},
-                }
-            })
-
-        contents.append({"role": "user", "parts": tool_responses})
-
-    return "Agent exhausted all steps.", None
+        return "Agent exhausted all steps.", None
+    finally:
+        ws.cleanup()
 
 
 def is_agent_task(prompt: str) -> bool:
     lower = prompt.lower()
-    web = {
+    triggers = {
         "найди", "поищи", "загугли", "чекни", "чекнуть", "узнай", "разузнай",
-        "в инете", "в интернете", "погугли", "research", "look up",
-        "скачай", "download", "переведи", "translate", "посчитай", "calculate",
-        "qr", "qr-код", "график", "chart", "озвучь", "прочитай вслух",
+        "в инете", "в интернете", "скачай", "download", "переведи", "translate",
+        "посчитай", "calculate", "qr", "график", "chart", "озвучь",
+        "сделай", "создай", "напиши", "сгенерируй", "собери", "нарисуй",
+        "покажи картинку", "найди фото", "найди картинку", "пришли фото",
+        "запусти", "выполни", "run ",
     }
-    create = {
-        "сделай", "создай", "напиши", "сгенерируй", "собери", "склепай",
-        "сверстай", "сайт", "страницу", "программу", "скрипт", "бота",
-        "приложение", "проект", "html", "python", "визуализацию", "дашборд",
-        "файл", "архив", "нарисуй", "покажи", "пришли", "отправь",
-    }
-    return any(w in lower for w in web) or any(c in lower for c in create)
+    return any(t in lower for t in triggers)
