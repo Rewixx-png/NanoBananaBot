@@ -1034,8 +1034,8 @@ async def classify_agent_intent(prompt: str) -> bool:
         "contents": [{"role": "user", "parts": [{"text": prompt[:800]}]}],
         "generationConfig": {
             "temperature": 0,
-            "maxOutputTokens": 3,
-            "thinkingConfig": {"thinkingLevel": "minimal"},
+            "maxOutputTokens": 10,
+            # No thinkingConfig — thinking tokens consume the tiny output budget
         },
     }
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
@@ -1049,12 +1049,18 @@ async def classify_agent_intent(prompt: str) -> bool:
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip().lower()
-                        logger.debug(f"classify_agent_intent({prompt[:60]!r}) → {text!r}")
-                        return text.startswith("true")
+                        try:
+                            candidate = data.get("candidates", [{}])[0]
+                            parts = candidate.get("content", {}).get("parts", [])
+                            text = (parts[0].get("text", "") if parts else "").strip().lower()
+                            logger.debug(f"classify_agent_intent({prompt[:60]!r}) → {text!r}")
+                            return text.startswith("true")
+                        except (IndexError, KeyError, TypeError) as e:
+                            logger.warning(f"classify_agent_intent parse error: {e} | data: {str(data)[:200]}")
+                            return False
                     if resp.status in (429, 403):
                         remove_key(key, resp.status)
                         continue
         except Exception as e:
-            logger.warning(f"classify_agent_intent: {e}")
+            logger.warning(f"classify_agent_intent request error: {e}")
     return False
