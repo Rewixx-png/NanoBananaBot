@@ -965,7 +965,10 @@ _SYSTEM = (
     "КРИТИЧНО — ЧЕСТНОСТЬ:\n"
     "- Если инструмент вернул [НЕ НАЙДЕНО] — СКАЖИ что не нашёл. НЕ притворяйся что отправил.\n"
     "- Если инструмент вернул [ОТПРАВЛЕНО] — скажи что именно отправил (используй инфо из результата).\n"
-    "- Никогда не выдумывай содержимое видео/картинки которую не видел. Ты не знаешь что внутри."
+    "- Если спрашивают 'что за персонаж/что на видео' — ты НЕ знаешь, ты видео не смотрел. "
+    "Используй scrape_url на YouTube ссылке чтобы узнать название и описание видео. "
+    "НЕ ищи имя пользователя из чата — ищи информацию о видео по его URL.\n"
+    "- Никогда не выдумывай содержимое видео/картинки которую не видел."
 )
 
 
@@ -1206,8 +1209,9 @@ async def classify_agent_intent(prompt: str) -> bool:
         "- Generate text-to-speech audio\n"
         "- Create a project/website/code AND needs web research first\n"
         "- Do anything requiring external tools or execution\n\n"
-        "Answer FALSE when the user just:\n"
-        "- Asks a question answerable from knowledge (history, concepts, explanations)\n"
+        "Answer FALSE when the user:\n"
+        "- Asks a question answerable from knowledge or conversation context\n"
+        "- Asks a follow-up question about something already sent/shown (e.g. 'what character is in it?', 'who made this?', 'what's in the video?')\n"
         "- Wants casual chat or a simple text reply\n"
         "- Wants a pure code project with no research needed\n\n"
         "Reply with ONLY one word: true or false"
