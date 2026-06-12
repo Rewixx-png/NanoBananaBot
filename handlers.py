@@ -21,7 +21,7 @@ from database import save_history, save_pending_gen, delete_pending_gen, add_use
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned, make_safe_caption
 from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, generate_video_with_gemini, generate_text_with_gemini, classify_code_intent_with_gemini, classify_draw_intent_with_gemini, generate_image_via_code, upscale_image, generate_image_prompt, generate_code_with_gemini, generate_project_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate, fetch_gemini_tts_models, generate_tts_with_gemini, fetch_replicate_image_models, generate_bull_roast, analyze_photo_with_gemini, analyze_voice_with_gemini
-from agent import run_agent, is_agent_task
+from agent import run_agent, classify_agent_intent
 from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID, DAILY_GEN_LIMIT, PAYMENT_USERNAME, CHAT_ID, GEMINI_IMAGE_TIMEOUT
 import logging
 logger = logging.getLogger(__name__)
@@ -2653,7 +2653,7 @@ async def handle_text_messages(message: types.Message):
             except Exception:
                 pass
 
-        if is_agent_task(web_query) and not replied_code:
+        if not replied_code and await classify_agent_intent(web_query):
             async def _agent_send_cb(media: dict):
                 mtype    = media.get("type", "document")
                 data     = media.get("data", b"")
