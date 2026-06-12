@@ -1150,17 +1150,27 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
             await save_history(chat_id, history)
             return answer
 
-    contents = []
-    for msg in history:
-        contents.append({'role': msg['role'], 'parts': [{'text': msg['text']}]})
-    user_text = prefixed_prompt
-    ctx_lines = chat_context_buffer.get(chat_id, [])
-    if ctx_lines:
-        ctx_block = '\n'.join(ctx_lines[-50:])
-        user_text = f'[Контекст чата — последние сообщения всех участников, включая не адресованные боту:]\n{ctx_block}\n[/Контекст чата]\n\n{prefixed_prompt}'
-    if web_context:
-        user_text += f'\n\n[Интернет-контекст Firecrawl, используй если полезно:]\n{web_context}'
-    contents.append({'role': 'user', 'parts': [{'text': user_text}]})
+    _PROHIBITED = '__PROHIBITED_CONTENT__'
+
+    def _build_contents(with_ctx: bool) -> list:
+        result = []
+        for msg in history:
+            result.append({'role': msg['role'], 'parts': [{'text': msg['text']}]})
+        u_text = prefixed_prompt
+        if with_ctx:
+            ctx_lines = chat_context_buffer.get(chat_id, [])
+            if ctx_lines:
+                ctx_block = '\n'.join(ctx_lines[-50:])
+                u_text = (
+                    f'[Контекст чата — последние сообщения всех участников:]\n'
+                    f'{ctx_block}\n[/Контекст чата]\n\n{prefixed_prompt}'
+                )
+        if web_context:
+            u_text += f'\n\n[Интернет-контекст Firecrawl, используй если полезно:]\n{web_context}'
+        result.append({'role': 'user', 'parts': [{'text': u_text}]})
+        return result
+
+    contents = _build_contents(with_ctx=True)
 
     async def _call_model(call_contents, allow_web_directive: bool = True):
         for key in keys.copy():
@@ -1187,12 +1197,12 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
                             except (KeyError, IndexError, TypeError):
                                 block = (data.get('promptFeedback') or {}).get('blockReason', '')
                                 logging.warning(f'Gemini blocked/empty response: blockReason={block!r}')
-                                return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
+                                return _PROHIBITED if block == 'PROHIBITED_CONTENT' else 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
                         elif resp.status in [429, 403, 400]:
                             resp_text = await resp.text()
                             logging.warning(f'Ошибка ключа (текст) {key[:10]}... Код: {resp.status}. Текст: {resp_text}')
                             if resp.status == 400 and any(w in resp_text.lower() for w in ('safety', 'prohibited', 'harm', 'block', 'policy', 'recitation')):
-                                return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
+                                return _PROHIBITED
                             remove_key(key, resp.status)
                             continue
                         else:
@@ -1205,6 +1215,16 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
         return 'Все ключи проебаны или сдохли, отъебись.'
 
     reply_text = await _call_model(contents, allow_web_directive=not bool(web_context))
+
+    # PROHIBITED_CONTENT often caused by poisoned chat_context_buffer —
+    # retry without injected context, clear the buffer so future requests work
+    if reply_text == _PROHIBITED:
+        logging.info(f'PROHIBITED_CONTENT для chat={chat_id} — retry без context buffer')
+        chat_context_buffer.pop(chat_id, None)
+        clean_contents = _build_contents(with_ctx=False)
+        reply_text = await _call_model(clean_contents, allow_web_directive=not bool(web_context))
+        if reply_text == _PROHIBITED:
+            return 'Гугл заблокировал запрос (PROHIBITED_CONTENT) — скорее всего сам запрос или история чата содержит что-то запрещённое. Напиши /clear чтобы почистить историю.'
     if reply_text.strip().upper().startswith(_WEB_SEARCH_DIRECTIVE):
         query = reply_text.split(':', 1)[1].strip() or _wq
         if not web_context:
