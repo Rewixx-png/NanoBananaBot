@@ -1006,34 +1006,55 @@ async def run_agent(
         ws.cleanup()
 
 
-def is_agent_task(prompt: str) -> bool:
-    lower = prompt.lower()
+async def classify_agent_intent(prompt: str) -> bool:
+    """Returns True if this request should go through the agent loop.
+    Uses Gemini to understand intent — no keyword matching."""
+    keys = load_keys()
+    if not keys:
+        return False
 
-    # Execution / server operations — always agent, never project generation
-    exec_signals = [
-        "на сервере", "на серваке", "на серве", "в контейнере", "в докере",
-        "нагруз", "стресс", "загрузи проц", "загрузи оперативку", "загрузи цп",
-        "запусти", "выполни", "выполни команду", "запусти команду",
-        "протестируй", "потестируй", "проверь сервер", "проверь систему",
-        "whoami", "uptime", "df ", "du ", "ps aux", "top ", "htop",
-        "run ", "execute", "shell",
-    ]
-    if any(s in lower for s in exec_signals):
-        return True
-
-    # Web research + creation — agent handles research→build pipeline
-    web = {
-        "найди", "поищи", "загугли", "чекни", "чекнуть", "узнай", "разузнай",
-        "в инете", "в интернете", "погугли", "research", "look up",
-        "скачай", "download", "переведи", "translate",
-        "посчитай", "calculate", "qr", "qr-код", "график", "chart",
-        "озвучь", "прочитай вслух", "нарисуй", "найди фото", "найди картинку",
-        "покажи фото", "покажи картинку", "пришли фото",
+    system = (
+        "You decide if a Telegram message needs the AI agent tools.\n\n"
+        "Answer TRUE when the user wants to:\n"
+        "- Execute or run anything (code, commands, server ops, stress tests)\n"
+        "- Search the internet, find info, news, social media profiles\n"
+        "- Find, download, or generate images or videos\n"
+        "- Make calculations, charts, QR codes, translations\n"
+        "- Generate text-to-speech audio\n"
+        "- Create a project/website/code AND needs web research first\n"
+        "- Do anything requiring external tools or execution\n\n"
+        "Answer FALSE when the user just:\n"
+        "- Asks a question answerable from knowledge (history, concepts, explanations)\n"
+        "- Wants casual chat or a simple text reply\n"
+        "- Wants a pure code project with no research needed\n\n"
+        "Reply with ONLY one word: true or false"
+    )
+    payload = {
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": prompt[:800]}]}],
+        "generationConfig": {
+            "temperature": 0,
+            "maxOutputTokens": 3,
+            "thinkingConfig": {"thinkingLevel": "minimal"},
+        },
     }
-    create = {
-        "сделай", "создай", "напиши", "сгенерируй", "собери", "склепай",
-        "сверстай", "сайт", "страницу", "страничку", "программу", "скрипт",
-        "бота", "приложение", "проект", "html", "python", "визуализацию",
-        "дашборд", "dashboard", "файл", "архив", "пришли", "отправь",
-    }
-    return any(w in lower for w in web) or any(c in lower for c in create)
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+    for key in keys:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    url, json=payload,
+                    headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip().lower()
+                        logger.debug(f"classify_agent_intent({prompt[:60]!r}) → {text!r}")
+                        return text.startswith("true")
+                    if resp.status in (429, 403):
+                        remove_key(key, resp.status)
+                        continue
+        except Exception as e:
+            logger.warning(f"classify_agent_intent: {e}")
+    return False
