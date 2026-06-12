@@ -370,11 +370,11 @@ async def _tool_search_image(
                     "type": "photo", "data": img_bytes,
                     "caption": f"🖼 {search_desc[:900]}", "filename": fname,
                 })
-                return f"Found and sent image for '{current_query}'."
+                return f"[ОТПРАВЛЕНО] Картинка найдена и отправлена. Источник: {img_url} (запрос: '{current_query}')"
 
         await _st(f"⚠️ Ни одна картинка не подошла, формулирую лучший запрос...")
 
-    return f"Could not find a relevant image after {max_rounds} attempts. Tried: {tried_queries}"
+    return f"[НЕ НАЙДЕНО] Не удалось найти подходящую картинку после {max_rounds} попыток. Пробовал: {tried_queries}. Скажи пользователю честно что не нашёл."
 
 
 # ── Other tool implementations ───────────────────────────────────
@@ -508,12 +508,12 @@ async def _tool_search_video(
         for vid_url in video_urls[:5]:
             result = await _tool_download_video(vid_url, description or query, send_cb)
             if "sent" in result.lower() or "mb)" in result.lower():
-                return f"Video found and sent (query: '{current_query}')."
+                return f"[ОТПРАВЛЕНО] Видео скачано и отправлено. Источник: {vid_url} (запрос: '{current_query}')"
             logger.debug(f"search_video: {vid_url!r} → {result[:80]}")
 
         await _st(f"⚠️ Ни одно видео не скачалось, ищу лучше...")
 
-    return f"Не смог найти и скачать видео за {max_rounds} попытки. Пробовал: {tried_queries}"
+    return f"[НЕ НАЙДЕНО] Не удалось найти и скачать видео после {max_rounds} попыток. Пробовал запросы: {tried_queries}. Скажи об этом пользователю честно."
 
 
 async def _tool_tts(text: str, voice: str, lang: str, send_cb: Callable) -> str:
@@ -891,7 +891,11 @@ _SYSTEM = (
     "1. think → одна фраза что именно делаю и каким инструментом\n"
     "2. Инструмент\n"
     "3. reply или следующий шаг\n\n"
-    "Не повторяй одинаковые вызовы. Будь конкретным."
+    "Не повторяй одинаковые вызовы. Будь конкретным.\n\n"
+    "КРИТИЧНО — ЧЕСТНОСТЬ:\n"
+    "- Если инструмент вернул [НЕ НАЙДЕНО] — СКАЖИ что не нашёл. НЕ притворяйся что отправил.\n"
+    "- Если инструмент вернул [ОТПРАВЛЕНО] — скажи что именно отправил (используй инфо из результата).\n"
+    "- Никогда не выдумывай содержимое видео/картинки которую не видел. Ты не знаешь что внутри."
 )
 
 
