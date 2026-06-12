@@ -1,8 +1,24 @@
 import json
 import re
 import os
+import sqlite3
 import logging
+import time
 from config import API_KEYS_FILE, OPENAI_API_KEY
+
+REWTEST_DB = "/root/RewTest/keyhunter.db"
+_session_dead: dict[str, float] = {}  # key -> expiry timestamp
+
+
+def _is_dead(key: str) -> bool:
+    """Return True if key is in cooldown and hasn't expired yet."""
+    exp = _session_dead.get(key)
+    if exp is None:
+        return False
+    if time.time() < exp:
+        return True
+    del _session_dead[key]  # expired - prune
+    return False
 
 def strip_code_fences(content: str) -> str:
     content = content.strip()
@@ -33,7 +49,7 @@ def normalize_key_list(value):
     return keys
 
 def load_api_config():
-    default_config = {'gemini': [], 'openai': ''}
+    default_config = {'gemini': [], 'openai': '', 'firecrawl': []}
     try:
         with open(API_KEYS_FILE, 'r') as f:
             raw_content = f.read()
@@ -63,7 +79,13 @@ def load_api_config():
     nvidia_keys = normalize_key_list(nvidia_data) if isinstance(nvidia_data, list) else [nvidia_data.strip()] if isinstance(nvidia_data, str) and nvidia_data.strip() else []
     openrouter_data = data.get('openrouter', [])
     openrouter_keys = normalize_key_list(openrouter_data) if isinstance(openrouter_data, list) else [openrouter_data.strip()] if isinstance(openrouter_data, str) and openrouter_data.strip() else []
-    return {'gemini': gemini_keys, 'openai': openai_value, 'nvidia': nvidia_keys, 'openrouter': openrouter_keys}
+    replicate_data = data.get('replicate', [])
+    replicate_keys = normalize_key_list(replicate_data) if isinstance(replicate_data, list) else [replicate_data.strip()] if isinstance(replicate_data, str) and replicate_data.strip() else []
+    firecrawl_data = data.get('firecrawl', [])
+    firecrawl_keys = normalize_key_list(firecrawl_data) if isinstance(firecrawl_data, list) else [firecrawl_data.strip()] if isinstance(firecrawl_data, str) and firecrawl_data.strip() else []
+    if not firecrawl_keys:
+        firecrawl_keys = list(dict.fromkeys(re.findall(r'fc-[0-9a-fA-F]{32}', content)))
+    return {'gemini': gemini_keys, 'openai': openai_value, 'nvidia': nvidia_keys, 'openrouter': openrouter_keys, 'replicate': replicate_keys, 'firecrawl': firecrawl_keys}
 
 def save_api_config(config):
     gemini_keys = normalize_key_list(config.get('gemini', []))
@@ -81,12 +103,28 @@ def save_api_config(config):
     out_data = {'gemini': gemini_keys}
     if openai_value:
         out_data['openai'] = openai_value
+    for key in ['replicate', 'nvidia', 'openrouter', 'firecrawl']:
+        val = config.get(key)
+        if val:
+            if isinstance(val, list):
+                out_data[key] = normalize_key_list(val)
+            elif isinstance(val, str) and val.strip():
+                out_data[key] = val.strip()
     out_json = '```json\n' + json.dumps(out_data, ensure_ascii=False, indent=2) + '\n```\n'
     with open(API_KEYS_FILE, 'w') as f:
         f.write(out_json)
 
 def load_keys():
-    return load_api_config().get('gemini', [])
+    try:
+        con = sqlite3.connect(REWTEST_DB, timeout=3)
+        cur = con.execute("SELECT key FROM keys WHERE service='Gemini' AND is_live=1")
+        keys = [row[0] for row in cur.fetchall() if not _is_dead(row[0])]
+        con.close()
+        if keys:
+            return keys
+    except Exception:
+        pass
+    return [k for k in load_api_config().get('gemini', []) if not _is_dead(k)]
 
 def load_openai_keys():
     key = os.getenv('OPENAI_API_KEY', '').strip()
@@ -94,6 +132,15 @@ def load_openai_keys():
         return [key]
     if OPENAI_API_KEY.strip():
         return [OPENAI_API_KEY.strip()]
+    try:
+        con = sqlite3.connect(REWTEST_DB, timeout=3)
+        cur = con.execute("SELECT key FROM keys WHERE service='OpenAI' AND is_live=1")
+        keys = [row[0] for row in cur.fetchall() if not _is_dead(row[0])]
+        con.close()
+        if keys:
+            return keys
+    except Exception:
+        pass
     try:
         openai_data = load_api_config().get('openai', '')
         if isinstance(openai_data, list) and openai_data:
@@ -121,6 +168,15 @@ def load_nvidia_keys():
 
 def load_openrouter_keys():
     try:
+        con = sqlite3.connect(REWTEST_DB, timeout=3)
+        cur = con.execute("SELECT key FROM keys WHERE service='OpenRouter' AND is_live=1")
+        keys = [row[0] for row in cur.fetchall() if not _is_dead(row[0])]
+        con.close()
+        if keys:
+            return keys
+    except Exception:
+        pass
+    try:
         or_data = load_api_config().get('openrouter', [])
         if isinstance(or_data, list) and or_data:
             return or_data
@@ -132,24 +188,80 @@ def load_openrouter_keys():
 
 def load_replicate_keys():
     try:
-        with open(API_KEYS_FILE, 'r') as f:
-            raw = f.read()
-        content = strip_code_fences(raw)
-        data = json.loads(content)
-        rep_data = data.get('replicate', [])
-        if isinstance(rep_data, list) and rep_data:
-            return rep_data
-        if isinstance(rep_data, str) and rep_data.strip():
-            return [rep_data.strip()]
+        return load_api_config().get('replicate', [])
     except Exception as e:
         logging.error(f'Ошибка загрузки Replicate ключей: {e}')
     return []
 
-def remove_key(key_to_remove):
+def load_groq_keys():
+    try:
+        con = sqlite3.connect(REWTEST_DB, timeout=3)
+        cur = con.execute("SELECT key FROM keys WHERE service='Groq' AND is_live=1")
+        keys = [row[0] for row in cur.fetchall() if not _is_dead(row[0])]
+        con.close()
+        if keys:
+            return keys
+    except Exception as e:
+        logging.warning(f'load_groq_keys DB error: {e}')
+    try:
+        groq_data = load_api_config().get('groq', [])
+        if isinstance(groq_data, list) and groq_data:
+            return groq_data
+        if isinstance(groq_data, str) and groq_data.strip():
+            return [groq_data.strip()]
+    except Exception as e:
+        logging.error(f'Ошибка загрузки Groq ключей: {e}')
+    return []
+
+def load_firecrawl_keys():
+    env_keys = normalize_key_list(os.getenv('FIRECRAWL_KEYS', ''))
+    single_env_key = os.getenv('FIRECRAWL_API_KEY', '').strip()
+    if single_env_key:
+        env_keys.append(single_env_key)
+    if env_keys:
+        return list(dict.fromkeys([k for k in env_keys if not _is_dead(k)]))
+    try:
+        con = sqlite3.connect(REWTEST_DB, timeout=3)
+        cur = con.execute("SELECT key FROM keys WHERE service='Firecrawl' AND is_live=1")
+        keys = [row[0] for row in cur.fetchall() if not _is_dead(row[0])]
+        con.close()
+        if keys:
+            return keys
+    except Exception as e:
+        logging.warning(f'load_firecrawl_keys DB error: {e}')
+    try:
+        fc_data = load_api_config().get('firecrawl', [])
+        if isinstance(fc_data, list) and fc_data:
+            return [k for k in fc_data if not _is_dead(k)]
+        if isinstance(fc_data, str) and fc_data.strip() and not _is_dead(fc_data.strip()):
+            return [fc_data.strip()]
+    except Exception as e:
+        logging.error(f'Ошибка загрузки Firecrawl ключей: {e}')
+    return []
+
+def remove_key(key_to_remove, status_code=None):
+    if status_code == 429:
+        _session_dead[key_to_remove] = time.time() + 65
+        logging.info(f"Ключ {key_to_remove[:10]}... в кулдауне 65с (429 rate limit).")
+        return
+    if status_code == 403:
+        _session_dead[key_to_remove] = time.time() + 300
+        logging.info(f"Ключ {key_to_remove[:10]}... в кулдауне 300с (403 forbidden).")
+        return
+    _session_dead[key_to_remove] = time.time() + 86400 * 365
     config = load_api_config()
-    keys = config.get('gemini', [])
-    if key_to_remove in keys:
-        keys.remove(key_to_remove)
-        config['gemini'] = keys
+    removed = False
+    for k, v in list(config.items()):
+        if isinstance(v, list):
+            if key_to_remove in v:
+                v.remove(key_to_remove)
+                config[k] = v
+                removed = True
+                logging.info(f"Ключ {key_to_remove[:10]}... удален из списка '{k}' (нет бабок/лимитов/ошибка 401/400).")
+        elif isinstance(v, str):
+            if v.strip() == key_to_remove:
+                config[k] = ""
+                removed = True
+                logging.info(f"Ключ {key_to_remove[:10]}... удален из строки '{k}' (нет бабок/лимитов/ошибка 401/400).")
+    if removed:
         save_api_config(config)
-        logging.info(f'Ключ {key_to_remove[:10]}... удален (нет бабок/лимитов).')
