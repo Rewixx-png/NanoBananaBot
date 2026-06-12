@@ -432,9 +432,16 @@ async def _tool_download_video(url: str, caption: str, send_cb: Callable) -> str
         return f"Video ({size // 1024 // 1024} MB) sent."
 
 
-async def _find_video_urls(query: str) -> list[str]:
-    """Extract YouTube / TikTok / VK URLs from Firecrawl search results."""
-    results = await _fc_search(f"{query} site:youtube.com OR site:tiktok.com OR site:vk.com")
+async def _find_video_urls(query: str, creator: str = "") -> list[str]:
+    """Extract YouTube / TikTok / VK URLs from Firecrawl search results.
+    If creator is given, tries channel-specific search first."""
+    search_queries = []
+    if creator:
+        slug = re.sub(r'[^a-zA-Z0-9_]', '', creator.replace(' ', '').replace('.', ''))
+        search_queries.append(f"{query} site:tiktok.com/@{slug}")
+        search_queries.append(f"{query} site:youtube.com @{creator}")
+    search_queries.append(f"{query} site:youtube.com OR site:tiktok.com OR site:vk.com")
+
     patterns = [
         r'https?://(?:www\.)?youtube\.com/watch\?[^\s\)"\'<>]+',
         r'https?://youtu\.be/[^\s\)"\'<>]+',
@@ -442,23 +449,64 @@ async def _find_video_urls(query: str) -> list[str]:
         r'https?://vm\.tiktok\.com/[^\s\)"\'<>]+',
         r'https?://vk\.com/video[^\s\)"\'<>]+',
     ]
-    urls: list[str] = []
-    for pat in patterns:
-        urls.extend(re.findall(pat, results))
+
     seen: set[str] = set()
     clean: list[str] = []
-    for u in urls:
-        u = u.rstrip('.,;)"\'>]')
-        if u not in seen:
-            seen.add(u)
-            clean.append(u)
-    return clean[:8]
+
+    for q in search_queries[:2]:
+        results = await _fc_search(q)
+        for pat in patterns:
+            for u in re.findall(pat, results):
+                u = u.rstrip('.,;)"\'>]')
+                if u not in seen:
+                    seen.add(u)
+                    # If creator specified — prioritise URLs that contain creator slug
+                    if creator:
+                        slug_lower = re.sub(r'[^a-z0-9]', '', creator.lower())
+                        if slug_lower in u.lower():
+                            clean.insert(0, u)
+                        else:
+                            clean.append(u)
+                    else:
+                        clean.append(u)
+        if clean:
+            break
+
+    return clean[:10]
+
+
+async def _verify_video_creator(url: str, creator: str) -> tuple[bool, str]:
+    """Check if the video URL actually belongs to the requested creator.
+    Returns (matches, found_creator_name)."""
+    # Fast check: creator slug in URL
+    slug = re.sub(r'[^a-z0-9]', '', creator.lower())
+    if slug and slug in url.lower():
+        extracted = re.search(r'tiktok\.com/@([^/\s?]+)', url)
+        name = extracted.group(1) if extracted else creator
+        return True, name
+
+    # Slow check: scrape page for channel/author info
+    page = await _fc_scrape(url)
+    page_lower = page.lower()
+    slug_lower = re.sub(r'[^a-z0-9]', '', creator.lower())
+
+    # Look for author mentions in page content
+    author_match = (
+        re.search(r'@([a-zA-Z0-9_.]{2,32})', page) or
+        re.search(r'(?:channel|author|by|creator)[:\s]+([a-zA-Z0-9_. -]{2,40})', page, re.IGNORECASE)
+    )
+    found_name = author_match.group(1).strip() if author_match else ""
+    found_slug = re.sub(r'[^a-z0-9]', '', found_name.lower())
+
+    if slug_lower and (slug_lower in page_lower or found_slug == slug_lower):
+        return True, found_name
+    return False, found_name
 
 
 async def _tool_search_video(
-    query: str, description: str, send_cb: Callable, status_cb: Callable
+    query: str, description: str, creator: str, send_cb: Callable, status_cb: Callable
 ) -> str:
-    """Autonomous video search: find URL → yt-dlp download → retry with refined query."""
+    """Autonomous video search with optional creator verification."""
     keys = load_keys()
     max_rounds = 3
     tried_queries: list[str] = []
@@ -472,10 +520,11 @@ async def _tool_search_video(
             current_query = query
         else:
             if keys:
+                creator_hint = f" specifically from creator '{creator}'" if creator else ""
                 payload = {
                     "contents": [{"parts": [{"text":
-                        f"Give a better YouTube/TikTok search query to find: '{description or query}'. "
-                        f"Previous failed: {tried_queries}. Return ONLY the query."
+                        f"Give a better YouTube/TikTok search query to find: '{description or query}'{creator_hint}. "
+                        f"Previous failed: {tried_queries}. Return ONLY the query string."
                     }]}],
                     "generationConfig": {"temperature": 0.5, "maxOutputTokens": 30},
                 }
@@ -491,31 +540,41 @@ async def _tool_search_video(
                                 data = await resp.json()
                                 current_query = data["candidates"][0]["content"]["parts"][0]["text"].strip()
                             else:
-                                current_query = f"{query} official edit"
+                                current_query = f"{query} {creator} official".strip()
                 except Exception:
-                    current_query = f"{query} edit"
+                    current_query = f"{query} {creator}".strip()
             else:
-                current_query = f"{query} edit"
+                current_query = f"{query} {creator}".strip()
 
         tried_queries.append(current_query)
         await _st(f"🔎 Ищу видео: «{current_query}» (попытка {rnd + 1}/{max_rounds})")
 
-        video_urls = await _find_video_urls(current_query)
+        video_urls = await _find_video_urls(current_query, creator=creator)
         if not video_urls:
-            await _st(f"⚠️ Ссылок не нашёл, меняю запрос...")
+            await _st("⚠️ Ссылок не нашёл, меняю запрос...")
             continue
 
-        await _st(f"📥 Нашёл {len(video_urls)} ссылок, пробую скачать...")
-        for vid_url in video_urls[:5]:
+        await _st(f"📥 Нашёл {len(video_urls)} ссылок, проверяю автора и скачиваю...")
+        for vid_url in video_urls[:6]:
+            # Verify creator if specified
+            if creator:
+                matches, found_name = await _verify_video_creator(vid_url, creator)
+                if not matches:
+                    logger.debug(f"Creator mismatch: wanted={creator!r} found={found_name!r} url={vid_url[:60]}")
+                    await _st(f"⚠️ Видео не от {creator} (автор: {found_name or '?'}), пропускаю...")
+                    continue
+                await _st(f"✅ Автор подтверждён: {found_name}, скачиваю...")
+
             result = await _tool_download_video(vid_url, description or query, send_cb)
             if "sent" in result.lower() or "mb)" in result.lower():
                 safe_url = vid_url.replace('\n', '').replace('\r', '').replace('\t', '')[:200]
-                return f"[ОТПРАВЛЕНО] Видео скачано и отправлено. Источник: {safe_url} (запрос: '{current_query}')"
-            logger.debug(f"search_video: {vid_url!r} → {result[:80]}")
+                creator_info = f", автор: {creator}" if creator else ""
+                return f"[ОТПРАВЛЕНО] Видео скачано и отправлено{creator_info}. Источник: {safe_url}"
+            logger.debug(f"search_video dl failed: {vid_url!r} → {result[:80]}")
 
-        await _st(f"⚠️ Ни одно видео не скачалось, ищу лучше...")
+        await _st("⚠️ Ни одно видео не скачалось, ищу лучше...")
 
-    return f"[НЕ НАЙДЕНО] Не удалось найти и скачать видео после {max_rounds} попыток. Пробовал запросы: {tried_queries}. Скажи об этом пользователю честно."
+    return f"[НЕ НАЙДЕНО] Не удалось найти и скачать видео после {max_rounds} попыток. Пробовал: {tried_queries}. Скажи об этом пользователю честно."
 
 
 async def _tool_tts(text: str, voice: str, lang: str, send_cb: Callable) -> str:
@@ -747,15 +806,20 @@ _TOOLS = [
     {
         "name": "search_and_send_video",
         "description": (
-            "Autonomously search for a video by description, find its URL on YouTube/TikTok/VK, "
-            "download via yt-dlp and send to chat. Retries with refined queries if download fails. "
-            "Use this when user asks to FIND and send a video — don't use web_search+download_video manually."
+            "Autonomously search for a video, verify it belongs to the right creator, "
+            "download via yt-dlp and send to chat. Retries with refined queries if not found. "
+            "Use when user asks to FIND and send a video. Specify creator to verify ownership."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query for the video"},
-                "description": {"type": "string", "description": "What a good result should look like"},
+                "description": {"type": "string", "description": "What a good result looks like"},
+                "creator": {
+                    "type": "string",
+                    "description": "Creator/channel name to verify (e.g. 'kadzu vfx', 'TPEBOP.FX'). "
+                                   "Leave empty if any creator is OK.",
+                },
             },
             "required": ["query"],
         },
@@ -877,7 +941,9 @@ _SYSTEM = (
     "ЕСЛИ просят НАЙТИ картинку/фото:\n"
     "  → search_and_send_image — сам найдёт, проверит Gemini vision, пришлёт лучшую\n\n"
     "ЕСЛИ просят НАЙТИ видео/эдит/клип по описанию:\n"
-    "  → search_and_send_video — сам найдёт YouTube/TikTok ссылку, скачает, пришлёт\n"
+    "  → search_and_send_video(query=..., creator='имя автора если указан')\n"
+    "  Если пользователь сказал 'у kadzu vfx' или 'от TPEBOP.FX' — ВСЕГДА передавай creator\n"
+    "  Инструмент проверит что видео реально от этого автора, а не от кого-то другого\n"
     "  НЕ web_search + download_video вручную\n\n"
     "ЕСЛИ просят СОЗДАТЬ проект/сайт/программу:\n"
     "  → web_search (если нужен контекст) → generate_project\n\n"
@@ -985,7 +1051,8 @@ async def _execute_tool(
 
     if name == "search_and_send_video":
         return await _tool_search_video(
-            args.get("query", ""), args.get("description", ""), _send, status_cb
+            args.get("query", ""), args.get("description", ""),
+            args.get("creator", ""), _send, status_cb
         ), None
 
     if name == "generate_image":
