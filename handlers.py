@@ -595,7 +595,9 @@ async def cmd_clear(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
         return
+    from state import chat_context_buffer
     await save_history(message.chat.id, [])
+    chat_context_buffer.pop(message.chat.id, None)
     await message.reply('Окей, я забыл всю хуйню, которую мы тут обсуждали. Начинаем с чистого листа.')
 import random as _random
 _KIRIESHKI_CHAT_ID = -1002830734467
