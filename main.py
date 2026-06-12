@@ -21,6 +21,23 @@ class BanMiddleware(BaseMiddleware):
         if user_id and (user_id in BANNED_USER_IDS or user_id in banned_user_ids):
             return
         return await handler(event, data)
+
+class DualHistoryMiddleware(BaseMiddleware):
+
+    async def __call__(self, handler: Callable[[TelegramObject, dict], Awaitable[Any]], event: TelegramObject, data: dict) -> Any:
+        if isinstance(event, Message) and event.text and event.from_user and not event.from_user.is_bot:
+            from dual_bot import add_dual_message
+            from state import chat_context_buffer
+            from config import MAX_HISTORY_MESSAGES
+            user = event.from_user
+            name = f"@{user.username}" if user.username else (user.first_name or str(user.id))
+            add_dual_message(event.chat.id, name, event.text)
+            buf = chat_context_buffer.setdefault(event.chat.id, [])
+            buf.append(f"{name}: {event.text}")
+            if len(buf) > MAX_HISTORY_MESSAGES:
+                chat_context_buffer[event.chat.id] = buf[-MAX_HISTORY_MESSAGES:]
+        return await handler(event, data)
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.FileHandler('bot.log'), logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger(__name__)
 bot_instance = None
@@ -33,6 +50,7 @@ def signal_handler(signum, frame):
 async def resume_pending_generations(bot: Bot):
     from ai_services import poll_veo_operation, generate_image_with_gemini, generate_image_with_gpt, generate_image_with_nvidia, generate_image_with_openrouter
     from aiogram.types import BufferedInputFile
+    from utils import make_safe_caption
     pending = await get_all_pending_gens()
     if not pending:
         return
@@ -53,7 +71,8 @@ async def resume_pending_generations(bot: Bot):
                 (video_bytes, error) = await poll_veo_operation(task['veo_operation_name'], task['veo_api_key'])
                 await delete_pending_gen(gen_id)
                 if video_bytes:
-                    await bot.send_video(chat_id=chat_id, video=BufferedInputFile(video_bytes, filename='generated.mp4'), caption=f'🎬 Видео ({model_label}) по запросу: {prompt}', reply_to_message_id=source_msg_id, **reply_kwargs)
+                    caption = make_safe_caption(f'🎬 Видео ({model_label}) по запросу: ', prompt)
+                    await bot.send_video(chat_id=chat_id, video=BufferedInputFile(video_bytes, filename='generated.mp4'), caption=caption, reply_to_message_id=source_msg_id, **reply_kwargs)
                 else:
                     await bot.send_message(chat_id=chat_id, text=f'❌ Ошибка видео после перезапуска:\n{error}', reply_to_message_id=source_msg_id, **reply_kwargs)
             elif task['gen_type'] == 'image':
@@ -76,7 +95,8 @@ async def resume_pending_generations(bot: Bot):
                     (result, error) = await generate_image_with_openrouter(prompt, model=model)
                 await delete_pending_gen(gen_id)
                 if result:
-                    await bot.send_photo(chat_id=chat_id, photo=BufferedInputFile(result, filename='generated.jpg'), caption=f'🎨 Результат ({model_label}) после перезапуска: {prompt}', reply_to_message_id=source_msg_id, **reply_kwargs)
+                    caption = make_safe_caption(f'🎨 Результат ({model_label}) после перезапуска: ', prompt)
+                    await bot.send_photo(chat_id=chat_id, photo=BufferedInputFile(result, filename='generated.jpg'), caption=caption, reply_to_message_id=source_msg_id, **reply_kwargs)
                 else:
                     await bot.send_message(chat_id=chat_id, text=f'❌ Ошибка изображения после перезапуска:\n{error}', reply_to_message_id=source_msg_id, **reply_kwargs)
             else:
@@ -100,8 +120,13 @@ async def on_startup(bot: Bot):
 
 async def on_shutdown():
     logger.info('Начинаю остановку бота...')
+    from dual_bot import bot2
     if bot_instance:
         await bot_instance.session.close()
+    try:
+        await bot2.session.close()
+    except Exception:
+        pass
     logger.info('Бот успешно остановлен')
 
 async def main():
@@ -110,21 +135,34 @@ async def main():
     signal.signal(signal.SIGTERM, signal_handler)
     logger.info('Запускаю бота...')
     try:
+        from dual_bot import bot2, dp2, router2, set_bot1_ref, init_bot2
         bot_instance = Bot(token=BOT_TOKEN)
         dp_instance = Dispatcher()
         dp_instance.message.middleware(BanMiddleware())
+        dp_instance.message.middleware(DualHistoryMiddleware())
         dp_instance.callback_query.middleware(BanMiddleware())
         dp_instance.include_router(router)
+        dp2.include_router(router2)
         await on_startup(bot_instance)
-        logger.info('Удаляю webhook...')
-        await bot_instance.delete_webhook(drop_pending_updates=True)
-        logger.info('Бот успешно запущен и готов к работе!')
-        await dp_instance.start_polling(bot_instance)
+        set_bot1_ref(bot_instance)
+        await asyncio.gather(
+            bot_instance.delete_webhook(drop_pending_updates=True),
+            bot2.delete_webhook(drop_pending_updates=True),
+        )
+        await init_bot2()
+        logger.info('Оба бота запущены и готовы к работе!')
+        from figma_bridge import start_bridge
+        await asyncio.gather(
+            dp_instance.start_polling(bot_instance),
+            dp2.start_polling(bot2),
+            start_bridge(),
+        )
     except Exception as e:
         logger.exception(f'Критическая ошибка при запуске бота: {e}')
         raise
     finally:
         await on_shutdown()
+
 if __name__ == '__main__':
     try:
         asyncio.run(main())

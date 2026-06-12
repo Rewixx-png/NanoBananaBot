@@ -16,15 +16,32 @@ from aiogram import Router, F, types
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache, daily_gen_limits, banned_user_ids, chat_custom_limits, pending_tts_requests, pending_tts_configs, tts_voice_previews, generated_draw_messages
+from state import pending_image_requests, pending_video_requests, pending_media_groups, user_image_cooldowns, user_text_cooldowns, user_video_cooldowns, full_access_image_cooldowns, paid_unlimited_until, pending_prompt_requests, pending_nsfw_configs, chat_members_cache, daily_gen_limits, banned_user_ids, chat_custom_limits, pending_tts_requests, pending_tts_configs, pending_file_tasks, tts_voice_previews, generated_draw_messages, generated_code_messages
 from database import save_history, save_pending_gen, delete_pending_gen, add_user_stat, get_user_stats, add_banned_user_db, remove_banned_user_db, log_prompt, get_recent_prompts
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned, make_safe_caption
-from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, generate_video_with_gemini, generate_text_with_gemini, classify_code_intent_with_gemini, classify_draw_intent_with_gemini, generate_image_via_code, upscale_image, generate_image_prompt, generate_code_with_gemini, generate_project_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate, fetch_gemini_tts_models, generate_tts_with_gemini, fetch_replicate_image_models, generate_bull_roast
+from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, generate_video_with_gemini, generate_text_with_gemini, classify_code_intent_with_gemini, classify_draw_intent_with_gemini, generate_image_via_code, upscale_image, generate_image_prompt, generate_code_with_gemini, generate_project_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate, fetch_gemini_tts_models, generate_tts_with_gemini, fetch_replicate_image_models, generate_bull_roast, analyze_photo_with_gemini, analyze_voice_with_gemini
 from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID, DAILY_GEN_LIMIT, PAYMENT_USERNAME, CHAT_ID, GEMINI_IMAGE_TIMEOUT
 import logging
 logger = logging.getLogger(__name__)
 router = Router()
+
+MAX_DOCUMENT_UPLOAD_BYTES = 5_000_000
+MAX_TEXT_DOCUMENT_BYTES = 80_000
+MAX_ZIP_TEXT_BYTES = 200_000
+MAX_ZIP_TEXT_FILE_BYTES = 50_000
+MAX_ZIP_FILES = 20
+MAX_ZIP_DECLARED_BYTES = 5_000_000
+MAX_ZIP_ENTRY_DECLARED_BYTES = 1_000_000
+SAFE_TEXT_EXTS = {
+    '.txt', '.md', '.markdown', '.py', '.js', '.jsx', '.ts', '.tsx', '.json', '.yaml', '.yml', '.csv', '.html', '.htm', '.xml',
+    '.css', '.sh', '.bash', '.env', '.ini', '.cfg', '.conf', '.toml', '.sql', '.log', '.rs', '.go', '.java', '.kt', '.kts',
+    '.swift', '.php', '.rb', '.c', '.h', '.cpp', '.hpp', '.cs', '.lua', '.dart', '.vue', '.svelte'
+}
+SAFE_TEXT_MIMES = {
+    'text/plain', 'text/csv', 'text/markdown', 'text/html', 'text/css', 'text/xml', 'application/json', 'application/xml',
+    'application/x-yaml', 'application/yaml', 'application/toml', 'application/javascript', 'application/x-sh', 'application/sql'
+}
 
 async def safe_send(coro_func, *args, **kwargs):
     for attempt in range(3):
@@ -98,7 +115,7 @@ def _fallback_generation_error_explanation(error_msg: str) -> str:
     return 'Генератор вернул ошибку, а мозги для пояснения тоже не ответили. Короче, сервис тупит — попробуй позже или упрости запрос.'
 
 
-async def _send_generated_project(message: types.Message, project: dict[str, Any], reply_kwargs: dict[str, Any]):
+async def _send_generated_project(message: types.Message, project: dict[str, Any], reply_kwargs: dict[str, Any]) -> types.Message | None:
     files = project.get('files', [])
     if not isinstance(files, list):
         files = []
@@ -113,20 +130,291 @@ async def _send_generated_project(message: types.Message, project: dict[str, Any
     caption = '\n\n'.join(caption_parts)[:1000]
     bot = message.bot
     if bot is None:
-        return
+        return None
     if len(files) == 1:
         file_item = files[0]
         filename = os.path.basename(file_item['path']) or f'{project_name}.txt'
         doc = BufferedInputFile(file_item['content'].encode('utf-8'), filename=filename)
-        await bot.send_document(chat_id=message.chat.id, document=doc, caption=caption, reply_to_message_id=message.message_id, **reply_kwargs)
-        return
+        return await bot.send_document(chat_id=message.chat.id, document=doc, caption=caption, reply_to_message_id=message.message_id, **reply_kwargs)
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
         for file_item in files:
             archive.writestr(file_item['path'], file_item['content'])
     _ = zip_buffer.seek(0)
     doc = BufferedInputFile(zip_buffer.read(), filename=f'{project_name}.zip')
-    await bot.send_document(chat_id=message.chat.id, document=doc, caption=caption, reply_to_message_id=message.message_id, **reply_kwargs)
+    return await bot.send_document(chat_id=message.chat.id, document=doc, caption=caption, reply_to_message_id=message.message_id, **reply_kwargs)
+
+
+def _is_text_filename(filename: str) -> bool:
+    return os.path.splitext((filename or '').lower())[1] in SAFE_TEXT_EXTS
+
+
+def _is_text_mime(mime: str) -> bool:
+    mime = (mime or '').split(';', 1)[0].strip().lower()
+    return mime.startswith('text/') or mime in SAFE_TEXT_MIMES
+
+
+def _is_zip_document(filename: str, mime: str) -> bool:
+    filename = (filename or '').lower()
+    mime = (mime or '').split(';', 1)[0].strip().lower()
+    return filename.endswith('.zip') or mime in {'application/zip', 'application/x-zip-compressed', 'multipart/x-zip'}
+
+
+def _looks_binary(data: bytes) -> bool:
+    sample = data[:4096]
+    if not sample:
+        return False
+    if b'\x00' in sample:
+        return True
+    control_chars = sum(1 for byte in sample if byte < 32 and byte not in (9, 10, 12, 13))
+    return control_chars / max(len(sample), 1) > 0.05
+
+
+def _decode_text_payload(data: bytes, max_bytes: int = MAX_TEXT_DOCUMENT_BYTES) -> str | None:
+    if _looks_binary(data):
+        return None
+    truncated = len(data) > max_bytes
+    chunk = data[:max_bytes]
+    for encoding in ('utf-8-sig', 'utf-8', 'cp1251', 'latin-1'):
+        try:
+            text = chunk.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text = chunk.decode('utf-8', errors='replace')
+    if truncated:
+        text += '\n\n[...файл обрезан по лимиту...]'
+    return text.strip()
+
+
+def _extract_text_from_document(data: bytes, filename: str) -> str:
+    text = _decode_text_payload(data, MAX_TEXT_DOCUMENT_BYTES)
+    if text is None:
+        raise ValueError(f'«{filename}» похож на бинарный мусор, такое я читать не буду.')
+    if not text:
+        raise ValueError(f'«{filename}» пустой, там нечего жевать.')
+    return text
+
+
+def _safe_zip_name(name: str) -> str:
+    cleaned = (name or '').replace('\\', '/').strip()
+    if not cleaned or cleaned.startswith('/') or os.path.isabs(cleaned):
+        raise ValueError('В zip найден опасный путь, архив отклонён.')
+    parts = [part for part in cleaned.split('/') if part]
+    if any(part == '..' for part in parts):
+        raise ValueError('В zip найден path traversal через .., архив отклонён.')
+    normalized = os.path.normpath('/'.join(parts)).replace('\\', '/')
+    if normalized == '.' or normalized.startswith('../') or normalized == '..':
+        raise ValueError('В zip найден опасный путь, архив отклонён.')
+    return normalized
+
+
+def _extract_zip_contents(data: bytes) -> str:
+    parts: list[str] = []
+    skipped: list[str] = []
+    total_text_bytes = 0
+    declared_bytes = 0
+    files_read = 0
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            for info in archive.infolist():
+                safe_name = _safe_zip_name(info.filename)
+                if info.is_dir():
+                    continue
+                declared_bytes += int(info.file_size or 0)
+                if declared_bytes > MAX_ZIP_DECLARED_BYTES:
+                    raise ValueError('Zip слишком жирный после распаковки, похоже на zip-bomb.')
+                if info.file_size and info.file_size > MAX_ZIP_ENTRY_DECLARED_BYTES:
+                    skipped.append(f'{safe_name}: слишком большой файл')
+                    continue
+                if files_read >= MAX_ZIP_FILES:
+                    skipped.append('остальные файлы: лимит по количеству')
+                    break
+                if not _is_text_filename(safe_name):
+                    skipped.append(f'{safe_name}: не текстовый тип')
+                    continue
+                remaining_total = MAX_ZIP_TEXT_BYTES - total_text_bytes
+                if remaining_total <= 0:
+                    skipped.append('остальные файлы: лимит по общему тексту')
+                    break
+                read_limit = min(MAX_ZIP_TEXT_FILE_BYTES, remaining_total)
+                with archive.open(info) as file_obj:
+                    raw = file_obj.read(read_limit + 1)
+                text = _decode_text_payload(raw, read_limit)
+                if text is None:
+                    skipped.append(f'{safe_name}: бинарный мусор')
+                    continue
+                if not text:
+                    skipped.append(f'{safe_name}: пустой')
+                    continue
+                encoded_len = len(raw[:read_limit])
+                total_text_bytes += encoded_len
+                files_read += 1
+                parts.append(f'# {safe_name}\n{text}')
+                if len(raw) > read_limit:
+                    skipped.append(f'{safe_name}: обрезан по лимиту')
+    except zipfile.BadZipFile as e:
+        raise ValueError('Zip битый или это вообще не zip.') from e
+    if not parts:
+        details = (' Пропущено: ' + '; '.join(skipped[:6])) if skipped else ''
+        raise ValueError('В zip нет читаемых текстовых файлов.' + details)
+    if skipped:
+        parts.append('[Пропущено]\n' + '\n'.join(f'- {item}' for item in skipped[:12]))
+    return '\n\n'.join(parts)
+
+
+def _code_block_ext(lang: str) -> str:
+    ext = (lang or '').strip().lower() or 'txt'
+    if ext in ['python', 'py']:
+        return 'py'
+    if ext in ['javascript', 'js']:
+        return 'js'
+    if ext in ['typescript', 'ts']:
+        return 'ts'
+    if ext in ['html', 'htm']:
+        return 'html'
+    if ext in ['css']:
+        return 'css'
+    if ext in ['c++', 'cpp']:
+        return 'cpp'
+    if ext in ['c#', 'cs']:
+        return 'cs'
+    if ext in ['php']:
+        return 'php'
+    if ext in ['bash', 'sh']:
+        return 'sh'
+    if ext in ['json']:
+        return 'json'
+    if ext in ['xml']:
+        return 'xml'
+    return re.sub(r'[^a-z0-9]+', '', ext)[:8] or 'txt'
+
+
+async def _send_text_with_code_documents(message: types.Message, text_response: str, reply_kwargs: dict[str, Any]):
+    _FENCE = r'```([^\n`]*)\n(.*?)```'
+    code_blocks = re.findall(_FENCE, text_response, re.DOTALL)
+    cleaned_text = _clean_plain_reply(re.sub(_FENCE, '', text_response, flags=re.DOTALL).strip())
+    logging.info(f'File-task: found {len(code_blocks)} code block(s) in response ({len(text_response)} chars)')
+    if not cleaned_text and code_blocks:
+        cleaned_text = 'Вот твой ебаный код, подавись нахуй.'
+    elif not cleaned_text:
+        cleaned_text = 'Нихуя не понял, но иди в пизду.'
+    sent_msg = await safe_send(message.reply, cleaned_text, **reply_kwargs)
+    if not sent_msg:
+        logging.warning('File-task reply was not sent after flood-control retries')
+        return
+    for (lang, code) in code_blocks:
+        ext = _code_block_ext(lang)
+        filename = f'говняный_код_{uuid.uuid4().hex[:4]}.{ext}'
+        doc = BufferedInputFile(code.strip().encode('utf-8'), filename=filename)
+        try:
+            await safe_send(message.bot.send_document, chat_id=message.chat.id, document=doc, reply_to_message_id=sent_msg.message_id, **reply_kwargs)
+        except Exception as _doc_err:
+            logging.exception(f'File-task: failed to send code document {filename!r}: {_doc_err}')
+
+
+async def _process_file_task(message: types.Message, task_data: dict[str, Any], instruction: str, reply_kwargs: dict[str, Any]):
+    instruction = (instruction or '').strip()
+    if not instruction:
+        await message.reply('Сначала напиши, что с этим делать, экстрасенсов тут нет.', **reply_kwargs)
+        return
+    filename = str(task_data.get('filename') or 'file.txt')
+    content = str(task_data.get('content') or '')
+    username = message.from_user.first_name or message.from_user.username or 'Аноним'
+    prompt = (
+        'Пользователь загрузил файл или zip-архив. Используй содержимое ниже как контекст и выполни задачу пользователя. '
+        'Если задача про код — анализируй строго по файлам, не выдумывай отсутствующие куски.\n'
+        'ВАЖНО: если задача требует изменённого или переписанного кода — ОБЯЗАТЕЛЬНО выводи его целиком в markdown code block '
+        '(например ```python\\n...код...\\n```). Бот АВТОМАТИЧЕСКИ отправит содержимое блока файлом. '
+        'НЕ пиши псевдо-ссылки на файлы, не говори "смотри приложенный файл" — просто выведи код в блоке.\n\n'
+        f'[ИМЯ ФАЙЛА/АРХИВА]\n{filename}\n\n'
+        f'[СОДЕРЖИМОЕ]\n<<<FILE_CONTENT_START>>>\n{content}\n<<<FILE_CONTENT_END>>>\n\n'
+        f'[ЗАДАЧА ПОЛЬЗОВАТЕЛЯ]\n{instruction}'
+    )
+    thinking_msg = await message.reply('⏳ Читаю файл и думаю...', **reply_kwargs)
+    thread_id = task_data.get('message_thread_id') if task_data.get('message_thread_id') else (message.message_thread_id if message.chat.is_forum else None)
+    await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=thread_id)
+    last_status_edit = 0.0
+    last_status_text = ''
+
+    async def _status_cb(text: str):
+        nonlocal last_status_edit, last_status_text
+        now = time.monotonic()
+        if text == last_status_text or now - last_status_edit < 3:
+            return
+        try:
+            await thinking_msg.edit_text(text)
+            last_status_edit = time.monotonic()
+            last_status_text = text
+        except TelegramRetryAfter as e:
+            retry_after = float(getattr(e, 'retry_after', 3) or 3)
+            last_status_edit = time.monotonic() + retry_after
+            logging.warning(f'File-task status edit flood wait {retry_after:.0f}s; skipping status update')
+        except Exception as e:
+            logging.debug(f'File-task status edit skipped: {type(e).__name__}')
+
+    try:
+        text_response = await asyncio.wait_for(
+            generate_text_with_gemini(prompt, message.chat.id, username=username, web_query=instruction, status_cb=_status_cb, allow_web=False),
+            timeout=300,
+        )
+    except asyncio.TimeoutError:
+        logging.warning(f'File task timed out after 300s for chat={message.chat.id}, user={message.from_user.id}')
+        text_response = 'Файл прожевал, но мозги зависли слишком надолго. Попробуй задачу покороче.'
+    except Exception as e:
+        logging.exception(f'File task generation failed: {type(e).__name__}')
+        text_response = 'Мозги споткнулись об файл. Попробуй ещё раз или дай файл поменьше.'
+    try:
+        await thinking_msg.delete()
+    except Exception:
+        pass
+    await _send_text_with_code_documents(message, text_response, reply_kwargs)
+    asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text'))
+    asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text', instruction))
+
+
+async def _handle_file_document_upload(message: types.Message, bot_user: types.User, reply_kwargs: dict[str, Any]) -> None:
+    doc = message.document
+    if doc is None:
+        return
+    filename = doc.file_name or 'file.txt'
+    mime = doc.mime_type or ''
+    is_zip = _is_zip_document(filename, mime)
+    is_text = _is_text_mime(mime) or _is_text_filename(filename)
+    if not is_zip and not is_text:
+        await message.reply('Не умею читать такой файл. Кидай текст/код или .zip, а не это говно.', **reply_kwargs)
+        return
+    if doc.file_size and doc.file_size > MAX_DOCUMENT_UPLOAD_BYTES:
+        await message.reply('Файл слишком жирный. Максимум 5 МБ, не тащи сюда мамонта.', **reply_kwargs)
+        return
+    try:
+        file_info = await message.bot.get_file(doc.file_id)
+        buffer = io.BytesIO()
+        await message.bot.download_file(file_info.file_path, destination=buffer)
+        raw = buffer.getvalue()
+    except Exception as e:
+        logging.exception(f'Document download failed: {type(e).__name__}')
+        await message.reply('Не смог скачать файл. Телега опять насрала в провода.', **reply_kwargs)
+        return
+    try:
+        content = _extract_zip_contents(raw) if is_zip else _extract_text_from_document(raw, filename)
+    except ValueError as e:
+        await message.reply(str(e), **reply_kwargs)
+        return
+    caption = (message.caption or '').strip()
+    if bot_user.username:
+        caption = caption.replace(f'@{bot_user.username}', '').strip()
+    task_data = {
+        'content': content,
+        'filename': filename,
+        'message_thread_id': message.message_thread_id if message.chat.is_forum else None,
+    }
+    if caption:
+        await _process_file_task(message, task_data, caption, reply_kwargs)
+        return
+    pending_file_tasks[message.chat.id, message.from_user.id] = task_data
+    await message.reply('Окей, загрузил. Что делать с этим добром?', **reply_kwargs)
 
 
 def _has_kick_execution_signal(message: types.Message, reason: str, rest: str) -> bool:
@@ -648,6 +936,30 @@ def _remember_generated_draw_message(chat_id: int, message_id: int, image_bytes:
     while len(generated_draw_messages) > _MAX_TRACKED_DRAW_MESSAGES:
         oldest_key = min(generated_draw_messages, key=lambda k: generated_draw_messages[k].get('created_at', 0))
         generated_draw_messages.pop(oldest_key, None)
+
+
+_MAX_TRACKED_CODE_MESSAGES = 60
+_CODE_MODIFY_WORDS = [
+    'адаптируй', 'измени', 'добавь', 'убери', 'исправь', 'переделай', 'улучши',
+    'замени', 'поправь', 'обнови', 'перепиши', 'доработай', 'дополни', 'сделай',
+    'adapt', 'modify', 'change', 'add', 'remove', 'fix', 'improve', 'update', 'refactor',
+    'зипку', 'zip', 'архив', 'файлы', 'отправь', 'скинь', 'норм', 'монолит',
+    'где', 'дай', 'покажи', 'пришли', 'заново', 'снова', 'ещё раз', 'не пришло', 'пересобери',
+]
+
+
+def _remember_generated_code_message(chat_id: int, message_id: int, files: list[dict], prompt: str):
+    if not files:
+        return
+    truncated = [{'path': f['path'], 'content': f['content'][:8000]} for f in files[:6]]
+    generated_code_messages[(chat_id, message_id)] = {
+        'files': truncated,
+        'prompt': prompt or '',
+        'created_at': time.time(),
+    }
+    while len(generated_code_messages) > _MAX_TRACKED_CODE_MESSAGES:
+        oldest_key = min(generated_code_messages, key=lambda k: generated_code_messages[k].get('created_at', 0))
+        generated_code_messages.pop(oldest_key, None)
 
 
 async def _download_message_photo(bot, photo_message: types.Message) -> bytes | None:
@@ -1329,6 +1641,34 @@ async def refresh_models():
 @router.message(F.photo & ~F.caption.startswith('/'))
 async def handle_album_photo(message: types.Message):
     if not message.media_group_id:
+        bot_user = await message.bot.get_me()
+        is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
+        is_mentioned = bool(bot_user.username and f'@{bot_user.username}' in (message.caption or ''))
+        is_private = message.chat.type == 'private'
+        if not is_private and not is_reply_to_bot and not is_mentioned:
+            return
+        is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
+        if not is_member:
+            return
+        reply_kwargs = {}
+        if message.chat.is_forum and message.message_thread_id:
+            reply_kwargs['message_thread_id'] = message.message_thread_id
+        prompt = message.caption or ''
+        if bot_user.username:
+            prompt = prompt.replace(f'@{bot_user.username}', '').strip()
+        if not prompt:
+            prompt = 'Что на этом фото?'
+        wait_msg = await message.reply('⏳ Смотрю на твою хуйню...', **reply_kwargs)
+        photo = message.photo[-1]
+        file_info = await message.bot.get_file(photo.file_id)
+        downloaded = await message.bot.download_file(file_info.file_path)
+        image_bytes = downloaded.read()
+        await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
+        response = await analyze_photo_with_gemini(image_bytes, prompt)
+        await wait_msg.delete()
+        await message.reply(response or 'Нихуя не понял что это такое.', **reply_kwargs)
+        asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text'))
+        asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text', prompt))
         return
     group_id = message.media_group_id
     if group_id not in pending_media_groups:
@@ -1907,6 +2247,54 @@ async def handle_tts_generate(callback: types.CallbackQuery):
     else:
         await callback.bot.send_message(chat_id=d['chat_id'], text='❌ Не удалось получить аудио.', reply_to_message_id=d['source_message_id'], **reply_kwargs)
 
+@router.message(F.voice | F.audio | F.video_note)
+async def handle_voice_audio(message: types.Message):
+    is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
+    if not is_member:
+        return
+    bot_user = await message.bot.get_me()
+    is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
+    is_mentioned = bool(bot_user.username and f'@{bot_user.username}' in (message.caption or ''))
+    is_private = message.chat.type == 'private'
+    if not is_private and not is_reply_to_bot and not is_mentioned:
+        return
+    reply_kwargs = {}
+    if message.chat.is_forum and message.message_thread_id:
+        reply_kwargs['message_thread_id'] = message.message_thread_id
+    prompt = message.caption or ''
+    if bot_user.username:
+        prompt = prompt.replace(f'@{bot_user.username}', '').strip()
+    if message.video_note:
+        if not prompt:
+            prompt = 'Что происходит в этом видео?'
+        wait_msg = await message.reply('⏳ Смотрю твоё кружочек-видео...', **reply_kwargs)
+        file_info = await message.bot.get_file(message.video_note.file_id)
+        (_, temp_path) = tempfile.mkstemp(suffix='.mp4')
+        await message.bot.download_file(file_info.file_path, destination=temp_path)
+        await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
+        response = await generate_video_with_gemini(prompt, temp_path)
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        await wait_msg.delete()
+        await message.reply(response or 'Нихуя не понял.', **reply_kwargs)
+        asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text'))
+        asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text', prompt))
+        return
+    media = message.voice or message.audio
+    mime_type = 'audio/ogg' if message.voice else (media.mime_type or 'audio/mpeg')
+    if not prompt:
+        prompt = 'Что сказано в этом голосовом? Транскрибируй и ответь по существу.'
+    wait_msg = await message.reply('⏳ Слушаю твою хуйню...', **reply_kwargs)
+    file_info = await message.bot.get_file(media.file_id)
+    downloaded = await message.bot.download_file(file_info.file_path)
+    audio_bytes = downloaded.read()
+    await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
+    response = await analyze_voice_with_gemini(audio_bytes, mime_type, prompt)
+    await wait_msg.delete()
+    await message.reply(response or 'Нихуя не расслышал.', **reply_kwargs)
+    asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text'))
+    asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text', prompt))
+
 @router.message(F.video | F.animation | F.document)
 async def handle_video(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
@@ -1914,16 +2302,20 @@ async def handle_video(message: types.Message):
         return
     bot_user = await message.bot.get_me()
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
+    is_mentioned = bool(bot_user.username and f'@{bot_user.username}' in (message.caption or ''))
     is_private = message.chat.type == 'private'
-    if not is_private and not is_reply_to_bot:
+    if not is_private and not is_reply_to_bot and not is_mentioned:
         return
+    reply_kwargs = {}
+    if message.chat.is_forum and message.message_thread_id:
+        reply_kwargs['message_thread_id'] = message.message_thread_id
     vid = message.video or message.animation
     if not vid and message.document:
         if not message.document.mime_type or not message.document.mime_type.startswith('video/'):
+            await _handle_file_document_upload(message, bot_user, reply_kwargs)
             return
         vid = message.document
     prompt = message.caption or ''
-    bot_user = await message.bot.get_me()
     if bot_user.username:
         prompt = prompt.replace(f'@{bot_user.username}', '').strip()
     if not prompt:
@@ -1937,9 +2329,6 @@ async def handle_video(message: types.Message):
     if os.path.exists(temp_vid_path):
         os.remove(temp_vid_path)
     await wait_msg.delete()
-    reply_kwargs = {}
-    if message.chat.is_forum and message.message_thread_id:
-        reply_kwargs['message_thread_id'] = message.message_thread_id
     code_blocks = re.findall('```(\\w*)\\n(.*?)```', text_response, re.DOTALL)
     cleaned_text = re.sub('```(\\w*)\\n(.*?)```', '', text_response, flags=re.DOTALL).strip()
     if not cleaned_text and code_blocks:
@@ -1986,6 +2375,128 @@ def _track_user(message: types.Message):
             chat_members_cache[cid] = {}
         chat_members_cache[cid][uid] = (message.from_user.first_name or 'Аноним', message.from_user.username)
 
+@router.message(Command('figma'))
+async def cmd_figma(message: types.Message):
+    _track_user(message)
+    uid = message.from_user.id
+    if is_banned(uid):
+        return
+    prompt = (message.text or '').replace('/figma', '', 1).strip()
+    if not prompt:
+        await message.reply('Напиши что рисовать, дебил. Пример: /figma синяя кнопка с текстом ОК')
+        return
+    thread_id = message.message_thread_id if message.chat.is_forum else None
+    reply_kwargs = {'message_thread_id': thread_id} if thread_id else {}
+    thinking_msg = await message.reply('🎨 Генерирую дизайн в Figma...', **reply_kwargs)
+    try:
+        spec_prompt = (
+            'Ты — профессиональный UI/UX дизайнер. Сгенерируй JSON-спецификацию дизайна для Figma Plugin API.\n'
+            'ВЕРНИ ТОЛЬКО JSON БЕЗ ОБЪЯСНЕНИЙ И БЕЗ MARKDOWN-БЛОКОВ.\n\n'
+            'Формат JSON:\n'
+            '{\n'
+            '  "frame": {\n'
+            '    "name": "Design",\n'
+            '    "width": 1280,\n'
+            '    "height": 720,\n'
+            '    "backgroundColor": {"r": 1, "g": 1, "b": 1}\n'
+            '  },\n'
+            '  "nodes": [\n'
+            '    {"type": "RECTANGLE", "name": "bg", "x": 0, "y": 0, "width": 1280, "height": 720,\n'
+            '     "fill": {"r": 0.1, "g": 0.1, "b": 0.9}, "cornerRadius": 0},\n'
+            '    {"type": "TEXT", "name": "title", "x": 100, "y": 200, "width": 600,\n'
+            '     "content": "Заголовок", "fontSize": 48, "fontStyle": "Bold",\n'
+            '     "color": {"r": 1, "g": 1, "b": 1}},\n'
+            '    {"type": "ELLIPSE", "name": "circle", "x": 900, "y": 300, "width": 200, "height": 200,\n'
+            '     "fill": {"r": 1, "g": 0.5, "b": 0}}\n'
+            '  ]\n'
+            '}\n\n'
+            'Доступные типы нод: RECTANGLE, ELLIPSE, TEXT, LINE.\n'
+            'Цвета — float от 0 до 1. fontSize — число. fontStyle: "Regular" или "Bold".\n'
+            'Сделай красивый, насыщенный дизайн с минимум 6-10 нодами, используй градиентные блоки, типографику, геометрию.\n'
+            f'Описание дизайна: {prompt}'
+        )
+        raw = await asyncio.wait_for(
+            generate_text_with_gemini(spec_prompt, message.chat.id, username='figma_gen', web_query=None),
+            timeout=60
+        )
+        json_match = re.search(r'```(?:json)?\s*\n([\s\S]*?)```', raw)
+        if json_match:
+            raw = json_match.group(1).strip()
+        else:
+            brace = raw.find('{')
+            if brace >= 0:
+                raw = raw[brace:]
+        spec = json.loads(raw)
+
+        from figma_bridge import enqueue_and_wait
+        session_id = uuid.uuid4().hex
+        await thinking_msg.edit_text('🎨 Жду пока плагин создаст дизайн в Figma...')
+        node_id = await enqueue_and_wait(session_id, spec, timeout=120.0)
+
+        if node_id is None:
+            try:
+                await thinking_msg.edit_text(
+                    '⏰ Плагин не ответил за 2 минуты.\n'
+                    'Убедись что плагин NanoHatani Bridge запущен в Figma и файл открыт.'
+                )
+            except Exception:
+                pass
+            return
+
+        from config import FIGMA_TOKEN
+        import aiohttp as _aiohttp
+        file_key = spec.get('file_key', '')
+        node_id_enc = node_id.replace(':', '-').replace(';', '-')
+        render_url = f'https://api.figma.com/v1/images/{file_key}?ids={node_id}&format=png&scale=2' if file_key else None
+
+        png_bytes = None
+        if render_url:
+            async with _aiohttp.ClientSession() as sess:
+                async with sess.get(render_url, headers={'X-Figma-Token': FIGMA_TOKEN}) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        img_url = (data.get('images') or {}).get(node_id) or (data.get('images') or {}).get(node_id.replace(':', '-'))
+                        if img_url:
+                            async with sess.get(img_url) as img_resp:
+                                if img_resp.status == 200:
+                                    png_bytes = await img_resp.read()
+
+        try:
+            await thinking_msg.delete()
+        except Exception:
+            pass
+
+        if png_bytes:
+            doc = BufferedInputFile(png_bytes, filename=f'figma_{uuid.uuid4().hex[:6]}.png')
+            await safe_send(
+                message.bot.send_document,
+                chat_id=message.chat.id,
+                document=doc,
+                caption=f'🎨 {prompt[:180]}',
+                reply_to_message_id=message.message_id,
+                **reply_kwargs
+            )
+        else:
+            await safe_send(
+                message.bot.send_message,
+                chat_id=message.chat.id,
+                text=f'✅ Дизайн создан в Figma (node `{node_id}`). Рендер недоступен без file_key.',
+                reply_to_message_id=message.message_id,
+                **reply_kwargs
+            )
+        logging.info(f'cmd_figma: done session={session_id} node_id={node_id} uid={uid}')
+    except asyncio.TimeoutError:
+        try:
+            await thinking_msg.edit_text('Тайм-аут, Gemini тупит. Попробуй ещё раз.')
+        except Exception:
+            pass
+    except Exception as _figma_err:
+        logging.exception(f'cmd_figma error: {_figma_err}')
+        try:
+            await thinking_msg.edit_text(f'Упало: {type(_figma_err).__name__}. Попробуй ещё раз.')
+        except Exception:
+            pass
+
 @router.message(Command("dual"))
 async def cmd_dual(message: Message):
     from dual_bot import start_dual, BOT1_DUAL_NAME, BOT2_DUAL_NAME
@@ -2019,6 +2530,14 @@ async def handle_text_messages(message: types.Message):
     _track_user(message)
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
+        return
+    _file_key = (message.chat.id, message.from_user.id)
+    if _file_key in pending_file_tasks:
+        task_data = pending_file_tasks.pop(_file_key)
+        reply_kwargs = {}
+        if message.chat.is_forum and message.message_thread_id:
+            reply_kwargs['message_thread_id'] = message.message_thread_id
+        await _process_file_task(message, task_data, message.text.strip(), reply_kwargs)
         return
     _nsfw_key = (message.chat.id, message.from_user.id)
     if _nsfw_key in _nsfw_awaiting_input:
@@ -2090,6 +2609,25 @@ async def handle_text_messages(message: types.Message):
         if is_reply_to_bot and message.reply_to_message.text:
             replied_text = message.reply_to_message.text[:500]
             prompt = f'[Контекст — ты написал ранее: «{replied_text}»]\n{prompt}'
+        replied_code = None
+        is_code_forced = False
+        if is_reply_to_bot and message.reply_to_message:
+            replied_code = generated_code_messages.get((message.chat.id, message.reply_to_message.message_id))
+            if replied_code:
+                files_ctx = '\n\n'.join(
+                    f'### {f["path"]}\n```\n{f["content"][:4000]}\n```'
+                    for f in replied_code.get('files', [])
+                )
+                prev_prompt = replied_code.get('prompt', '')
+                prompt = (
+                    f'[Контекст — ты ранее сгенерировал этот код по запросу: «{prev_prompt[:300]}»]\n'
+                    f'[Файлы которые ты отправил:]\n{files_ctx}\n\n'
+                    f'[Новый запрос/правки пользователя:]\n{web_query}'
+                )
+                is_code_forced = (
+                    any(w in web_query.lower() for w in _CODE_MODIFY_WORDS) or
+                    len(web_query.strip()) <= 10
+                )
         username = message.from_user.first_name or message.from_user.username or 'Аноним'
         reply_kwargs = {}
         if message.chat.is_forum and message.message_thread_id:
@@ -2103,12 +2641,14 @@ async def handle_text_messages(message: types.Message):
                 replied_image = await _download_message_photo(message.bot, message.reply_to_message)
                 if replied_image:
                     replied_draw = {'image_bytes': replied_image, 'prompt': message.reply_to_message.caption or ''}
-        draw_info = await classify_draw_intent_with_gemini(web_query, has_replied_image=bool(replied_draw))
+        _WEB_SKIP_DRAW = {'в инете', 'в интернете', 'чекни', 'чекнуть', 'поищи', 'найди', 'загугли', 'погугли', 'посмотри в', 'search', 'google', 'что нового', 'latest'}
+        _skip_draw = any(t in web_query.lower() for t in _WEB_SKIP_DRAW)
+        draw_info = {'draw_request': False, 'edit_request': False, 'prompt': ''} if _skip_draw else await classify_draw_intent_with_gemini(web_query, has_replied_image=bool(replied_draw))
         if draw_info.get('draw_request') or draw_info.get('edit_request'):
             handled = await _handle_natural_draw_request(message, web_query, draw_info, replied_draw, reply_kwargs, thinking_msg)
             if handled:
                 return
-        is_code_request = _is_code_generation_request(prompt)
+        is_code_request = is_code_forced or _is_code_generation_request(prompt)
         if not is_code_request:
             is_code_request = await classify_code_intent_with_gemini(prompt)
         if is_code_request:
@@ -2129,7 +2669,9 @@ async def handle_text_messages(message: types.Message):
                     await thinking_msg.delete()
                 except Exception:
                     pass
-                await _send_generated_project(message, project_payload, reply_kwargs)
+                sent_code_doc = await _send_generated_project(message, project_payload, reply_kwargs)
+                if sent_code_doc:
+                    _remember_generated_code_message(message.chat.id, sent_code_doc.message_id, project_payload.get('files', []), web_query)
                 return
             if wants_archive:
                 try:
@@ -2161,7 +2703,7 @@ async def handle_text_messages(message: types.Message):
                     logging.debug(f'Status edit skipped: {type(e).__name__}')
             try:
                 text_response = await asyncio.wait_for(
-                    generate_text_with_gemini(prompt, message.chat.id, username=username, web_query=web_query, status_cb=_status_cb),
+                    generate_text_with_gemini(prompt, message.chat.id, username=username, web_query=web_query, status_cb=_status_cb, is_owner=message.from_user.id == OWNER_USER_ID),
                     timeout=240,
                 )
             except asyncio.TimeoutError:
@@ -2188,6 +2730,7 @@ async def handle_text_messages(message: types.Message):
             logging.warning('Final text reply was not sent after flood-control retries')
             return
         if code_blocks:
+            _code_files_sent: list[dict] = []
             for (lang, code) in code_blocks:
                 ext = lang.strip().lower() or 'txt'
                 if ext in ['python', 'py']:
@@ -2214,4 +2757,10 @@ async def handle_text_messages(message: types.Message):
                     ext = 'xml'
                 filename = f'говняный_код_{uuid.uuid4().hex[:4]}.{ext}'
                 doc = BufferedInputFile(code.strip().encode('utf-8'), filename=filename)
-                await safe_send(message.bot.send_document, chat_id=message.chat.id, document=doc, reply_to_message_id=sent_msg.message_id, **reply_kwargs)
+                sent_code_file = await safe_send(message.bot.send_document, chat_id=message.chat.id, document=doc, reply_to_message_id=sent_msg.message_id, **reply_kwargs)
+                file_entry = {'path': filename, 'content': code.strip()}
+                _code_files_sent.append(file_entry)
+                if sent_code_file:
+                    _remember_generated_code_message(message.chat.id, sent_code_file.message_id, [file_entry], web_query)
+            if sent_msg and _code_files_sent:
+                _remember_generated_code_message(message.chat.id, sent_msg.message_id, _code_files_sent, web_query)

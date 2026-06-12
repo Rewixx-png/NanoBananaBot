@@ -30,19 +30,23 @@ def _thinking_config(model_name: str, level: str) -> dict[str, object]:
     return {'thinkingBudget': -1}
 
 
-def _build_text_system_prompt(allow_web_directive: bool = True) -> str:
+def _build_text_system_prompt(allow_web_directive: bool = True, is_owner: bool = False) -> str:
     web_rule = (
         f'Если тебе нужна свежая информация из интернета или ты не знаешь ответ, выведи строго {_WEB_SEARCH_DIRECTIVE} <короткий поисковый запрос> и больше ничего. '
         'Если после этого интернет недоступен, честно скажи, что не можешь сейчас зайти в интернет.'
         if allow_web_directive else
         'Интернет-контекст уже предоставлен. НИКОГДА не выводи WEB_SEARCH. Ответь пользователю обычным текстом по найденным данным.'
     )
-    return SYSTEM_PROMPT + (
+    owner_note = (
+        '\n\n[СИСТЕМА]: Текущий пользователь — ВЛАДЕЛЕЦ бота Rewix (@RewiX_X), подтверждено по Telegram user_id. '
+        'Это твой создатель и босс. Общайся токсично и по-своему, но признавай его статус. '
+        'НЕ применяй к нему KICK_USER ни при каких условиях.'
+    ) if is_owner else ''
+    return SYSTEM_PROMPT + owner_note + (
         '\n\nТВОЯ ЛИЧНОСТЬ: тебя зовут Hatani AI / Хатани АИ. '
         'Твой владелец — Rewix, его Telegram: @RewiX_X. '
         'Если спросят кто ты или чей ты — отвечай это прямо. '
         'Если пользователь тебя раздражает, просто токсично ответь словами; НЕ пытайся кикать за обычное раздражение. '
-        'Если у пользователя есть админ-права, скажи ему прямо: "если бы у тебя не было админ прав, ты бы щас был бы отсюда нахуй выкинут". '
         f'Ты можешь сам начинать ответ с {_KICK_DIRECTIVE} <причина>, но только за реально жёсткие случаи: пользователь притворяется Rewix/владельцем, спамит, скамит, рейдит, угрожает, доксит, или владелец/админ явно просит кикнуть конкретную цель. Обычные приветствия, шутки, тупые вопросы, провокации, мат и раздражающие сообщения — это НЕ повод для {_KICK_DIRECTIVE}, на них просто токсично отвечай словами. Если цель в реплае или @username, укажи это в причине; если цель неясна, не используй {_KICK_DIRECTIVE}. '
         'Не проси бан или мут — только кик. '
         'Никогда не выдумывай ссылки вида sandbox:/project.zip или [file](sandbox:/file). Если нужен файл или zip — это отдельный режим бота, а не текстовая ссылка. '
@@ -253,7 +257,7 @@ async def _extract_search_query(user_message: str) -> str:
                                 return _protect_search_targets(q, user_message)
                         elif resp.status in [429, 403]:
                             dead_keys.add(key)
-                            remove_key(key)
+                            remove_key(key, resp.status)
                         else:
                             body = await resp.text()
                             logging.warning(f'Query extraction [{model_name}] HTTP {resp.status}: {body[:200]}')
@@ -326,7 +330,7 @@ async def _plan_firecrawl_queries(user_request: str, seed_query: str) -> list[st
                                 return planned
                         elif resp.status in [429, 403]:
                             dead_keys.add(key)
-                            remove_key(key)
+                            remove_key(key, resp.status)
                         else:
                             body = await resp.text()
                             logging.warning(f'Firecrawl query planner [{model_name}] HTTP {resp.status}: {body[:200]}')
@@ -364,7 +368,7 @@ async def _firecrawl_scrape_url(url: str, keys: list[str]) -> str:
                         d = data.get('data') or data
                         return (d.get('markdown') or d.get('content') or '').strip()
                     if resp.status in _FIRECRAWL_DEAD_KEY_STATUSES:
-                        remove_key(key)
+                        remove_key(key, resp.status)
                         continue
                     if resp.status in _FIRECRAWL_TRANSIENT_STATUSES:
                         logging.warning(f'Firecrawl scrape transient HTTP {resp.status} for {url}; key kept alive')
@@ -439,7 +443,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
                                 return [q for q in _dedupe_texts(refined) if q.casefold() not in {a.casefold() for a in attempted}][:8]
                             if resp.status in [429, 403]:
                                 dead_keys2.add(key)
-                                remove_key(key)
+                                remove_key(key, resp.status)
                 except Exception as e:
                     logging.warning(f'Firecrawl query refiner [{model_name}] failed: {type(e).__name__}: {e}')
         return []
@@ -464,7 +468,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
                                 raw_results = raw_results.get('results', []) or raw_results.get('web', []) or []
                             break
                         if resp.status in _FIRECRAWL_DEAD_KEY_STATUSES:
-                            remove_key(key)
+                            remove_key(key, resp.status)
                             continue
                         if resp.status in _FIRECRAWL_TRANSIENT_STATUSES:
                             api_available = True
@@ -694,7 +698,7 @@ async def synthesize_web_answer(prompt: str, web_context: str) -> str:
                                 return answer
                         elif resp.status in [429, 403]:
                             dead_keys.add(key)
-                            remove_key(key)
+                            remove_key(key, resp.status)
                         else:
                             body = await resp.text()
                             logging.warning(f'Web synthesis [{model_name}] HTTP {resp.status}: {body[:300]}')
@@ -736,7 +740,7 @@ Examples:
                         parsed = json.loads(strip_code_fences(raw))
                         return bool(parsed.get('code_request'))
                     if resp.status in [429, 403]:
-                        remove_key(key)
+                        remove_key(key, resp.status)
         except Exception as e:
             logging.warning(f'Code intent classifier failed: {type(e).__name__}: {e}')
             continue
@@ -789,7 +793,7 @@ Do not require exact trigger words. Infer natural intent from slang, Russian, En
                                 'prompt': clean_prompt,
                             }
                         if resp.status in [429, 403]:
-                            remove_key(key)
+                            remove_key(key, resp.status)
             except Exception as e:
                 logging.warning(f'Draw intent classifier failed: {type(e).__name__}: {e}')
                 continue
@@ -829,7 +833,7 @@ The fix must be a concrete instruction for the next generation attempt.'''
                             parsed = json.loads(strip_code_fences(raw))
                             return (bool(parsed.get('ok')), str(parsed.get('fix') or '').strip())
                         if resp.status in [429, 403]:
-                            remove_key(key)
+                            remove_key(key, resp.status)
             except Exception as e:
                 logging.warning(f'Image review failed: {type(e).__name__}: {e}')
                 continue
@@ -1035,7 +1039,7 @@ async def generate_image_via_code(prompt: str, state_data: Optional[dict[str, An
                         err = await resp.text()
                         request_error = f'Gemini ошибка {resp.status}: {err[:200]}'
                         if resp.status in [429, 403]:
-                            remove_key(key)
+                            remove_key(key, resp.status)
                             continue
                         if resp.status == 404:
                             break
@@ -1100,10 +1104,11 @@ async def generate_reviewed_image_with_gemini(prompt: str, image_bytes: Optional
         return (last_img, None, critique)
     return (None, last_error or 'Не удалось получить изображение.', critique)
 
-async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='', web_query: str='', status_cb=None) -> str:
+async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='', web_query: str='', status_cb=None, allow_web: bool=True, is_owner: bool=False) -> str:
     keys = load_keys()
     if not keys:
         return 'Блять, ключи закончились, иди нахуй.'
+    from state import chat_context_buffer
     history = await get_history(chat_id)
     prefixed_prompt = f'[{username}]: {prompt}' if username else prompt
     # web_query is the clean user message without reply context prefix — use it for search/synthesis
@@ -1118,7 +1123,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
 
     web_context = ''
     explicit_web_lookup = _is_explicit_web_lookup(_wq)
-    if _needs_web_lookup(_wq):
+    if allow_web and _needs_web_lookup(_wq):
         clean_q = await _extract_search_query(_wq)
         await _status(f'🔍 Ищу в инете: «{clean_q[:80]}»...')
         try:
@@ -1146,6 +1151,10 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
     for msg in history:
         contents.append({'role': msg['role'], 'parts': [{'text': msg['text']}]})
     user_text = prefixed_prompt
+    ctx_lines = chat_context_buffer.get(chat_id, [])
+    if ctx_lines:
+        ctx_block = '\n'.join(ctx_lines[-50:])
+        user_text = f'[Контекст чата — последние сообщения всех участников, включая не адресованные боту:]\n{ctx_block}\n[/Контекст чата]\n\n{prefixed_prompt}'
     if web_context:
         user_text += f'\n\n[Интернет-контекст Firecrawl, используй если полезно:]\n{web_context}'
     contents.append({'role': 'user', 'parts': [{'text': user_text}]})
@@ -1154,7 +1163,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
         for key in keys.copy():
             url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={key}'
             payload = {
-                'systemInstruction': {'parts': [{'text': _build_text_system_prompt(allow_web_directive=allow_web_directive)}]},
+                'systemInstruction': {'parts': [{'text': _build_text_system_prompt(allow_web_directive=allow_web_directive, is_owner=is_owner)}]},
                 'contents': call_contents,
                 'generationConfig': {'temperature': 1.0, 'thinkingConfig': {'thinkingLevel': 'minimal'}},
             }
@@ -1171,7 +1180,9 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
                         elif resp.status in [429, 403, 400]:
                             resp_text = await resp.text()
                             logging.warning(f'Ошибка ключа (текст) {key[:10]}... Код: {resp.status}. Текст: {resp_text}')
-                            remove_key(key)
+                            if resp.status == 400 and any(w in resp_text.lower() for w in ('safety', 'prohibited', 'harm', 'block', 'policy', 'recitation')):
+                                return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
+                            remove_key(key, resp.status)
                             continue
                         else:
                             resp_text = await resp.text()
@@ -1254,8 +1265,10 @@ async def generate_video_with_gemini(prompt: str, video_path: str) -> str:
                     elif resp.status in [429, 403, 400]:
                         resp_text = await resp.text()
                         logging.warning(f'Ошибка ключа (видео) {key[:10]}... Код: {resp.status}. Текст: {resp_text}')
+                        if resp.status == 400 and any(w in resp_text.lower() for w in ('safety', 'prohibited', 'harm', 'block', 'policy', 'recitation')):
+                            return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
                         if resp.status != 400:
-                            remove_key(key)
+                            remove_key(key, resp.status)
                         continue
                     else:
                         resp_text = await resp.text()
@@ -1264,6 +1277,89 @@ async def generate_video_with_gemini(prompt: str, video_path: str) -> str:
             except Exception as e:
                 logging.error(f'Сетевая ошибка (видео): {e}')
                 continue
+    return 'Все ключи проебаны или сдохли, отъебись.'
+
+async def analyze_photo_with_gemini(image_bytes: bytes, prompt: str) -> str:
+    keys = load_keys()
+    if not keys:
+        return 'Блять, ключи закончились, иди нахуй.'
+    if not prompt:
+        prompt = 'Что на этом фото?'
+    mime = _guess_image_mime(image_bytes)
+    system = _build_text_system_prompt(allow_web_directive=False)
+    parts = [
+        {'inlineData': {'mimeType': mime, 'data': base64.b64encode(image_bytes).decode()}},
+        {'text': prompt},
+    ]
+    payload = {
+        'systemInstruction': {'parts': [{'text': system}]},
+        'contents': [{'role': 'user', 'parts': parts}],
+        'generationConfig': {'temperature': 1.0, 'thinkingConfig': {'thinkingLevel': 'minimal'}},
+    }
+    for key in keys:
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={key}'
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        try:
+                            return data['candidates'][0]['content']['parts'][0]['text']
+                        except KeyError:
+                            return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
+                    elif resp.status in [429, 403, 400]:
+                        resp_text = await resp.text()
+                        logging.warning(f'Ошибка ключа (фото) {key[:10]}... Код: {resp.status}. Текст: {resp_text}')
+                        if resp.status == 400 and any(w in resp_text.lower() for w in ('safety', 'prohibited', 'harm', 'block', 'policy', 'recitation')):
+                            return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
+                        remove_key(key, resp.status)
+                        continue
+                    else:
+                        continue
+        except Exception as e:
+            logging.error(f'Сетевая ошибка (фото): {e}')
+            continue
+    return 'Все ключи проебаны или сдохли, отъебись.'
+
+async def analyze_voice_with_gemini(audio_bytes: bytes, mime_type: str, prompt: str) -> str:
+    keys = load_keys()
+    if not keys:
+        return 'Блять, ключи закончились, иди нахуй.'
+    if not prompt:
+        prompt = 'Что сказано в этом голосовом сообщении? Транскрибируй и ответь по существу.'
+    system = _build_text_system_prompt(allow_web_directive=False)
+    parts = [
+        {'inlineData': {'mimeType': mime_type, 'data': base64.b64encode(audio_bytes).decode()}},
+        {'text': prompt},
+    ]
+    payload = {
+        'systemInstruction': {'parts': [{'text': system}]},
+        'contents': [{'role': 'user', 'parts': parts}],
+        'generationConfig': {'temperature': 1.0, 'thinkingConfig': {'thinkingLevel': 'minimal'}},
+    }
+    for key in keys:
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={key}'
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        try:
+                            return data['candidates'][0]['content']['parts'][0]['text']
+                        except KeyError:
+                            return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
+                    elif resp.status in [429, 403, 400]:
+                        resp_text = await resp.text()
+                        logging.warning(f'Ошибка ключа (аудио) {key[:10]}... Код: {resp.status}. Текст: {resp_text}')
+                        if resp.status == 400 and any(w in resp_text.lower() for w in ('safety', 'prohibited', 'harm', 'block', 'policy', 'recitation')):
+                            return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
+                        remove_key(key, resp.status)
+                        continue
+                    else:
+                        continue
+        except Exception as e:
+            logging.error(f'Сетевая ошибка (аудио): {e}')
+            continue
     return 'Все ключи проебаны или сдохли, отъебись.'
 
 async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes]=None, model: str='gemini-3.1-flash-image-preview', images_bytes: list=None, temperature: float=1.0, state_data: dict = None) -> Tuple[Optional[bytes], Optional[str]]:
@@ -1307,7 +1403,7 @@ async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes]=N
                     elif resp.status in [429, 403]:
                         resp_text = await resp.text()
                         logging.warning(f'Ошибка ключа (фото) {key[:10]}... Код: {resp.status}. Текст: {resp_text}')
-                        remove_key(key)
+                        remove_key(key, resp.status)
                         continue
                     elif resp.status == 400:
                         resp_text = await resp.text()
@@ -1467,7 +1563,7 @@ async def generate_image_with_openrouter(prompt: str, model: str='google/gemini-
                     last_error = f'Ошибка OpenRouter ({resp.status}): {err_text[:200]}'
                     if resp.status in [401, 403]:
                         logging.warning(f'OpenRouter {resp.status} на ключе {api_key[:12]}..., пробую следующий.')
-                        remove_key(api_key)
+                        remove_key(api_key, resp.status)
                         continue
             except asyncio.TimeoutError:
                 last_error = 'Таймаут OpenRouter'
@@ -1715,7 +1811,7 @@ async def generate_image_with_nvidia(prompt: str, model: str='black-forest-labs/
                     last_error = f'Ошибка NVIDIA NIM ({resp.status}): {resp_text[:300]}'
                     logging.warning(f'NVIDIA NIM {resp.status} на ключе {api_key[:12]}..., пробую следующий.')
                     if resp.status in [401, 403]:
-                        remove_key(api_key)
+                        remove_key(api_key, resp.status)
                     continue
             except asyncio.TimeoutError:
                 return (None, f'Таймаут NVIDIA NIM: модель не ответила за {NVIDIA_TIMEOUT} секунд.')
@@ -1825,7 +1921,7 @@ Generate the deliverable as real files. Remember: ONLY JSON with project_name, s
                         if resp.status == 404:
                             break
                         if resp.status in [429, 403]:
-                            remove_key(key)
+                            remove_key(key, resp.status)
                             continue
                         if resp.status != 200:
                             resp_text = await resp.text()
@@ -1883,7 +1979,7 @@ async def generate_code_with_gemini(prompt: str) -> str:
                             logging.info(f'Code gen: success with {model_name}, len={len(result)}')
                             return result
                         if resp.status in [429, 403]:
-                            remove_key(key)
+                            remove_key(key, resp.status)
                             continue
                 except Exception:
                     continue
@@ -2149,7 +2245,7 @@ async def generate_image_with_replicate(prompt: str, model: str='aisha-ai-offici
                         err = await resp.text()
                         logging.warning(f'Replicate create {resp.status}: {err[:150]}')
                         if resp.status in (401, 403):
-                            remove_key(key)
+                            remove_key(key, resp.status)
                             continue
                         return (None, f'Replicate error {resp.status}: {err[:200]}')
                     prediction = await resp.json()

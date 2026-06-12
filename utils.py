@@ -5,6 +5,16 @@ from config import CHAT_ID, ALLOWED_USER_IDS, BANNED_USER_IDS, TEXT_ONLY_CHAT_ID
 def is_banned(user_id: int) -> bool:
     return user_id in BANNED_USER_IDS
 
+def make_safe_caption(prefix: str, prompt: str) -> str:
+    max_len = 1024
+    if len(prefix) + len(prompt) <= max_len:
+        return f"{prefix}{prompt}"
+    allowed_prompt_len = max_len - len(prefix) - 3
+    if allowed_prompt_len > 0:
+        return f"{prefix}{prompt[:allowed_prompt_len]}..."
+    else:
+        return prefix[:max_len]
+
 async def check_membership(bot: Bot, user_id: int, chat_id: int=None) -> bool:
     if user_id in BANNED_USER_IDS:
         return False
