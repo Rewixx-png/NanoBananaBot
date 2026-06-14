@@ -2655,13 +2655,17 @@ async def handle_text_messages(message: types.Message):
             if text == last_status_text or now - last_status_edit < 3:
                 return
             try:
-                await thinking_msg.edit_text(text)
+                await thinking_msg.edit_text(text, parse_mode='HTML')
                 last_status_edit = time.monotonic()
                 last_status_text = text
             except TelegramRetryAfter as e:
                 last_status_edit = time.monotonic() + float(getattr(e, 'retry_after', 3) or 3)
             except Exception:
-                pass
+                try:
+                    import re as _re
+                    await thinking_msg.edit_text(_re.sub(r'<[^>]+>', '', text))
+                except Exception:
+                    pass
 
         # Inject replied-image context so agent can handle edits
         replied_draw = None
@@ -2679,11 +2683,17 @@ async def handle_text_messages(message: types.Message):
 
         async def _agent_send_cb(media: dict):
             mtype    = media.get("type", "document")
+            kw       = {"reply_to_message_id": message.message_id, **reply_kwargs}
+            if mtype == "text":
+                text_body = (media.get("text") or "")[:4000]
+                parse_mode = media.get("parse_mode")
+                await safe_send(message.bot.send_message, chat_id=message.chat.id, text=text_body,
+                                parse_mode=parse_mode, **kw)
+                return
             data     = media.get("data", b"")
             caption  = (media.get("caption") or "")[:1024]
             filename = media.get("filename") or "file"
             buf      = BufferedInputFile(data, filename=filename)
-            kw       = {"reply_to_message_id": message.message_id, **reply_kwargs}
             if mtype == "photo":
                 await safe_send(message.bot.send_photo, chat_id=message.chat.id, photo=buf, caption=caption, **kw)
             elif mtype == "video":

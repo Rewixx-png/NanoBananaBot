@@ -636,16 +636,26 @@ async def _tool_tts(text: str, voice: str, lang: str, send_cb: Callable) -> str:
     return "Audio sent."
 
 
-async def _tool_run_python(code: str, ws: "AgentWorkspace") -> str:
+async def _tool_run_python(code: str, ws: "AgentWorkspace", send_cb: Callable = None) -> str:
+    import html as _html
     stdout, stderr, rc = await ws.docker_run(["python", "-c", code])
-    out = (stdout[:2000] + ("\n[stderr]: " + stderr[:500] if stderr.strip() else "")).strip()
-    return out or f"(exit {rc}, no output)"
+    out = (stdout + ("\n" + stderr if stderr.strip() else "")).strip()
+    if send_cb and out:
+        safe_out = _html.escape(out[:3500])
+        await send_cb({"type": "text", "parse_mode": "HTML",
+                       "text": f"<pre><code>{safe_out}</code></pre>"})
+    return out[:2000] or f"(exit {rc}, no output)"
 
 
-async def _tool_run_shell(command: str, ws: "AgentWorkspace") -> str:
+async def _tool_run_shell(command: str, ws: "AgentWorkspace", send_cb: Callable = None) -> str:
+    import html as _html
     stdout, stderr, rc = await ws.docker_run(["bash", "-c", command])
-    out = (stdout[:2000] + ("\n[stderr]: " + stderr[:500] if stderr.strip() else "")).strip()
-    return out or f"(exit {rc}, no output)"
+    out = (stdout + ("\n" + stderr if stderr.strip() else "")).strip()
+    if send_cb and out:
+        safe_out = _html.escape(out[:3500])
+        await send_cb({"type": "text", "parse_mode": "HTML",
+                       "text": f"<pre><code>{safe_out}</code></pre>"})
+    return out[:2000] or f"(exit {rc}, no output)"
 
 
 async def _tool_fetch_json(url: str) -> str:
@@ -1139,15 +1149,18 @@ async def _execute_tool(
         return await _tool_tts(args.get("text", ""), args.get("voice", "Kore"), args.get("language", "ru-RU"), _send), None
 
     if name == "run_python":
+        import html as _html
         code = args.get("code", "")
-        preview = code[:120].replace('\n', ' ')
-        await _st(f"🐍 Запускаю Python в Docker:\n$ python -c \"{preview}{'…' if len(code) > 120 else ''}\"")
-        return await _tool_run_python(code, ws), None
+        safe_code = _html.escape(code[:300])
+        await _st(f"🐍 Запускаю Python в Docker:\n<pre><code class=\"language-python\">{safe_code}{'…' if len(code) > 300 else ''}</code></pre>")
+        return await _tool_run_python(code, ws, _send), None
 
     if name == "run_shell":
+        import html as _html
         cmd = args.get("command", "")
-        await _st(f"💻 Выполняю команду в Docker:\n$ {cmd[:200]}")
-        return await _tool_run_shell(cmd, ws), None
+        safe_cmd = _html.escape(cmd[:300])
+        await _st(f"💻 Выполняю команду в Docker:\n<pre><code class=\"language-bash\">{safe_cmd}</code></pre>")
+        return await _tool_run_shell(cmd, ws, _send), None
 
     if name == "write_file":
         path, content = args.get("path", "file.txt"), args.get("content", "")
