@@ -2978,6 +2978,17 @@ async def handle_text_messages(message: types.Message):
                 except Exception as _e:
                     logger.warning(f"tg_invite_link failed: {_e}")
                 return
+            if mtype == "tg_set_bot_photo":
+                try:
+                    photo_buf = BufferedInputFile(media.get("data", b""),
+                                                  filename=media.get("filename", "photo.jpg"))
+                    await message.bot.set_my_profile_photo(photo=photo_buf)
+                    await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                                    text="✅ Аватарка бота обновлена!", **kw)
+                except Exception as _e:
+                    await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                                    text=f"❌ Не смог сменить аву бота: {_e}", **kw)
+                return
             if mtype == "tg_set_chat_description":
                 try:
                     await message.bot.set_chat_description(chat_id=message.chat.id,
