@@ -941,7 +941,7 @@ _TOOLS = [
     {
         "name": "run_python",
         "description": (
-            "Execute Python code in isolated Docker sandbox (no network, 512MB RAM). "
+            "Execute Python code in isolated Docker sandbox (internet access, 512MB RAM). "
             "Files written to /workspace persist between calls. "
             "Has: numpy, pandas, matplotlib, pillow, scipy, sympy. Use print() for output."
         ),
@@ -950,7 +950,7 @@ _TOOLS = [
     {
         "name": "run_shell",
         "description": (
-            "Execute shell commands in isolated Docker sandbox (no network, 512MB RAM). "
+            "Execute shell commands in isolated Docker sandbox (internet access, 512MB RAM). "
             "Files in /workspace persist between calls. "
             "Use for: file operations, data processing, compiling, converting."
         ),
@@ -1056,7 +1056,7 @@ _SYSTEM = (
     "• Найти картинку → search_and_send_image\n"
     "• Найти видео → search_and_send_video(creator='...' если указан автор)\n"
     "• Скачать видео по ссылке → download_video\n"
-    "• Сервер/команды/код → run_shell / run_python (Docker sandbox)\n"
+    "• Сервер/команды/код → run_shell / run_python (Docker sandbox, ЕСТЬ ИНТЕРНЕТ)\n"
     "• Данные/файлы → fetch_json, create_chart, translate, qr_code, create_file\n\n"
     "КРИТИЧНО — reply завершает задачу НАВСЕГДА:\n"
     "Вызывай reply ТОЛЬКО когда задача полностью выполнена.\n"
