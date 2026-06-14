@@ -1226,6 +1226,15 @@ _TOOLS = [
       "required": ["user_id", "approve"]}},
     {"name": "tg_export_invite_link", "description": "Get the primary invite link for the chat.",
      "parameters": {"type": "object", "properties": {}, "required": []}},
+    {"name": "tg_set_bot_photo",
+     "description": (
+         "Change the bot's own profile photo. "
+         "Pass workspace path of the image. "
+         "Use when user says 'смени аву бота', 'поставь боту аватарку' etc."
+     ),
+     "parameters": {"type": "object", "properties": {
+         "path": {"type": "string", "description": "Workspace path e.g. photo.jpg"}},
+      "required": ["path"]}},
     {"name": "tg_set_chat_description",
      "description": "Change the chat description/bio (requires admin).",
      "parameters": {"type": "object", "properties": {
@@ -1661,6 +1670,16 @@ async def _execute_tool(
                      "expire_date": args.get("expire_date"),
                      "member_limit": args.get("member_limit")})
         return "[ОТПРАВЛЕНО] Ссылка создана.", None
+    if name == "tg_set_bot_photo":
+        path = args.get("path", "")
+        try:
+            full = ws._safe_path(path)
+            with open(full, "rb") as f:
+                data = f.read()
+        except Exception as e:
+            return f"Не смог прочитать файл {path}: {e}", None
+        await _send({"type": "tg_set_bot_photo", "data": data, "filename": path})
+        return "[ОТПРАВЛЕНО] Аватарка бота установлена.", None
     if name == "tg_set_chat_description":
         await _send({"type": "tg_set_chat_description", "description": args.get("description", "")})
         return "Описание чата изменено.", None
