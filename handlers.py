@@ -2730,12 +2730,16 @@ async def handle_text_messages(message: types.Message):
         elif agent_text:
             agent_text = await _handle_kick_directive(message, agent_text, reply_kwargs)
             code_blocks = re.findall('```(\\w*)\\n(.*?)```', agent_text, re.DOTALL)
-            cleaned_text = _clean_plain_reply(re.sub('```(\\w*)\\n(.*?)```', '', agent_text, flags=re.DOTALL).strip())
-            if not cleaned_text and code_blocks:
-                cleaned_text = 'Вот твой ебаный код, подавись нахуй.'
-            elif not cleaned_text:
-                cleaned_text = 'Нихуя не понял, но иди в пизду.'
-            sent_msg = await safe_send(message.reply, cleaned_text, **reply_kwargs)
+            # Agent uses HTML formatting — preserve it, strip only triple-backtick blocks
+            html_text = re.sub('```(\\w*)\\n(.*?)```', '', agent_text, flags=re.DOTALL).strip()
+            if not html_text and code_blocks:
+                html_text = 'Вот твой ебаный код, подавись нахуй.'
+            elif not html_text:
+                html_text = 'Нихуя не понял, но иди в пизду.'
+            try:
+                sent_msg = await safe_send(message.reply, html_text, parse_mode='HTML', **reply_kwargs)
+            except Exception:
+                sent_msg = await safe_send(message.reply, _clean_plain_reply(html_text), **reply_kwargs)
             if not sent_msg:
                 logging.warning('Agent reply not sent after flood-control retries')
                 return
