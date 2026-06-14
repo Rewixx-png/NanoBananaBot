@@ -1139,12 +1139,15 @@ async def _execute_tool(
         return await _tool_tts(args.get("text", ""), args.get("voice", "Kore"), args.get("language", "ru-RU"), _send), None
 
     if name == "run_python":
-        await _st("🐍 Запускаю Python в Docker...")
-        return await _tool_run_python(args.get("code", ""), ws), None
+        code = args.get("code", "")
+        preview = code[:120].replace('\n', ' ')
+        await _st(f"🐍 Запускаю Python в Docker:\n$ python -c \"{preview}{'…' if len(code) > 120 else ''}\"")
+        return await _tool_run_python(code, ws), None
 
     if name == "run_shell":
-        await _st("💻 Выполняю команду в Docker...")
-        return await _tool_run_shell(args.get("command", ""), ws), None
+        cmd = args.get("command", "")
+        await _st(f"💻 Выполняю команду в Docker:\n$ {cmd[:200]}")
+        return await _tool_run_shell(cmd, ws), None
 
     if name == "write_file":
         path, content = args.get("path", "file.txt"), args.get("content", "")
