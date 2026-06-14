@@ -91,7 +91,6 @@ class AgentWorkspace:
         """Run cmd inside sandbox container with workspace mounted."""
         docker_cmd = [
             "docker", "run", "--rm",
-            "--network=none",
             "--memory=512m", "--cpus=0.5",
             "--user=sandbox",
             "--workdir=/workspace",
