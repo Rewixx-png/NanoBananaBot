@@ -21,7 +21,7 @@ from database import save_history, save_pending_gen, delete_pending_gen, add_use
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned, make_safe_caption
 from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, generate_video_with_gemini, generate_text_with_gemini, classify_code_intent_with_gemini, classify_draw_intent_with_gemini, generate_image_via_code, upscale_image, generate_image_prompt, generate_code_with_gemini, generate_project_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate, fetch_gemini_tts_models, generate_tts_with_gemini, fetch_replicate_image_models, generate_bull_roast, analyze_photo_with_gemini, analyze_voice_with_gemini
-from agent import run_agent, classify_agent_intent
+from agent import run_agent
 from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID, DAILY_GEN_LIMIT, PAYMENT_USERNAME, CHAT_ID, GEMINI_IMAGE_TIMEOUT
 import logging
 logger = logging.getLogger(__name__)
@@ -2663,46 +2663,7 @@ async def handle_text_messages(message: types.Message):
             except Exception:
                 pass
 
-        if not replied_code and await classify_agent_intent(web_query):
-            async def _agent_send_cb(media: dict):
-                mtype    = media.get("type", "document")
-                data     = media.get("data", b"")
-                caption  = (media.get("caption") or "")[:1024]
-                filename = media.get("filename") or "file"
-                buf      = BufferedInputFile(data, filename=filename)
-                kw       = {"reply_to_message_id": message.message_id, **reply_kwargs}
-                if mtype == "photo":
-                    await safe_send(message.bot.send_photo, chat_id=message.chat.id, photo=buf, caption=caption, **kw)
-                elif mtype == "video":
-                    await safe_send(message.bot.send_video, chat_id=message.chat.id, video=buf, caption=caption, **kw)
-                elif mtype == "audio":
-                    await safe_send(message.bot.send_audio, chat_id=message.chat.id, audio=buf, caption=caption, **kw)
-                else:
-                    await safe_send(message.bot.send_document, chat_id=message.chat.id, document=buf, caption=caption, **kw)
-            try:
-                (agent_text, agent_project) = await asyncio.wait_for(
-                    run_agent(web_query, message.chat.id, username, _status_cb, _agent_send_cb),
-                    timeout=300,
-                )
-            except asyncio.TimeoutError:
-                agent_text = 'Агент завис — слишком долго. Разбей задачу на части.'
-                agent_project = None
-            except Exception as _agent_err:
-                logger.exception(f'Agent crashed: {_agent_err}')
-                agent_text = 'Агент упал. Попробуй ещё раз.'
-                agent_project = None
-            try:
-                await thinking_msg.delete()
-            except Exception:
-                pass
-            if agent_project:
-                await _send_generated_project(message, agent_project, reply_kwargs)
-            elif agent_text:
-                await safe_send(message.reply, _clean_plain_reply(agent_text), **reply_kwargs)
-            asyncio.create_task(add_user_stat(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'text'))
-            asyncio.create_task(log_prompt(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'text', web_query))
-            return
-
+        # Inject replied-image context so agent can handle edits
         replied_draw = None
         if is_reply_to_bot and message.reply_to_message and message.reply_to_message.photo:
             replied_draw = generated_draw_messages.get((message.chat.id, message.reply_to_message.message_id))
@@ -2710,108 +2671,77 @@ async def handle_text_messages(message: types.Message):
                 replied_image = await _download_message_photo(message.bot, message.reply_to_message)
                 if replied_image:
                     replied_draw = {'image_bytes': replied_image, 'prompt': message.reply_to_message.caption or ''}
-        _WEB_SKIP_DRAW = {'в инете', 'в интернете', 'чекни', 'чекнуть', 'поищи', 'найди', 'загугли', 'погугли', 'посмотри в', 'search', 'google', 'что нового', 'latest'}
-        _skip_draw = any(t in web_query.lower() for t in _WEB_SKIP_DRAW)
-        draw_info = {'draw_request': False, 'edit_request': False, 'prompt': ''} if _skip_draw else await classify_draw_intent_with_gemini(web_query, has_replied_image=bool(replied_draw))
-        if draw_info.get('draw_request') or draw_info.get('edit_request'):
-            handled = await _handle_natural_draw_request(message, web_query, draw_info, replied_draw, reply_kwargs, thinking_msg)
-            if handled:
-                return
-        is_code_request = is_code_forced or _is_code_generation_request(prompt)
-        if not is_code_request:
-            is_code_request = await classify_code_intent_with_gemini(prompt)
-        if is_code_request:
-            lower_prompt = prompt.lower()
-            wants_archive = any(marker in lower_prompt for marker in ['zip', 'зип', 'архив', 'не 1 монолит', 'не одним файлом', 'проект', 'pydroid', 'pydroid3'])
-            try:
-                await thinking_msg.edit_text('⏳ Собираю файлы/zip, это может занять до 100 сек...', **reply_kwargs)
-            except Exception:
-                pass
-            try:
-                project_payload = await asyncio.wait_for(generate_project_with_gemini(prompt), timeout=300)
-            except asyncio.TimeoutError:
-                project_payload = {'ok': False, 'error': 'timeout'}
-            asyncio.create_task(add_user_stat(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'code'))
-            asyncio.create_task(log_prompt(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'code', prompt))
-            if project_payload.get('ok'):
-                try:
-                    await thinking_msg.delete()
-                except Exception:
-                    pass
-                sent_code_doc = await _send_generated_project(message, project_payload, reply_kwargs)
-                if sent_code_doc:
-                    _remember_generated_code_message(message.chat.id, sent_code_doc.message_id, project_payload.get('files', []), web_query)
-                return
-            if wants_archive:
-                try:
-                    await thinking_msg.delete()
-                except Exception:
-                    pass
-                await message.reply('Gemini сейчас тупит или перегружен, zip не собрался. Попробуй ещё раз через минуту — я не буду врать sandbox-ссылкой и не буду держать тебя на вечном “Думаю...”.', **reply_kwargs)
-                return
-            logging.warning(f"Project gen failed, fallback to code markdown: {project_payload.get('error')}")
-            text_response = await generate_code_with_gemini(prompt)
-        else:
-            try:
-                text_response = await asyncio.wait_for(
-                    generate_text_with_gemini(prompt, message.chat.id, username=username, web_query=web_query, status_cb=_status_cb, is_owner=message.from_user.id == OWNER_USER_ID),
-                    timeout=240,
+            if replied_draw:
+                prompt = (
+                    f'[Пользователь отвечает на сгенерированную картинку. '
+                    f'Оригинальный промпт: «{replied_draw.get("prompt", "")}»]\n{prompt}'
                 )
-            except asyncio.TimeoutError:
-                logging.warning(f'Text generation timed out after 240s for chat={message.chat.id}, user={message.from_user.id}')
-                text_response = 'Интернет-поиск затянулся и я его прибил, чтобы не держать вечное “Думаю...”. Попробуй сузить запрос или повтори через минуту.'
-            except Exception as e:
-                logging.exception(f'Text generation failed: {type(e).__name__}')
-                text_response = 'Мозги споткнулись об ошибку, но вечное “Думаю...” я тебе не оставлю. Попробуй ещё раз.'
-            asyncio.create_task(add_user_stat(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'text'))
-            asyncio.create_task(log_prompt(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'text', prompt))
+
+        async def _agent_send_cb(media: dict):
+            mtype    = media.get("type", "document")
+            data     = media.get("data", b"")
+            caption  = (media.get("caption") or "")[:1024]
+            filename = media.get("filename") or "file"
+            buf      = BufferedInputFile(data, filename=filename)
+            kw       = {"reply_to_message_id": message.message_id, **reply_kwargs}
+            if mtype == "photo":
+                await safe_send(message.bot.send_photo, chat_id=message.chat.id, photo=buf, caption=caption, **kw)
+            elif mtype == "video":
+                await safe_send(message.bot.send_video, chat_id=message.chat.id, video=buf, caption=caption, **kw)
+            elif mtype == "audio":
+                await safe_send(message.bot.send_audio, chat_id=message.chat.id, audio=buf, caption=caption, **kw)
+            else:
+                await safe_send(message.bot.send_document, chat_id=message.chat.id, document=buf, caption=caption, **kw)
+
+        is_owner_user = message.from_user.id == OWNER_USER_ID
+        try:
+            (agent_text, agent_project) = await asyncio.wait_for(
+                run_agent(prompt, message.chat.id, username, _status_cb, _agent_send_cb,
+                          is_owner=is_owner_user),
+                timeout=300,
+            )
+        except asyncio.TimeoutError:
+            agent_text = 'Завис по таймауту. Попробуй покороче.'
+            agent_project = None
+        except Exception as _agent_err:
+            logger.exception(f'Agent crashed: {_agent_err}')
+            agent_text = 'Агент упал. Попробуй ещё раз.'
+            agent_project = None
+
         try:
             await thinking_msg.delete()
         except Exception:
             pass
-        text_response = await _handle_kick_directive(message, text_response, reply_kwargs)
-        code_blocks = re.findall('```(\\w*)\\n(.*?)```', text_response, re.DOTALL)
-        cleaned_text = _clean_plain_reply(re.sub('```(\\w*)\\n(.*?)```', '', text_response, flags=re.DOTALL).strip())
-        if not cleaned_text and code_blocks:
-            cleaned_text = 'Вот твой ебаный код, подавись нахуй.'
-        elif not cleaned_text:
-            cleaned_text = 'Нихуя не понял, но иди в пизду.'
-        sent_msg = await safe_send(message.reply, cleaned_text, **reply_kwargs)
-        if not sent_msg:
-            logging.warning('Final text reply was not sent after flood-control retries')
-            return
-        if code_blocks:
-            _code_files_sent: list[dict] = []
-            for (lang, code) in code_blocks:
-                ext = lang.strip().lower() or 'txt'
-                if ext in ['python', 'py']:
-                    ext = 'py'
-                elif ext in ['javascript', 'js']:
-                    ext = 'js'
-                elif ext in ['typescript', 'ts']:
-                    ext = 'ts'
-                elif ext in ['html', 'htm']:
-                    ext = 'html'
-                elif ext in ['css']:
-                    ext = 'css'
-                elif ext in ['c++', 'cpp']:
-                    ext = 'cpp'
-                elif ext in ['c#', 'cs']:
-                    ext = 'cs'
-                elif ext in ['php']:
-                    ext = 'php'
-                elif ext in ['bash', 'sh']:
-                    ext = 'sh'
-                elif ext in ['json']:
-                    ext = 'json'
-                elif ext in ['xml']:
-                    ext = 'xml'
-                filename = f'говняный_код_{uuid.uuid4().hex[:4]}.{ext}'
-                doc = BufferedInputFile(code.strip().encode('utf-8'), filename=filename)
-                sent_code_file = await safe_send(message.bot.send_document, chat_id=message.chat.id, document=doc, reply_to_message_id=sent_msg.message_id, **reply_kwargs)
-                file_entry = {'path': filename, 'content': code.strip()}
-                _code_files_sent.append(file_entry)
-                if sent_code_file:
-                    _remember_generated_code_message(message.chat.id, sent_code_file.message_id, [file_entry], web_query)
-            if sent_msg and _code_files_sent:
-                _remember_generated_code_message(message.chat.id, sent_msg.message_id, _code_files_sent, web_query)
+
+        if agent_project:
+            sent_code_doc = await _send_generated_project(message, agent_project, reply_kwargs)
+            if sent_code_doc:
+                _remember_generated_code_message(message.chat.id, sent_code_doc.message_id, agent_project.get('files', []), web_query)
+        elif agent_text:
+            agent_text = await _handle_kick_directive(message, agent_text, reply_kwargs)
+            code_blocks = re.findall('```(\\w*)\\n(.*?)```', agent_text, re.DOTALL)
+            cleaned_text = _clean_plain_reply(re.sub('```(\\w*)\\n(.*?)```', '', agent_text, flags=re.DOTALL).strip())
+            if not cleaned_text and code_blocks:
+                cleaned_text = 'Вот твой ебаный код, подавись нахуй.'
+            elif not cleaned_text:
+                cleaned_text = 'Нихуя не понял, но иди в пизду.'
+            sent_msg = await safe_send(message.reply, cleaned_text, **reply_kwargs)
+            if not sent_msg:
+                logging.warning('Agent reply not sent after flood-control retries')
+                return
+            if code_blocks:
+                _code_files_sent: list[dict] = []
+                for (lang, code) in code_blocks:
+                    ext = _code_block_ext(lang)
+                    filename = f'говняный_код_{uuid.uuid4().hex[:4]}.{ext}'
+                    doc = BufferedInputFile(code.strip().encode('utf-8'), filename=filename)
+                    sent_code_file = await safe_send(message.bot.send_document, chat_id=message.chat.id, document=doc, reply_to_message_id=sent_msg.message_id, **reply_kwargs)
+                    file_entry = {'path': filename, 'content': code.strip()}
+                    _code_files_sent.append(file_entry)
+                    if sent_code_file:
+                        _remember_generated_code_message(message.chat.id, sent_code_file.message_id, [file_entry], web_query)
+                if sent_msg and _code_files_sent:
+                    _remember_generated_code_message(message.chat.id, sent_msg.message_id, _code_files_sent, web_query)
+
+        asyncio.create_task(add_user_stat(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'text'))
+        asyncio.create_task(log_prompt(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'text', web_query))
