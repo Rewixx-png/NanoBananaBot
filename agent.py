@@ -32,7 +32,7 @@ from keys_manager import load_keys, load_firecrawl_keys, remove_key
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS       = 18
+MAX_STEPS       = 36
 _SEARCH_TIMEOUT = 20.0
 _SCRAPE_TIMEOUT = 25.0
 _LLM_TIMEOUT    = 60.0
@@ -137,15 +137,15 @@ class _DebounceHook:
 
 class _ToolBudget:
     LIMITS = {
-        "web_search": 8, "scrape_url": 10, "generate_project": 2,
-        "think": 30, "reply": 3, "generate_image": 3,
-        "search_and_send_image": 3, "download_image": 5,
-        "search_and_send_video": 2, "download_video": 2, "text_to_speech": 3,
-        "run_python": 6, "run_shell": 8,
-        "write_file": 10, "read_file": 10,
-        "fetch_json": 8, "calculate": 20,
-        "qr_code": 3, "create_chart": 3,
-        "translate": 5, "create_file": 5, "send_workspace_file": 5,
+        "web_search": 16, "scrape_url": 20, "generate_project": 4,
+        "think": 60, "reply": 6, "generate_image": 6,
+        "search_and_send_image": 6, "download_image": 10,
+        "search_and_send_video": 4, "download_video": 4, "text_to_speech": 6,
+        "run_python": 12, "run_shell": 16,
+        "write_file": 20, "read_file": 20,
+        "fetch_json": 16, "calculate": 40,
+        "qr_code": 6, "create_chart": 6,
+        "translate": 10, "create_file": 10, "send_workspace_file": 10,
     }
 
     def __init__(self):
