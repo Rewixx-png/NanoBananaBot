@@ -153,6 +153,12 @@ class _ToolBudget:
         "fetch_json": 16, "calculate": 40,
         "qr_code": 6, "create_chart": 6,
         "translate": 10, "create_file": 10, "send_workspace_file": 10, "send_with_buttons": 5,
+        "tg_send_poll": 3, "tg_send_location": 5, "tg_react": 10, "tg_pin_message": 3,
+        "tg_delete_message": 10, "tg_forward_message": 5, "tg_get_chat_info": 5,
+        "tg_ban_user": 3, "tg_kick_user": 3, "tg_send_chat_action": 10,
+        "tg_restrict_member": 3, "tg_unpin_message": 5, "tg_create_invite_link": 3,
+        "tg_set_chat_title": 2, "tg_copy_message": 10, "tg_send_sticker": 5,
+        "tg_send_contact": 5, "tg_send_dice": 5, "tg_edit_message": 10,
     }
 
     def __init__(self):
@@ -1013,6 +1019,162 @@ _TOOLS = [
             "required": ["text", "buttons"],
         },
     },
+    # ── Telegram API tools ──────────────────────────────────────────
+    {
+        "name": "tg_send_poll",
+        "description": "Create an interactive poll in the chat.",
+        "parameters": {"type": "object", "properties": {
+            "question": {"type": "string"},
+            "options": {"type": "array", "items": {"type": "string"}, "description": "2-10 answer options"},
+            "is_anonymous": {"type": "boolean", "description": "Anonymous poll (default true)"},
+            "allows_multiple_answers": {"type": "boolean", "description": "Multiple choice (default false)"},
+        }, "required": ["question", "options"]},
+    },
+    {
+        "name": "tg_send_location",
+        "description": "Send a GPS location to the chat.",
+        "parameters": {"type": "object", "properties": {
+            "latitude": {"type": "number"},
+            "longitude": {"type": "number"},
+            "title": {"type": "string", "description": "Optional venue title"},
+            "address": {"type": "string", "description": "Optional venue address"},
+        }, "required": ["latitude", "longitude"]},
+    },
+    {
+        "name": "tg_react",
+        "description": "Add an emoji reaction to the last message or a specific message_id.",
+        "parameters": {"type": "object", "properties": {
+            "emoji": {"type": "string", "description": "Emoji reaction e.g. 👍 ❤️ 🔥 🎉 💯 😂"},
+            "message_id": {"type": "integer", "description": "Target message (omit for the user's last message)"},
+        }, "required": ["emoji"]},
+    },
+    {
+        "name": "tg_pin_message",
+        "description": "Pin a message in the chat (requires admin rights).",
+        "parameters": {"type": "object", "properties": {
+            "message_id": {"type": "integer", "description": "Message to pin (omit to pin the user's message)"},
+            "disable_notification": {"type": "boolean"},
+        }, "required": []},
+    },
+    {
+        "name": "tg_delete_message",
+        "description": "Delete a specific message (requires admin rights or own message).",
+        "parameters": {"type": "object", "properties": {
+            "message_id": {"type": "integer"},
+        }, "required": ["message_id"]},
+    },
+    {
+        "name": "tg_forward_message",
+        "description": "Forward a message to the current chat from another chat.",
+        "parameters": {"type": "object", "properties": {
+            "from_chat_id": {"type": "integer", "description": "Source chat ID"},
+            "message_id": {"type": "integer"},
+        }, "required": ["from_chat_id", "message_id"]},
+    },
+    {
+        "name": "tg_get_chat_info",
+        "description": "Get info about the current chat: title, description, member count, admin list.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "tg_ban_user",
+        "description": "Ban a user from the chat (requires admin). Provide user_id or reply to their message.",
+        "parameters": {"type": "object", "properties": {
+            "user_id": {"type": "integer", "description": "User to ban"},
+            "reason": {"type": "string"},
+            "until_date": {"type": "integer", "description": "Unix timestamp when ban expires (omit for permanent)"},
+        }, "required": ["user_id"]},
+    },
+    {
+        "name": "tg_kick_user",
+        "description": "Kick (temporary ban 60s) a user from the chat (requires admin).",
+        "parameters": {"type": "object", "properties": {
+            "user_id": {"type": "integer"},
+            "reason": {"type": "string"},
+        }, "required": ["user_id"]},
+    },
+    {
+        "name": "tg_send_chat_action",
+        "description": "Show a typing/uploading status indicator in the chat.",
+        "parameters": {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["typing", "upload_photo", "upload_video",
+                        "upload_document", "record_voice", "find_location"]},
+        }, "required": ["action"]},
+    },
+    {
+        "name": "tg_restrict_member",
+        "description": "Restrict (mute) a user in the chat (requires admin). Set can_send_messages=false to mute.",
+        "parameters": {"type": "object", "properties": {
+            "user_id": {"type": "integer"},
+            "can_send_messages": {"type": "boolean", "description": "False = muted"},
+            "can_send_media": {"type": "boolean"},
+            "until_date": {"type": "integer", "description": "Unix timestamp when restriction expires"},
+        }, "required": ["user_id"]},
+    },
+    {
+        "name": "tg_unpin_message",
+        "description": "Unpin a message or all messages in the chat (requires admin).",
+        "parameters": {"type": "object", "properties": {
+            "message_id": {"type": "integer", "description": "Omit to unpin all messages"},
+        }, "required": []},
+    },
+    {
+        "name": "tg_create_invite_link",
+        "description": "Create a new invite link for the chat (requires admin).",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Link name"},
+            "expire_date": {"type": "integer", "description": "Expiry unix timestamp"},
+            "member_limit": {"type": "integer", "description": "Max number of uses"},
+        }, "required": []},
+    },
+    {
+        "name": "tg_set_chat_title",
+        "description": "Change the chat title (requires admin).",
+        "parameters": {"type": "object", "properties": {
+            "title": {"type": "string"},
+        }, "required": ["title"]},
+    },
+    {
+        "name": "tg_copy_message",
+        "description": "Copy a message to the current chat without the 'Forwarded from' label.",
+        "parameters": {"type": "object", "properties": {
+            "from_chat_id": {"type": "integer", "description": "Source chat (omit = current chat)"},
+            "message_id": {"type": "integer"},
+            "caption": {"type": "string"},
+        }, "required": ["message_id"]},
+    },
+    {
+        "name": "tg_send_sticker",
+        "description": "Send a sticker by file_id or emoji.",
+        "parameters": {"type": "object", "properties": {
+            "sticker": {"type": "string", "description": "Sticker file_id or emoji"},
+        }, "required": ["sticker"]},
+    },
+    {
+        "name": "tg_send_contact",
+        "description": "Send a phone contact to the chat.",
+        "parameters": {"type": "object", "properties": {
+            "phone": {"type": "string", "description": "Phone number e.g. +79001234567"},
+            "first_name": {"type": "string"},
+            "last_name": {"type": "string"},
+        }, "required": ["phone", "first_name"]},
+    },
+    {
+        "name": "tg_send_dice",
+        "description": "Send an animated emoji with random result (dice, dart, basketball, etc.).",
+        "parameters": {"type": "object", "properties": {
+            "emoji": {"type": "string", "enum": ["🎲", "🎯", "🏀", "⚽", "🎳", "🎰"]},
+        }, "required": []},
+    },
+    {
+        "name": "tg_edit_message",
+        "description": "Edit a previously sent message by the bot.",
+        "parameters": {"type": "object", "properties": {
+            "message_id": {"type": "integer"},
+            "text": {"type": "string", "description": "New message text (HTML supported)"},
+        }, "required": ["message_id", "text"]},
+    },
+    # ── End Telegram API tools ───────────────────────────────────────
     {
         "name": "search_and_send_image",
         "description": (
@@ -1349,6 +1511,93 @@ async def _execute_tool(
         rows = args.get("buttons", [])
         await _send({"type": "inline_buttons", "text": text, "buttons": rows})
         return "[ОТПРАВЛЕНО] Сообщение с кнопками отправлено.", None
+
+    # ── Telegram API tools ───────────────────────────────────────────
+    if name == "tg_send_poll":
+        await _send({"type": "tg_poll", "question": args.get("question", ""),
+                     "options": args.get("options", []),
+                     "is_anonymous": args.get("is_anonymous", True),
+                     "allows_multiple_answers": args.get("allows_multiple_answers", False)})
+        return "[ОТПРАВЛЕНО] Опрос создан.", None
+
+    if name == "tg_send_location":
+        await _send({"type": "tg_location", "latitude": args.get("latitude"),
+                     "longitude": args.get("longitude"),
+                     "title": args.get("title"), "address": args.get("address")})
+        return "[ОТПРАВЛЕНО] Локация отправлена.", None
+
+    if name == "tg_react":
+        await _send({"type": "tg_react", "emoji": args.get("emoji", "👍"),
+                     "message_id": args.get("message_id")})
+        return "Реакция добавлена.", None
+
+    if name == "tg_pin_message":
+        await _send({"type": "tg_pin", "message_id": args.get("message_id"),
+                     "disable_notification": args.get("disable_notification", False)})
+        return "Сообщение закреплено.", None
+
+    if name == "tg_delete_message":
+        await _send({"type": "tg_delete", "message_id": args.get("message_id")})
+        return "Сообщение удалено.", None
+
+    if name == "tg_forward_message":
+        await _send({"type": "tg_forward", "from_chat_id": args.get("from_chat_id"),
+                     "message_id": args.get("message_id")})
+        return "[ОТПРАВЛЕНО] Сообщение переслано.", None
+
+    if name == "tg_get_chat_info":
+        await _send({"type": "tg_get_chat_info"})
+        return "Запрос информации о чате отправлен.", None
+
+    if name == "tg_ban_user":
+        await _send({"type": "tg_ban", "user_id": args.get("user_id"),
+                     "reason": args.get("reason", ""), "until_date": args.get("until_date")})
+        return f"Пользователь {args.get('user_id')} заблокирован.", None
+
+    if name == "tg_kick_user":
+        await _send({"type": "tg_kick", "user_id": args.get("user_id"),
+                     "reason": args.get("reason", "")})
+        return f"Пользователь {args.get('user_id')} кикнут.", None
+
+    if name == "tg_send_chat_action":
+        await _send({"type": "tg_chat_action", "action": args.get("action", "typing")})
+        return "Действие отправлено.", None
+    if name == "tg_restrict_member":
+        await _send({"type": "tg_restrict", "user_id": args.get("user_id"),
+                     "can_send_messages": args.get("can_send_messages", False),
+                     "can_send_media": args.get("can_send_media", False),
+                     "until_date": args.get("until_date")})
+        return f"Пользователь {args.get('user_id')} ограничен.", None
+    if name == "tg_unpin_message":
+        await _send({"type": "tg_unpin", "message_id": args.get("message_id")})
+        return "Сообщение откреплено.", None
+    if name == "tg_create_invite_link":
+        await _send({"type": "tg_invite_link", "name": args.get("name"),
+                     "expire_date": args.get("expire_date"),
+                     "member_limit": args.get("member_limit")})
+        return "[ОТПРАВЛЕНО] Ссылка создана.", None
+    if name == "tg_set_chat_title":
+        await _send({"type": "tg_set_chat_title", "title": args.get("title", "")})
+        return "Название чата изменено.", None
+    if name == "tg_copy_message":
+        await _send({"type": "tg_copy_message", "from_chat_id": args.get("from_chat_id"),
+                     "message_id": args.get("message_id"), "caption": args.get("caption")})
+        return "[ОТПРАВЛЕНО] Сообщение скопировано.", None
+    if name == "tg_send_sticker":
+        await _send({"type": "tg_send_sticker", "sticker": args.get("sticker", "")})
+        return "[ОТПРАВЛЕНО] Стикер отправлен.", None
+    if name == "tg_send_contact":
+        await _send({"type": "tg_send_contact", "phone": args.get("phone", ""),
+                     "name": args.get("first_name", ""), "last_name": args.get("last_name", "")})
+        return "[ОТПРАВЛЕНО] Контакт отправлен.", None
+    if name == "tg_send_dice":
+        await _send({"type": "tg_send_dice", "emoji": args.get("emoji", "🎲")})
+        return "[ОТПРАВЛЕНО] Кубик брошен.", None
+    if name == "tg_edit_message":
+        await _send({"type": "tg_edit_message", "message_id": args.get("message_id"),
+                     "text": args.get("text", "")})
+        return "Сообщение отредактировано.", None
+    # ── End Telegram API tools ───────────────────────────────────────
 
     if name == "search_and_send_image":
         return await _tool_search_image(

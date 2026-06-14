@@ -2814,6 +2814,179 @@ async def handle_text_messages(message: types.Message):
                 await safe_send(message.bot.send_message, chat_id=message.chat.id,
                                 text=text_body, reply_markup=keyboard, parse_mode='HTML', **kw)
                 return
+            # ── Telegram API tools ──────────────────────────────────────
+            if mtype == "tg_poll":
+                from aiogram.types import InputPollOption
+                opts = [InputPollOption(text=o[:100]) for o in (media.get("options") or [])[:10]]
+                await safe_send(message.bot.send_poll, chat_id=message.chat.id,
+                    question=(media.get("question") or "?")[:300], options=opts,
+                    is_anonymous=media.get("is_anonymous", True),
+                    allows_multiple_answers=media.get("allows_multiple_answers", False), **kw)
+                return
+            if mtype == "tg_location":
+                lat, lon = media.get("latitude"), media.get("longitude")
+                if lat is not None and lon is not None:
+                    if media.get("title"):
+                        await safe_send(message.bot.send_venue, chat_id=message.chat.id,
+                            latitude=float(lat), longitude=float(lon),
+                            title=media.get("title","")[:64], address=media.get("address","")[:256], **kw)
+                    else:
+                        await safe_send(message.bot.send_location, chat_id=message.chat.id,
+                            latitude=float(lat), longitude=float(lon), **kw)
+                return
+            if mtype == "tg_react":
+                from aiogram.types import ReactionTypeEmoji
+                msg_id = media.get("message_id") or message.message_id
+                try:
+                    await message.bot.set_message_reaction(chat_id=message.chat.id,
+                        message_id=msg_id, reaction=[ReactionTypeEmoji(emoji=media.get("emoji","👍"))])
+                except Exception as _e:
+                    logger.warning(f"tg_react failed: {_e}")
+                return
+            if mtype == "tg_pin":
+                try:
+                    msg_id = media.get("message_id") or message.message_id
+                    await message.bot.pin_chat_message(chat_id=message.chat.id,
+                        message_id=msg_id, disable_notification=media.get("disable_notification", False))
+                except Exception as _e:
+                    logger.warning(f"tg_pin failed: {_e}")
+                return
+            if mtype == "tg_delete":
+                try:
+                    await message.bot.delete_message(chat_id=message.chat.id,
+                        message_id=media.get("message_id"))
+                except Exception as _e:
+                    logger.warning(f"tg_delete failed: {_e}")
+                return
+            if mtype == "tg_forward":
+                try:
+                    await message.bot.forward_message(chat_id=message.chat.id,
+                        from_chat_id=media.get("from_chat_id"),
+                        message_id=media.get("message_id"))
+                except Exception as _e:
+                    logger.warning(f"tg_forward failed: {_e}")
+                return
+            if mtype == "tg_get_chat_info":
+                try:
+                    chat = await message.bot.get_chat(message.chat.id)
+                    count = await message.bot.get_chat_member_count(message.chat.id)
+                    info = (f"<b>Чат:</b> {chat.title or 'N/A'}\n"
+                            f"<b>ID:</b> <code>{chat.id}</code>\n"
+                            f"<b>Тип:</b> {chat.type}\n"
+                            f"<b>Участников:</b> {count}\n"
+                            f"<b>Описание:</b> {chat.description or '—'}")
+                    await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                        text=info, parse_mode='HTML', **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_get_chat_info failed: {_e}")
+                return
+            if mtype == "tg_ban":
+                try:
+                    import datetime
+                    until = media.get("until_date")
+                    until_dt = datetime.datetime.fromtimestamp(until, tz=datetime.timezone.utc) if until else None
+                    await message.bot.ban_chat_member(chat_id=message.chat.id,
+                        user_id=media.get("user_id"), until_date=until_dt)
+                except Exception as _e:
+                    logger.warning(f"tg_ban failed: {_e}")
+                return
+            if mtype == "tg_kick":
+                try:
+                    import time as _t
+                    await message.bot.ban_chat_member(chat_id=message.chat.id,
+                        user_id=media.get("user_id"),
+                        until_date=int(_t.time()) + 35)
+                    await message.bot.unban_chat_member(chat_id=message.chat.id,
+                        user_id=media.get("user_id"), only_if_banned=True)
+                except Exception as _e:
+                    logger.warning(f"tg_kick failed: {_e}")
+                return
+            if mtype == "tg_chat_action":
+                try:
+                    await message.bot.send_chat_action(chat_id=message.chat.id,
+                        action=media.get("action", "typing"))
+                except Exception as _e:
+                    logger.warning(f"tg_chat_action failed: {_e}")
+                return
+            if mtype == "tg_restrict":
+                from aiogram.types import ChatPermissions
+                try:
+                    until = media.get("until_date")
+                    import datetime
+                    until_dt = datetime.datetime.fromtimestamp(until, tz=datetime.timezone.utc) if until else None
+                    perms = ChatPermissions(can_send_messages=media.get("can_send_messages", True),
+                        can_send_media_messages=media.get("can_send_media", True))
+                    await message.bot.restrict_chat_member(chat_id=message.chat.id,
+                        user_id=media.get("user_id"), permissions=perms, until_date=until_dt)
+                except Exception as _e:
+                    logger.warning(f"tg_restrict failed: {_e}")
+                return
+            if mtype == "tg_unpin":
+                try:
+                    if media.get("message_id"):
+                        await message.bot.unpin_chat_message(chat_id=message.chat.id,
+                            message_id=media.get("message_id"))
+                    else:
+                        await message.bot.unpin_all_chat_messages(chat_id=message.chat.id)
+                except Exception as _e:
+                    logger.warning(f"tg_unpin failed: {_e}")
+                return
+            if mtype == "tg_invite_link":
+                try:
+                    link = await message.bot.create_chat_invite_link(chat_id=message.chat.id,
+                        name=media.get("name"), expire_date=media.get("expire_date"),
+                        member_limit=media.get("member_limit"))
+                    await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                        text=f"🔗 Пригласительная ссылка: {link.invite_link}", **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_invite_link failed: {_e}")
+                return
+            if mtype == "tg_set_chat_title":
+                try:
+                    await message.bot.set_chat_title(chat_id=message.chat.id,
+                        title=media.get("title","")[:255])
+                except Exception as _e:
+                    logger.warning(f"tg_set_chat_title failed: {_e}")
+                return
+            if mtype == "tg_copy_message":
+                try:
+                    await message.bot.copy_message(chat_id=message.chat.id,
+                        from_chat_id=media.get("from_chat_id", message.chat.id),
+                        message_id=media.get("message_id"), caption=media.get("caption"))
+                except Exception as _e:
+                    logger.warning(f"tg_copy_message failed: {_e}")
+                return
+            if mtype == "tg_send_sticker":
+                try:
+                    await safe_send(message.bot.send_sticker, chat_id=message.chat.id,
+                        sticker=media.get("sticker"), **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_send_sticker failed: {_e}")
+                return
+            if mtype == "tg_send_contact":
+                try:
+                    await safe_send(message.bot.send_contact, chat_id=message.chat.id,
+                        phone_number=media.get("phone",""), first_name=media.get("name",""),
+                        last_name=media.get("last_name",""), **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_send_contact failed: {_e}")
+                return
+            if mtype == "tg_send_dice":
+                try:
+                    await safe_send(message.bot.send_dice, chat_id=message.chat.id,
+                        emoji=media.get("emoji","🎲"), **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_send_dice failed: {_e}")
+                return
+            if mtype == "tg_edit_message":
+                try:
+                    await message.bot.edit_message_text(chat_id=message.chat.id,
+                        message_id=media.get("message_id"),
+                        text=media.get("text","")[:4096], parse_mode='HTML')
+                except Exception as _e:
+                    logger.warning(f"tg_edit_message failed: {_e}")
+                return
+            # ── End Telegram API tools ───────────────────────────────
             data     = media.get("data", b"")
             caption  = (media.get("caption") or "")[:1024]
             filename = media.get("filename") or "file"
