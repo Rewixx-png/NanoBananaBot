@@ -2859,9 +2859,14 @@ async def handle_text_messages(message: types.Message):
                     logger.warning(f"tg_delete failed: {_e}")
                 return
             if mtype == "tg_forward":
+                # Restrict to current chat as source to prevent cross-chat exfiltration
+                from_cid = int(media.get("from_chat_id") or message.chat.id)
+                if from_cid != message.chat.id:
+                    logger.warning(f"tg_forward blocked: cross-chat source {from_cid}")
+                    return
                 try:
                     await message.bot.forward_message(chat_id=message.chat.id,
-                        from_chat_id=media.get("from_chat_id"),
+                        from_chat_id=message.chat.id,
                         message_id=media.get("message_id"))
                 except Exception as _e:
                     logger.warning(f"tg_forward failed: {_e}")
@@ -2880,6 +2885,18 @@ async def handle_text_messages(message: types.Message):
                 except Exception as _e:
                     logger.warning(f"tg_get_chat_info failed: {_e}")
                 return
+            # Admin-only actions — verify requester is admin/creator first
+            _ADMIN_MTYPES = {"tg_ban", "tg_kick", "tg_restrict", "tg_pin", "tg_unpin",
+                             "tg_set_chat_title", "tg_invite_link", "tg_promote"}
+            if mtype in _ADMIN_MTYPES and message.chat.type != "private":
+                try:
+                    _req = await message.bot.get_chat_member(message.chat.id, message.from_user.id)
+                    if _req.status not in ("administrator", "creator"):
+                        await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                            text="❌ Эту команду могут выполнять только администраторы.", **kw)
+                        return
+                except Exception:
+                    pass
             if mtype == "tg_ban":
                 try:
                     import datetime
@@ -2950,11 +2967,148 @@ async def handle_text_messages(message: types.Message):
                 return
             if mtype == "tg_copy_message":
                 try:
+                    # Restrict to current chat as source
                     await message.bot.copy_message(chat_id=message.chat.id,
-                        from_chat_id=media.get("from_chat_id", message.chat.id),
+                        from_chat_id=message.chat.id,
                         message_id=media.get("message_id"), caption=media.get("caption"))
                 except Exception as _e:
                     logger.warning(f"tg_copy_message failed: {_e}")
+                return
+            if mtype == "tg_send_animation":
+                try:
+                    await safe_send(message.bot.send_animation, chat_id=message.chat.id,
+                        animation=media.get("url",""), caption=(media.get("caption",""))[:1024], **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_send_animation failed: {_e}")
+                return
+            if mtype == "tg_send_video_note":
+                try:
+                    await safe_send(message.bot.send_video_note, chat_id=message.chat.id,
+                        video_note=media.get("file_id",""), **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_send_video_note failed: {_e}")
+                return
+            if mtype == "tg_send_venue":
+                try:
+                    await safe_send(message.bot.send_venue, chat_id=message.chat.id,
+                        latitude=float(media.get("latitude",0)),
+                        longitude=float(media.get("longitude",0)),
+                        title=media.get("title","")[:64],
+                        address=media.get("address","")[:256], **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_send_venue failed: {_e}")
+                return
+            if mtype == "tg_promote":
+                try:
+                    await message.bot.promote_chat_member(
+                        chat_id=message.chat.id, user_id=media.get("user_id"),
+                        can_delete_messages=media.get("can_delete_messages", False),
+                        can_pin_messages=media.get("can_pin_messages", False),
+                        can_manage_chat=media.get("can_manage_chat", False),
+                        can_ban_members=media.get("can_ban_members", False))
+                    if media.get("custom_title"):
+                        await message.bot.set_chat_administrator_custom_title(
+                            chat_id=message.chat.id, user_id=media.get("user_id"),
+                            custom_title=media.get("custom_title","")[:16])
+                except Exception as _e:
+                    logger.warning(f"tg_promote failed: {_e}")
+                return
+            if mtype == "tg_get_member":
+                try:
+                    m = await message.bot.get_chat_member(message.chat.id, media.get("user_id"))
+                    u = m.user
+                    info = (f"<b>Пользователь:</b> {u.full_name}\n"
+                            f"<b>ID:</b> <code>{u.id}</code>\n"
+                            f"<b>Username:</b> @{u.username or '—'}\n"
+                            f"<b>Статус:</b> {m.status}")
+                    await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                        text=info, parse_mode='HTML', **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_get_member failed: {_e}")
+                return
+            if mtype == "tg_get_admins":
+                try:
+                    admins = await message.bot.get_chat_administrators(message.chat.id)
+                    lines = [f"👑 <b>Администраторы чата</b> ({len(admins)}):"]
+                    for a in admins:
+                        title = getattr(a, 'custom_title', None) or a.status
+                        lines.append(f"• {a.user.full_name} (@{a.user.username or '—'}) — {title}")
+                    await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                        text='\n'.join(lines), parse_mode='HTML', **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_get_admins failed: {_e}")
+                return
+            if mtype == "tg_get_member_count":
+                try:
+                    count = await message.bot.get_chat_member_count(message.chat.id)
+                    await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                        text=f"👥 Участников в чате: <b>{count}</b>", parse_mode='HTML', **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_get_member_count failed: {_e}")
+                return
+            if mtype == "tg_create_forum_topic":
+                try:
+                    t = await message.bot.create_forum_topic(chat_id=message.chat.id,
+                        name=media.get("name","Новый топик")[:128])
+                    await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                        text=f"✅ Топик «{t.name}» создан (thread_id: {t.message_thread_id})", **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_create_forum_topic failed: {_e}")
+                return
+            if mtype == "tg_close_forum_topic":
+                try:
+                    await message.bot.close_forum_topic(chat_id=message.chat.id,
+                        message_thread_id=media.get("message_thread_id"))
+                except Exception as _e:
+                    logger.warning(f"tg_close_forum_topic failed: {_e}")
+                return
+            if mtype == "tg_get_sticker_set":
+                try:
+                    ss = await message.bot.get_sticker_set(name=media.get("name",""))
+                    info = f"📦 <b>{ss.title}</b> (@{ss.name})\nСтикеров: {len(ss.stickers)}"
+                    await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                        text=info, parse_mode='HTML', **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_get_sticker_set failed: {_e}")
+                return
+            if mtype == "tg_approve_join":
+                try:
+                    if media.get("approve", True):
+                        await message.bot.approve_chat_join_request(chat_id=message.chat.id,
+                            user_id=media.get("user_id"))
+                    else:
+                        await message.bot.decline_chat_join_request(chat_id=message.chat.id,
+                            user_id=media.get("user_id"))
+                except Exception as _e:
+                    logger.warning(f"tg_approve_join failed: {_e}")
+                return
+            if mtype == "tg_export_link":
+                try:
+                    link = await message.bot.export_chat_invite_link(chat_id=message.chat.id)
+                    await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                        text=f"🔗 Ссылка: {link}", **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_export_link failed: {_e}")
+                return
+            if mtype == "tg_read_logs":
+                try:
+                    import subprocess
+                    log_path = '/root/Projects/NanoHatani/bot.log'
+                    n = min(int(media.get("lines", 50)), 200)
+                    filt = media.get("filter", "")
+                    if filt:
+                        out = subprocess.run(['grep', '-i', filt, log_path],
+                            capture_output=True, text=True).stdout
+                        lines = out.strip().splitlines()[-n:]
+                    else:
+                        with open(log_path) as f:
+                            lines = f.readlines()
+                        lines = [l.rstrip() for l in lines[-n:]]
+                    text = '\n'.join(lines) or '(лог пустой)'
+                    await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                        text=f"<pre>{text[:3800]}</pre>", parse_mode='HTML', **kw)
+                except Exception as _e:
+                    logger.warning(f"read_logs failed: {_e}")
                 return
             if mtype == "tg_send_sticker":
                 try:

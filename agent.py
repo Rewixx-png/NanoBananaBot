@@ -159,6 +159,11 @@ class _ToolBudget:
         "tg_restrict_member": 3, "tg_unpin_message": 5, "tg_create_invite_link": 3,
         "tg_set_chat_title": 2, "tg_copy_message": 10, "tg_send_sticker": 5,
         "tg_send_contact": 5, "tg_send_dice": 5, "tg_edit_message": 10,
+        "tg_send_animation": 5, "tg_send_video_note": 3, "tg_send_venue": 5,
+        "tg_promote_member": 2, "tg_get_chat_member": 10, "tg_get_admins": 5,
+        "tg_get_member_count": 10, "tg_create_forum_topic": 3, "tg_close_forum_topic": 3,
+        "tg_get_sticker_set": 5, "tg_approve_join_request": 5, "tg_export_invite_link": 3,
+        "read_bot_logs": 5,
     }
 
     def __init__(self):
@@ -1174,6 +1179,60 @@ _TOOLS = [
             "text": {"type": "string", "description": "New message text (HTML supported)"},
         }, "required": ["message_id", "text"]},
     },
+    # ── More Telegram API tools ──────────────────────────────────────
+    {"name": "tg_send_animation", "description": "Send a GIF animation to the chat.",
+     "parameters": {"type": "object", "properties": {
+         "url": {"type": "string", "description": "URL or file_id of the GIF"},
+         "caption": {"type": "string"}}, "required": ["url"]}},
+    {"name": "tg_send_video_note", "description": "Send a round video note (кружок) to the chat.",
+     "parameters": {"type": "object", "properties": {
+         "file_id": {"type": "string", "description": "file_id of an existing video note"}},
+      "required": ["file_id"]}},
+    {"name": "tg_send_venue", "description": "Send a venue (location with title and address).",
+     "parameters": {"type": "object", "properties": {
+         "latitude": {"type": "number"}, "longitude": {"type": "number"},
+         "title": {"type": "string"}, "address": {"type": "string"},
+         "foursquare_id": {"type": "string"}},
+      "required": ["latitude", "longitude", "title", "address"]}},
+    {"name": "tg_promote_member", "description": "Promote or demote a user to/from admin (requires admin).",
+     "parameters": {"type": "object", "properties": {
+         "user_id": {"type": "integer"},
+         "can_delete_messages": {"type": "boolean"}, "can_pin_messages": {"type": "boolean"},
+         "can_manage_chat": {"type": "boolean"}, "can_ban_members": {"type": "boolean"},
+         "custom_title": {"type": "string", "description": "Admin title e.g. 'Редактор'"}},
+      "required": ["user_id"]}},
+    {"name": "tg_get_chat_member", "description": "Get information about a specific chat member.",
+     "parameters": {"type": "object", "properties": {
+         "user_id": {"type": "integer"}}, "required": ["user_id"]}},
+    {"name": "tg_get_admins", "description": "Get list of all chat administrators.",
+     "parameters": {"type": "object", "properties": {}, "required": []}},
+    {"name": "tg_get_member_count", "description": "Get total number of members in the chat.",
+     "parameters": {"type": "object", "properties": {}, "required": []}},
+    {"name": "tg_create_forum_topic", "description": "Create a new forum topic in a forum group (requires admin).",
+     "parameters": {"type": "object", "properties": {
+         "name": {"type": "string"}, "icon_emoji": {"type": "string", "description": "Topic emoji icon"}},
+      "required": ["name"]}},
+    {"name": "tg_close_forum_topic", "description": "Close a forum topic (requires admin).",
+     "parameters": {"type": "object", "properties": {
+         "message_thread_id": {"type": "integer"}}, "required": ["message_thread_id"]}},
+    {"name": "tg_get_sticker_set", "description": "Get info about a sticker set by name.",
+     "parameters": {"type": "object", "properties": {
+         "name": {"type": "string", "description": "Sticker set name e.g. 'kirieshkikirieshki'"}},
+      "required": ["name"]}},
+    {"name": "tg_approve_join_request", "description": "Approve or decline a chat join request.",
+     "parameters": {"type": "object", "properties": {
+         "user_id": {"type": "integer"},
+         "approve": {"type": "boolean", "description": "True to approve, False to decline"}},
+      "required": ["user_id", "approve"]}},
+    {"name": "tg_export_invite_link", "description": "Get the primary invite link for the chat.",
+     "parameters": {"type": "object", "properties": {}, "required": []}},
+    {"name": "read_bot_logs", "description": (
+        "Read the bot's own log file to debug issues, check recent errors, "
+        "or monitor what's happening. Returns last N lines of bot.log."),
+     "parameters": {"type": "object", "properties": {
+         "lines": {"type": "integer", "description": "Number of last lines to return (default 50, max 200)"},
+         "filter": {"type": "string", "description": "Optional grep-like filter string"}},
+      "required": []}},
     # ── End Telegram API tools ───────────────────────────────────────
     {
         "name": "search_and_send_image",
@@ -1380,6 +1439,18 @@ _SYSTEM = (
     "используй НОВЫЕ поисковые запросы, которые ещё не пробовал. "
     "Не повторяй те же запросы что давали одинаковые результаты. "
     "Пробуй другие ключевые слова, платформы, форматы запросов.\n\n"
+    "TELEGRAM API ИНСТРУМЕНТЫ (используй когда нужно):\n"
+    "Отправка: tg_send_poll, tg_send_location, tg_send_venue, tg_send_sticker, "
+    "tg_send_contact, tg_send_dice, tg_send_animation, tg_send_video_note\n"
+    "Сообщения: tg_react, tg_pin_message, tg_unpin_message, tg_edit_message, "
+    "tg_delete_message, tg_forward_message, tg_copy_message\n"
+    "Кнопки: send_with_buttons\n"
+    "Чат-инфо: tg_get_chat_info, tg_get_admins, tg_get_member_count, "
+    "tg_get_chat_member, tg_get_sticker_set, tg_export_invite_link\n"
+    "Модерация (нужен админ): tg_ban_user, tg_kick_user, tg_restrict_member, "
+    "tg_promote_member, tg_create_invite_link, tg_set_chat_title, "
+    "tg_approve_join_request, tg_create_forum_topic, tg_close_forum_topic\n"
+    "Утилиты: tg_send_chat_action, read_bot_logs\n\n"
     "КУКИ СЕРВИСОВ:\n"
     "Куки YouTube/TikTok/Instagram/X/Reddit подключаются АВТОМАТИЧЕСКИ при скачивании видео.\n"
     "Использовать download_video — он сам добавляет нужные куки по домену.\n"
@@ -1597,6 +1668,58 @@ async def _execute_tool(
         await _send({"type": "tg_edit_message", "message_id": args.get("message_id"),
                      "text": args.get("text", "")})
         return "Сообщение отредактировано.", None
+    if name == "tg_send_animation":
+        await _send({"type": "tg_send_animation", "url": args.get("url",""),
+                     "caption": args.get("caption","")})
+        return "[ОТПРАВЛЕНО] GIF отправлен.", None
+    if name == "tg_send_video_note":
+        await _send({"type": "tg_send_video_note", "file_id": args.get("file_id","")})
+        return "[ОТПРАВЛЕНО] Кружок отправлен.", None
+    if name == "tg_send_venue":
+        await _send({"type": "tg_send_venue", "latitude": args.get("latitude"),
+                     "longitude": args.get("longitude"), "title": args.get("title",""),
+                     "address": args.get("address","")})
+        return "[ОТПРАВЛЕНО] Место отправлено.", None
+    if name == "tg_promote_member":
+        await _send({"type": "tg_promote", "user_id": args.get("user_id"),
+                     "can_delete_messages": args.get("can_delete_messages", False),
+                     "can_pin_messages": args.get("can_pin_messages", False),
+                     "can_manage_chat": args.get("can_manage_chat", False),
+                     "can_ban_members": args.get("can_ban_members", False),
+                     "custom_title": args.get("custom_title","")})
+        return f"Пользователь {args.get('user_id')} обновлён.", None
+    if name == "tg_get_chat_member":
+        await _send({"type": "tg_get_member", "user_id": args.get("user_id")})
+        return "Информация об участнике запрошена.", None
+    if name == "tg_get_admins":
+        await _send({"type": "tg_get_admins"})
+        return "Список администраторов запрошен.", None
+    if name == "tg_get_member_count":
+        await _send({"type": "tg_get_member_count"})
+        return "Количество участников запрошено.", None
+    if name == "tg_create_forum_topic":
+        await _send({"type": "tg_create_forum_topic", "name": args.get("name",""),
+                     "icon_emoji": args.get("icon_emoji","")})
+        return "Топик создан.", None
+    if name == "tg_close_forum_topic":
+        await _send({"type": "tg_close_forum_topic",
+                     "message_thread_id": args.get("message_thread_id")})
+        return "Топик закрыт.", None
+    if name == "tg_get_sticker_set":
+        await _send({"type": "tg_get_sticker_set", "name": args.get("name","")})
+        return "Инфо о стикер-паке запрошено.", None
+    if name == "tg_approve_join_request":
+        await _send({"type": "tg_approve_join", "user_id": args.get("user_id"),
+                     "approve": args.get("approve", True)})
+        return "Заявка обработана.", None
+    if name == "tg_export_invite_link":
+        await _send({"type": "tg_export_link"})
+        return "Ссылка запрошена.", None
+    if name == "read_bot_logs":
+        await _send({"type": "tg_read_logs",
+                     "lines": args.get("lines", 50),
+                     "filter": args.get("filter","")})
+        return "Логи запрошены.", None
     # ── End Telegram API tools ───────────────────────────────────────
 
     if name == "search_and_send_image":
