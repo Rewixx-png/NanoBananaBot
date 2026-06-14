@@ -1460,9 +1460,24 @@ async def run_agent(
         try: await status_cb(t)
         except Exception: pass
 
+    _TOOL_LABELS: dict[str, str] = {
+        "think": "Размышляю...", "web_search": "Ищу в интернете...",
+        "scrape_url": "Читаю страницу...", "fetch_json": "Запрашиваю данные...",
+        "generate_project": "Генерирую проект...", "generate_image": "Рисую...",
+        "search_and_send_image": "Ищу картинку...", "download_image": "Скачиваю картинку...",
+        "search_and_send_video": "Ищу видео...", "download_video": "Скачиваю видео...",
+        "text_to_speech": "Озвучиваю...", "run_python": "Запускаю Python...",
+        "run_shell": "Выполняю команду...", "write_file": "Записываю файл...",
+        "read_file": "Читаю файл...", "calculate": "Считаю...", "translate": "Перевожу...",
+        "qr_code": "Генерирую QR...", "create_chart": "Строю график...",
+        "create_file": "Создаю файл...", "send_workspace_file": "Отправляю файл...",
+        "send_with_buttons": "Отправляю кнопки...", "reply": "Формулирую ответ...",
+    }
+    last_action = "Формулирую план..."
+
     try:
         for step in range(MAX_STEPS):
-            await _st(f"🤖 Шаг {step + 1}/{MAX_STEPS}...")
+            await _st(f"🤖 {last_action}")
 
             if MAX_STEPS - step <= 3:
                 contents.append({"role": "user", "parts": [{"text":
@@ -1491,6 +1506,7 @@ async def run_agent(
                 result, project = await _execute_tool(
                     name, args, debounce, budget, status_cb, send_media_cb, ws
                 )
+                last_action = _TOOL_LABELS.get(name, f"{name}...")
                 if name == "generate_project" and project is not None:
                     return None, project
                 if name == "reply":
