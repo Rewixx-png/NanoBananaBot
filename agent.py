@@ -635,25 +635,36 @@ async def _tool_tts(text: str, voice: str, lang: str, send_cb: Callable) -> str:
     return "Audio sent."
 
 
-async def _tool_run_python(code: str, ws: "AgentWorkspace", send_cb: Callable = None) -> str:
+async def _tool_run_python(code: str, ws: "AgentWorkspace", status_cb: Callable = None) -> str:
     import html as _html
     stdout, stderr, rc = await ws.docker_run(["python", "-c", code])
     out = (stdout + ("\n" + stderr if stderr.strip() else "")).strip()
-    if send_cb and out:
-        safe_out = _html.escape(out[:3500])
-        await send_cb({"type": "text", "parse_mode": "HTML",
-                       "text": f"<pre><code>{safe_out}</code></pre>"})
+    if status_cb:
+        safe_code = _html.escape(code[:300])
+        dots = "…" if len(code) > 300 else ""
+        safe_out = _html.escape(out[:2500]) if out else "<i>(нет вывода)</i>"
+        await status_cb(
+            f"🐍 Выполнено:\n"
+            f"<pre><code class=\"language-python\">{safe_code}{dots}</code></pre>\n"
+            f"\n<b>Вывод:</b>\n"
+            f"<pre><code>{safe_out}</code></pre>"
+        )
     return out[:2000] or f"(exit {rc}, no output)"
 
 
-async def _tool_run_shell(command: str, ws: "AgentWorkspace", send_cb: Callable = None) -> str:
+async def _tool_run_shell(command: str, ws: "AgentWorkspace", status_cb: Callable = None) -> str:
     import html as _html
     stdout, stderr, rc = await ws.docker_run(["bash", "-c", command])
     out = (stdout + ("\n" + stderr if stderr.strip() else "")).strip()
-    if send_cb and out:
-        safe_out = _html.escape(out[:3500])
-        await send_cb({"type": "text", "parse_mode": "HTML",
-                       "text": f"<pre><code>{safe_out}</code></pre>"})
+    if status_cb:
+        safe_cmd = _html.escape(command[:300])
+        safe_out = _html.escape(out[:2500]) if out else "<i>(нет вывода)</i>"
+        await status_cb(
+            f"💻 Выполнено:\n"
+            f"<pre><code class=\"language-bash\">{safe_cmd}</code></pre>\n"
+            f"\n<b>Вывод:</b>\n"
+            f"<pre><code>{safe_out}</code></pre>"
+        )
     return out[:2000] or f"(exit {rc}, no output)"
 
 
@@ -1152,14 +1163,14 @@ async def _execute_tool(
         code = args.get("code", "")
         safe_code = _html.escape(code[:300])
         await _st(f"🐍 Запускаю Python в Docker:\n<pre><code class=\"language-python\">{safe_code}{'…' if len(code) > 300 else ''}</code></pre>")
-        return await _tool_run_python(code, ws, _send), None
+        return await _tool_run_python(code, ws, _st), None
 
     if name == "run_shell":
         import html as _html
         cmd = args.get("command", "")
         safe_cmd = _html.escape(cmd[:300])
         await _st(f"💻 Выполняю команду в Docker:\n<pre><code class=\"language-bash\">{safe_cmd}</code></pre>")
-        return await _tool_run_shell(cmd, ws, _send), None
+        return await _tool_run_shell(cmd, ws, _st), None
 
     if name == "write_file":
         path, content = args.get("path", "file.txt"), args.get("content", "")

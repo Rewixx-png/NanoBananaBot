@@ -2652,7 +2652,7 @@ async def handle_text_messages(message: types.Message):
         async def _status_cb(text: str):
             nonlocal last_status_edit, last_status_text
             now = time.monotonic()
-            if text == last_status_text or now - last_status_edit < 3:
+            if text == last_status_text or now - last_status_edit < 1.5:
                 return
             try:
                 await thinking_msg.edit_text(text, parse_mode='HTML')
