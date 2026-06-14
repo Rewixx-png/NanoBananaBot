@@ -147,7 +147,7 @@ class _ToolBudget:
         "write_file": 20, "read_file": 20,
         "fetch_json": 16, "calculate": 40,
         "qr_code": 6, "create_chart": 6,
-        "translate": 10, "create_file": 10, "send_workspace_file": 10,
+        "translate": 10, "create_file": 10, "send_workspace_file": 10, "send_with_buttons": 5,
     }
 
     def __init__(self):
@@ -979,6 +979,36 @@ _TOOLS = [
         "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
     },
     {
+        "name": "send_with_buttons",
+        "description": (
+            "Send a message with inline URL buttons. Use when links look ugly in plain text, "
+            "or to present multiple URLs as clickable buttons. "
+            "Each inner list = one row of buttons. Max 8 per row."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Message text (HTML formatting supported)"},
+                "buttons": {
+                    "type": "array",
+                    "description": "Rows of buttons: [[{text, url}, ...], ...]",
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string"},
+                                "url":  {"type": "string"},
+                            },
+                            "required": ["text", "url"],
+                        },
+                    },
+                },
+            },
+            "required": ["text", "buttons"],
+        },
+    },
+    {
         "name": "search_and_send_image",
         "description": (
             "Autonomously search for an image, evaluate relevance with AI vision, "
@@ -1165,6 +1195,7 @@ _SYSTEM = (
     "• Нарисовать → generate_image(prompt на английском)\n"
     "• Написать код/программу/сайт с нуля → generate_project(подробное ТЗ)\n"
     "• Скачать/найти ГОТОВЫЙ проект с GitHub/интернета → run_shell(git clone ... && zip ...) потом send_workspace_file(path='repo.zip')\n"
+    "• Отправить ссылки красиво → send_with_buttons(text='...', buttons=[[{text:'YouTube',url:'...'},{text:'Reddit',url:'...'}]])\n"
     "• Поиск инфы → web_search, потом reply\n"
     "• Найти картинку → search_and_send_image\n"
     "• Найти видео → search_and_send_video(creator='...' если указан автор)\n"
@@ -1303,6 +1334,12 @@ async def _execute_tool(
 
     if name == "reply":
         return args.get("text", "Done."), None
+
+    if name == "send_with_buttons":
+        text = args.get("text", "")
+        rows = args.get("buttons", [])
+        await _send({"type": "inline_buttons", "text": text, "buttons": rows})
+        return "[ОТПРАВЛЕНО] Сообщение с кнопками отправлено.", None
 
     if name == "search_and_send_image":
         return await _tool_search_image(
