@@ -3090,6 +3090,19 @@ async def handle_text_messages(message: types.Message):
                 except Exception as _e:
                     logger.warning(f"tg_export_link failed: {_e}")
                 return
+            if mtype == "tg_set_chat_photo":
+                try:
+                    from aiogram.types import BufferedInputFile as _BIF
+                    photo_buf = _BIF(media.get("data", b""),
+                                     filename=media.get("filename", "photo.jpg"))
+                    await message.bot.set_chat_photo(chat_id=message.chat.id, photo=photo_buf)
+                    await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                                    text="✅ Аватарка беседы обновлена!", **kw)
+                except Exception as _e:
+                    logger.warning(f"tg_set_chat_photo failed: {_e}")
+                    await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                                    text=f"❌ Не смог сменить аватарку: {_e}", **kw)
+                return
             if mtype == "tg_read_logs":
                 try:
                     import subprocess

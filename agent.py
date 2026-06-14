@@ -159,7 +159,7 @@ class _ToolBudget:
         "tg_restrict_member": 3, "tg_unpin_message": 5, "tg_create_invite_link": 3,
         "tg_set_chat_title": 2, "tg_copy_message": 10, "tg_send_sticker": 5,
         "tg_send_contact": 5, "tg_send_dice": 5, "tg_edit_message": 10,
-        "tg_send_animation": 5, "tg_send_video_note": 3, "tg_send_venue": 5,
+        "tg_set_chat_photo": 2, "tg_send_animation": 5, "tg_send_video_note": 3, "tg_send_venue": 5,
         "tg_promote_member": 2, "tg_get_chat_member": 10, "tg_get_admins": 5,
         "tg_get_member_count": 10, "tg_create_forum_topic": 3, "tg_close_forum_topic": 3,
         "tg_get_sticker_set": 5, "tg_approve_join_request": 5, "tg_export_invite_link": 3,
@@ -1226,6 +1226,15 @@ _TOOLS = [
       "required": ["user_id", "approve"]}},
     {"name": "tg_export_invite_link", "description": "Get the primary invite link for the chat.",
      "parameters": {"type": "object", "properties": {}, "required": []}},
+    {"name": "tg_set_chat_photo",
+     "description": (
+         "Set or change the chat avatar/photo. "
+         "Pass the workspace path of the image file the user attached. "
+         "Requires admin rights. Use when user says 'поставь на аву', 'смени аватарку' etc."
+     ),
+     "parameters": {"type": "object", "properties": {
+         "path": {"type": "string", "description": "Path in workspace e.g. photo.jpg"}},
+      "required": ["path"]}},
     {"name": "read_bot_logs", "description": (
         "Read the bot's own log file to debug issues, check recent errors, "
         "or monitor what's happening. Returns last N lines of bot.log."),
@@ -1715,6 +1724,16 @@ async def _execute_tool(
     if name == "tg_export_invite_link":
         await _send({"type": "tg_export_link"})
         return "Ссылка запрошена.", None
+    if name == "tg_set_chat_photo":
+        path = args.get("path", "")
+        try:
+            full = ws._safe_path(path)
+            with open(full, "rb") as f:
+                data = f.read()
+        except Exception as e:
+            return f"Не смог прочитать файл {path}: {e}", None
+        await _send({"type": "tg_set_chat_photo", "data": data, "filename": path})
+        return "[ОТПРАВЛЕНО] Аватарка чата установлена.", None
     if name == "read_bot_logs":
         await _send({"type": "tg_read_logs",
                      "lines": args.get("lines", 50),
