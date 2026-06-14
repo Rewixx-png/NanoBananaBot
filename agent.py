@@ -408,13 +408,30 @@ async def _tool_search_image(
 
 # ── Other tool implementations ───────────────────────────────────
 
-async def _tool_generate_image(prompt: str, send_cb: Callable) -> str:
-    img_bytes, err = await generate_image_with_gemini(prompt)
-    if err or not img_bytes:
+async def _tool_generate_image(prompt: str, send_cb: Callable, provider: str = "gemini") -> str:
+    """Generate image. Tries requested provider, falls back to Gemini with notification."""
+    from ai_services import generate_image_with_gpt
+    img_bytes: bytes | None = None
+    used_provider = "Gemini"
+    note = ""
+
+    if provider.lower() in ("openai", "gpt", "gpt4", "dalle", "dall-e"):
+        img_bytes, err = await generate_image_with_gpt(prompt)
+        if img_bytes:
+            used_provider = "OpenAI"
+        else:
+            # GPT failed — fall back to Gemini and tell the user
+            note = f"\n⚠️ OpenAI недоступен ({(err or '').split(':')[0].strip()[:80]}), сгенерировал через Gemini."
+            img_bytes, err = await generate_image_with_gemini(prompt)
+    else:
+        img_bytes, err = await generate_image_with_gemini(prompt)
+
+    if not img_bytes:
         return f"Image generation failed: {err or 'no data'}"
-    await send_cb({"type": "photo", "data": img_bytes,
-                   "caption": f"🎨 {prompt[:900]}", "filename": "image.jpg"})
-    return "Image generated and sent."
+
+    caption = f"🎨 {prompt[:900]}{note}"
+    await send_cb({"type": "photo", "data": img_bytes, "caption": caption[:1024], "filename": "image.jpg"})
+    return f"[ОТПРАВЛЕНО] Картинка через {used_provider}.{note}"
 
 
 async def _tool_download_image(url: str, caption: str, send_cb: Callable) -> str:
@@ -825,8 +842,16 @@ _TOOLS = [
     },
     {
         "name": "generate_image",
-        "description": "Generate an AI image from a text prompt and send to chat.",
-        "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "Detailed image description in English"}}, "required": ["prompt"]},
+        "description": "Generate an AI image from a text prompt and send to chat. "
+                       "If user specified a provider (openai/gpt/gemini), pass it.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Detailed image description in English"},
+                "provider": {"type": "string", "description": "Provider hint: 'openai', 'gpt', 'gemini'. Default: gemini"},
+            },
+            "required": ["prompt"],
+        },
     },
     {
         "name": "download_image",
@@ -1099,7 +1124,7 @@ async def _execute_tool(
 
     if name == "generate_image":
         await _st("🎨 Генерирую картинку...")
-        return await _tool_generate_image(args.get("prompt", ""), _send), None
+        return await _tool_generate_image(args.get("prompt", ""), _send, args.get("provider", "gemini")), None
 
     if name == "download_image":
         await _st("⬇️ Скачиваю картинку...")
