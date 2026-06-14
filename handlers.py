@@ -21,7 +21,7 @@ from database import save_history, save_pending_gen, delete_pending_gen, add_use
 from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned, make_safe_caption
 from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, generate_video_with_gemini, generate_text_with_gemini, classify_code_intent_with_gemini, classify_draw_intent_with_gemini, generate_image_via_code, upscale_image, generate_image_prompt, generate_code_with_gemini, generate_project_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate, fetch_gemini_tts_models, generate_tts_with_gemini, fetch_replicate_image_models, generate_bull_roast, analyze_photo_with_gemini, analyze_voice_with_gemini
-from agent import run_agent
+from agent import run_agent, classify_agent_intent
 from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID, DAILY_GEN_LIMIT, PAYMENT_USERNAME, CHAT_ID, GEMINI_IMAGE_TIMEOUT
 import logging
 logger = logging.getLogger(__name__)
@@ -1649,6 +1649,98 @@ async def refresh_models():
             TTS_MODELS[f'tts{i}'] = (label, model_id)
     logger.info(f"Models refreshed: Gemini={len(PROVIDER_MODELS['gemini'])} GPT={len(PROVIDER_MODELS['gpt'])} Veo={len(VEO_MODELS)} TTS={len(TTS_MODELS)}")
 
+async def _media_to_agent(
+    message: types.Message,
+    file_bytes: bytes,
+    filename: str,
+    caption: str,
+    reply_kwargs: dict,
+) -> bool:
+    """Try to handle media+instruction via agent. Returns True if agent handled it."""
+    if not caption or not await classify_agent_intent(caption):
+        return False
+    username = message.from_user.first_name or message.from_user.username or 'Аноним'
+    is_owner_user = message.from_user.id == OWNER_USER_ID
+    thinking_msg = await message.reply('⏳ Думаю...', **reply_kwargs)
+    last_status_edit = 0.0
+    last_status_text = ''
+
+    async def _status_cb(text: str):
+        nonlocal last_status_edit, last_status_text
+        now = time.monotonic()
+        if text == last_status_text or now - last_status_edit < 1.5:
+            return
+        try:
+            await thinking_msg.edit_text(text, parse_mode='HTML')
+            last_status_edit = time.monotonic()
+            last_status_text = text
+        except TelegramRetryAfter as e:
+            last_status_edit = time.monotonic() + float(getattr(e, 'retry_after', 3) or 3)
+        except Exception:
+            pass
+
+    async def _send_cb(media: dict):
+        mtype = media.get('type', 'document')
+        kw = {'reply_to_message_id': message.message_id, **reply_kwargs}
+        if mtype == 'text':
+            await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                            text=(media.get('text') or '')[:4000],
+                            parse_mode=media.get('parse_mode'), **kw)
+        elif mtype == 'inline_buttons':
+            import bleach as _bl
+            _TAGS = ['b','strong','i','em','u','ins','s','code','pre','blockquote','tg-spoiler']
+            txt = _bl.clean((media.get('text') or '')[:4000], tags=_TAGS,
+                            attributes={'code': ['class'], 'blockquote': ['expandable']}, strip=True)
+            rows = media.get('buttons', [])
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=b.get('text','')[:64], url=b.get('url',''))
+                 for b in row if b.get('url')] for row in rows if row])
+            await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                            text=txt, reply_markup=kb, parse_mode='HTML', **kw)
+        elif mtype == 'photo':
+            buf = BufferedInputFile(media.get('data', b''), filename=media.get('filename', 'img.jpg'))
+            await safe_send(message.bot.send_photo, chat_id=message.chat.id, photo=buf,
+                            caption=(media.get('caption') or '')[:1024], **kw)
+        else:
+            buf = BufferedInputFile(media.get('data', b''), filename=media.get('filename', 'file'))
+            await safe_send(message.bot.send_document, chat_id=message.chat.id, document=buf,
+                            caption=(media.get('caption') or '')[:1024], **kw)
+
+    prompt = (f'[Пользователь прикрепил файл: {filename}. '
+              f'Файл уже сохранён в workspace как /workspace/{filename}]\n{caption}')
+    try:
+        (agent_text, agent_project) = await asyncio.wait_for(
+            run_agent(prompt, message.chat.id, username, _status_cb, _send_cb,
+                      is_owner=is_owner_user, initial_files={filename: file_bytes}),
+            timeout=300,
+        )
+    except asyncio.TimeoutError:
+        agent_text, agent_project = 'Завис по таймауту.', None
+    except Exception as _e:
+        logger.exception(f'Media agent error: {_e}')
+        agent_text, agent_project = 'Агент упал. Попробуй ещё раз.', None
+    try:
+        await thinking_msg.delete()
+    except Exception:
+        pass
+    if agent_project:
+        await _send_generated_project(message, agent_project, reply_kwargs)
+    elif agent_text:
+        import bleach as _bl2
+        _TAGS2 = ['b','strong','i','em','u','ins','s','code','pre','blockquote','tg-spoiler']
+        safe_html = _bl2.clean(agent_text, tags=_TAGS2,
+                               attributes={'code': ['class']}, strip=True)
+        try:
+            await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
+        except Exception:
+            await safe_send(message.reply, _clean_plain_reply(agent_text), **reply_kwargs)
+    asyncio.create_task(add_user_stat(message.from_user.id, username,
+                                      message.from_user.first_name or 'Аноним', 'text'))
+    asyncio.create_task(log_prompt(message.from_user.id, username,
+                                   message.from_user.first_name or 'Аноним', 'text', caption))
+    return True
+
+
 @router.message(F.photo & ~F.caption.startswith('/'))
 async def handle_album_photo(message: types.Message):
     if not message.media_group_id:
@@ -1667,13 +1759,16 @@ async def handle_album_photo(message: types.Message):
         prompt = message.caption or ''
         if bot_user.username:
             prompt = prompt.replace(f'@{bot_user.username}', '').strip()
-        if not prompt:
-            prompt = 'Что на этом фото?'
-        wait_msg = await message.reply('⏳ Смотрю на твою хуйню...', **reply_kwargs)
         photo = message.photo[-1]
         file_info = await message.bot.get_file(photo.file_id)
         downloaded = await message.bot.download_file(file_info.file_path)
         image_bytes = downloaded.read()
+        # Route to agent if caption is an agent task
+        if await _media_to_agent(message, image_bytes, 'photo.jpg', prompt, reply_kwargs):
+            return
+        if not prompt:
+            prompt = 'Что на этом фото?'
+        wait_msg = await message.reply('⏳ Смотрю на твою хуйню...', **reply_kwargs)
         await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
         response = await analyze_photo_with_gemini(image_bytes, prompt)
         await wait_msg.delete()
@@ -2293,12 +2388,15 @@ async def handle_voice_audio(message: types.Message):
         return
     media = message.voice or message.audio
     mime_type = 'audio/ogg' if message.voice else (media.mime_type or 'audio/mpeg')
-    if not prompt:
-        prompt = 'Что сказано в этом голосовом? Транскрибируй и ответь по существу.'
-    wait_msg = await message.reply('⏳ Слушаю твою хуйню...', **reply_kwargs)
     file_info = await message.bot.get_file(media.file_id)
     downloaded = await message.bot.download_file(file_info.file_path)
     audio_bytes = downloaded.read()
+    ext = 'ogg' if message.voice else 'mp3'
+    if prompt and await _media_to_agent(message, audio_bytes, f'audio.{ext}', prompt, reply_kwargs):
+        return
+    if not prompt:
+        prompt = 'Что сказано в этом голосовом? Транскрибируй и ответь по существу.'
+    wait_msg = await message.reply('⏳ Слушаю твою хуйню...', **reply_kwargs)
     await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
     response = await analyze_voice_with_gemini(audio_bytes, mime_type, prompt)
     await wait_msg.delete()
@@ -2329,6 +2427,15 @@ async def handle_video(message: types.Message):
     prompt = message.caption or ''
     if bot_user.username:
         prompt = prompt.replace(f'@{bot_user.username}', '').strip()
+    # Route to agent if caption is an agent task
+    if prompt:
+        file_info_pre = await message.bot.get_file(vid.file_id)
+        if vid.file_size and vid.file_size < 20 * 1024 * 1024:  # only preload <20MB
+            buf_pre = await message.bot.download_file(file_info_pre.file_path)
+            vid_bytes = buf_pre.read()
+            ext = 'mp4'
+            if await _media_to_agent(message, vid_bytes, f'video.{ext}', prompt, reply_kwargs):
+                return
     if not prompt:
         prompt = 'Внимательно посмотри это видео и скажи, что здесь происходит.'
     wait_msg = await message.reply('⏳ Изучаю твое всратое видео кадр за кадром (24 FPS)...')
