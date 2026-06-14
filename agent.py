@@ -203,27 +203,57 @@ async def _fc_search(query: str) -> str:
 
 
 async def _fc_scrape(url: str) -> str:
+    """Scrape page content. Primary: Jina Reader. Fallback: Trafilatura."""
+    # Primary: Jina Reader (free, no key, handles JS-rendered pages)
+    jina_url = f"https://r.jina.ai/{url}"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                jina_url,
+                headers={"Accept": "text/plain", "X-Return-Format": "markdown",
+                         "User-Agent": "Mozilla/5.0"},
+                timeout=aiohttp.ClientTimeout(total=_SCRAPE_TIMEOUT),
+            ) as resp:
+                if resp.status == 200:
+                    text = (await resp.text()).strip()
+                    if len(text) > 200:
+                        return text[:8000]
+    except Exception as e:
+        logger.warning(f"Jina Reader scrape {url!r}: {e}")
+
+    # Fallback: Trafilatura (local, no network dependency)
+    try:
+        import trafilatura
+        downloaded = await asyncio.get_event_loop().run_in_executor(
+            None, trafilatura.fetch_url, url
+        )
+        if downloaded:
+            text = trafilatura.extract(downloaded, output_format="markdown",
+                                       include_links=False, no_fallback=False)
+            if text and len(text) > 100:
+                return text[:8000]
+    except Exception as e:
+        logger.warning(f"Trafilatura scrape {url!r}: {e}")
+
+    # Last resort: Firecrawl if keys available
     keys = load_firecrawl_keys()
-    if not keys:
-        return "Firecrawl keys unavailable."
-    payload = {"url": url, "formats": ["markdown"], "onlyMainContent": True,
-               "removeBase64Images": True, "maxAge": 3_600_000}
     for key in keys:
-        hdrs = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.post(
                     "https://api.firecrawl.dev/v2/scrape",
-                    json=payload, headers=hdrs,
+                    json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
                     timeout=aiohttp.ClientTimeout(total=_SCRAPE_TIMEOUT),
                 ) as resp:
                     if resp.status == 200:
                         d = (await resp.json()).get("data") or {}
-                        return (d.get("markdown") or d.get("content") or "Page empty.")[:8000]
+                        return (d.get("markdown") or d.get("content") or "")[:8000]
                     if resp.status in (401, 402):
                         remove_key(key, resp.status)
         except Exception as e:
-            logger.warning(f"scrape {url!r}: {e}")
+            logger.warning(f"Firecrawl scrape {url!r}: {e}")
+
     return "Could not read page."
 
 
