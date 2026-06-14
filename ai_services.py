@@ -1517,7 +1517,20 @@ async def generate_image_with_gpt(prompt: str, image_bytes: Optional[bytes]=None
                     if 'safety' in lowered_err or 'rejected by' in lowered_err or 'censorship' in lowered_err or 'moderation' in lowered_err:
                         logging.warning(f'Запрос заблокирован цензурой OpenAI на ключе {api_key[:12]}. Прерываю цикл.')
                         return (None, error)
-                    elif 'billing' in lowered_err or 'quota' in lowered_err or 'limit' in lowered_err or '(401)' in error or 'unauthorized' in lowered_err or 'hard limit' in lowered_err or 'access to model' in lowered_err:
+                    elif 'access to model' in lowered_err and model != 'gpt-image-1.5':
+                        # Key exists but lacks access to requested model — try gpt-image-1.5 fallback
+                        logging.info(f'Ключ {api_key[:12]} нет доступа к {model}, пробую gpt-image-1.5')
+                        fallback_payload = {'model': 'gpt-image-1.5', 'prompt': prompt_text}
+                        try:
+                            async with session.post('https://api.openai.com/v1/images/generations', json=fallback_payload, headers={**headers, 'Content-Type': 'application/json'}, timeout=request_timeout) as fb_resp:
+                                (fb_result, fb_error) = await parse_openai_image_response(fb_resp)
+                                if fb_result:
+                                    logging.info(f'gpt-image-1.5 сработал на ключе {api_key[:12]}')
+                                    return (fb_result, None)
+                                last_error = fb_error
+                        except Exception:
+                            pass
+                    elif 'billing' in lowered_err or 'quota' in lowered_err or 'limit' in lowered_err or '(401)' in error or 'unauthorized' in lowered_err or 'hard limit' in lowered_err or 'not active' in lowered_err:
                         logging.warning(f'Удаляю нерабочий OpenAI ключ {api_key[:12]}... Ошибка: {error}')
                         remove_key(api_key)
                     else:
