@@ -1857,7 +1857,30 @@ async def _execute_tool(
             except Exception:
                 return False
             return True
-        if not _ssrf_safe(url):
+        def _ssrf_resolve(u: str):
+            from urllib.parse import urlparse as _up2
+            p2 = _up2(u)
+            if p2.scheme not in ("http", "https") or not p2.hostname:
+                return None
+            port = p2.port or (443 if p2.scheme == "https" else 80)
+            _BLK2 = [_ipa.ip_network(n) for n in (
+                "127.0.0.0/8", "::1/128", "0.0.0.0/8",
+                "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                "169.254.0.0/16", "fd00::/8", "fc00::/8",
+                "fe80::/10", "100.64.0.0/10",
+            )]
+            try:
+                safe_ip = None
+                for *_, sa in _sock.getaddrinfo(p2.hostname, None):
+                    ip = _ipa.ip_address(sa[0])
+                    if any(ip in net for net in _BLK2 if ip.version == net.version):
+                        return None
+                    safe_ip = sa[0]
+                return (p2.hostname, port, safe_ip)
+            except Exception:
+                return None
+        resolved = _ssrf_resolve(url)
+        if not resolved:
             return "Запрос к этому адресу запрещён (SSRF защита).", None
         cookie_path_map = {
             "youtube.com": "/root/cookies/youtube.txt",
@@ -1872,7 +1895,9 @@ async def _execute_tool(
         host = (urlparse(url).hostname or "").lower()
         cookie_file = next((v for k, v in cookie_path_map.items() if k in host), None)
         import subprocess
+        _host, _port, _safe_ip = resolved
         cmd = ["curl", "-s", "--max-time", "15", "--max-redirs", "0",
+               "--resolve", f"{_host}:{_port}:{_safe_ip}",
                "--user-agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"]
         if cookie_file and os.path.exists(cookie_file):
             cmd += ["-b", cookie_file]
