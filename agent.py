@@ -1189,19 +1189,32 @@ _SYSTEM = (
     "- [ОТПРАВЛЕНО] → сообщи что именно отправил\n"
     "- Не знаешь что в видео → scrape_url на ссылку, не гадай\n"
     "- Не повторяй одинаковые вызовы\n"
-    "- Думай (think) перед сложными многошаговыми задачами"
+    "- Думай (think) перед сложными многошаговыми задачами\n\n"
+    "ФОРМАТИРОВАНИЕ ОТВЕТОВ (reply tool):\n"
+    "Используй Telegram HTML-теги для красивых ответов:\n"
+    "• <b>жирный</b>  • <i>курсив</i>  • <u>подчёркнутый</u>  • <s>зачёркнутый</s>\n"
+    "• <code>инлайн-код</code>\n"
+    "• <pre><code class=\"language-python\">блок кода</code></pre>\n"
+    "• <blockquote>цитата</blockquote>\n"
+    "• <tg-spoiler>спойлер</tg-spoiler>\n"
+    "• <a href=\"url\">ссылка</a>\n"
+    "Экранируй в тексте: &lt; → &amp;lt;  &gt; → &amp;gt;  &amp; → &amp;amp;\n"
+    "НЕ используй Markdown (* _ ` #) — только HTML теги."
 )
 
 
 def _build_system(is_owner: bool = False) -> str:
-    """Build system prompt dynamically — owner gets extended shell access."""
+    """Build system prompt dynamically with current date + owner flag."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    date_line = f"\n\n[ТЕКУЩАЯ ДАТА И ВРЕМЯ: {now}]"
     extra = ""
     if is_owner:
         extra = (
             "\n\n[OWNER MODE]\n"
             "Это владелец бота. Расширенный доступ к инструментам разрешён."
         )
-    return _SYSTEM + extra
+    return _SYSTEM + date_line + extra
 
 
 async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> dict:

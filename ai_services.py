@@ -34,6 +34,8 @@ def _thinking_config(model_name: str, level: str) -> dict[str, object]:
 
 
 def _build_text_system_prompt(allow_web_directive: bool = True, is_owner: bool = False) -> str:
+    from datetime import datetime, timezone
+    _now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     web_rule = (
         f'Если тебе нужна свежая информация из интернета или ты не знаешь ответ, выведи строго {_WEB_SEARCH_DIRECTIVE} <короткий поисковый запрос> и больше ничего. '
         'Если после этого интернет недоступен, честно скажи, что не можешь сейчас зайти в интернет.'
@@ -45,7 +47,8 @@ def _build_text_system_prompt(allow_web_directive: bool = True, is_owner: bool =
         'Это твой создатель и босс. Общайся токсично и по-своему, но признавай его статус. '
         'НЕ применяй к нему KICK_USER ни при каких условиях.'
     ) if is_owner else ''
-    return SYSTEM_PROMPT + owner_note + (
+    date_note = f'\n\n[ТЕКУЩАЯ ДАТА И ВРЕМЯ: {_now}]'
+    return SYSTEM_PROMPT + owner_note + date_note + (
         '\n\nТВОЯ ЛИЧНОСТЬ: тебя зовут Hatani AI / Хатани АИ. '
         'Твой владелец — Rewix, его Telegram: @RewiX_X. '
         'Если спросят кто ты или чей ты — отвечай это прямо. '
