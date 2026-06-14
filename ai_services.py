@@ -454,36 +454,44 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
     async def _run_query(search_query: str) -> Tuple[str, bool]:
         raw_results = []
         api_available = False
-        query_keys = load_firecrawl_keys()
-        if not query_keys:
-            return ('', False)
-        for key in query_keys:
-            headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
-            payload = {'query': search_query[:500], 'limit': 8, 'sources': [{'type': 'web'}]}
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post('https://api.firecrawl.dev/v2/search', json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                        if resp.status == 200:
-                            api_available = True
-                            data = await resp.json()
-                            raw_results = data.get('data', [])
-                            if isinstance(raw_results, dict):
-                                raw_results = raw_results.get('results', []) or raw_results.get('web', []) or []
-                            break
-                        if resp.status in _FIRECRAWL_DEAD_KEY_STATUSES:
-                            remove_key(key, resp.status)
-                            continue
-                        if resp.status in _FIRECRAWL_TRANSIENT_STATUSES:
-                            api_available = True
-                            retry_after = resp.headers.get('Retry-After')
-                            logging.warning(f'Firecrawl search transient HTTP {resp.status}; key kept alive; retry_after={retry_after or "n/a"}')
-                            continue
-                        api_available = True
-                        body = await resp.text()
-                        logging.warning(f'Firecrawl search request HTTP {resp.status}: {body[:300]}')
-                        break
-            except Exception as e:
-                logging.warning(f'Firecrawl search error: {type(e).__name__}: {e}')
+
+        # Primary: DuckDuckGo (free, no key)
+        try:
+            from ddgs import DDGS
+            ddg_results = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: list(DDGS().text(search_query[:500], max_results=8))
+            )
+            if ddg_results:
+                api_available = True
+                raw_results = [
+                    {'url': r.get('href', ''), 'title': r.get('title', ''),
+                     'description': r.get('body', '')}
+                    for r in ddg_results if r.get('href')
+                ]
+        except Exception as e:
+            logging.warning(f'DDG search error: {type(e).__name__}: {e}')
+
+        # Fallback: Firecrawl if keys available and DDG failed
+        if not raw_results:
+            query_keys = load_firecrawl_keys()
+            for key in query_keys:
+                headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
+                payload = {'query': search_query[:500], 'limit': 8, 'sources': [{'type': 'web'}]}
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post('https://api.firecrawl.dev/v2/search', json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                            if resp.status == 200:
+                                api_available = True
+                                data = await resp.json()
+                                raw_results = data.get('data', [])
+                                if isinstance(raw_results, dict):
+                                    raw_results = raw_results.get('results', []) or raw_results.get('web', []) or []
+                                break
+                            if resp.status in _FIRECRAWL_DEAD_KEY_STATUSES:
+                                remove_key(key, resp.status)
+                                continue
+                except Exception as e:
+                    logging.warning(f'Firecrawl search error: {type(e).__name__}: {e}')
 
         if not raw_results:
             return ('', api_available)
