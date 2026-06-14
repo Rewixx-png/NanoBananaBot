@@ -159,6 +159,7 @@ class _ToolBudget:
         "tg_restrict_member": 3, "tg_unpin_message": 5, "tg_create_invite_link": 3,
         "tg_set_chat_title": 2, "tg_copy_message": 10, "tg_send_sticker": 5,
         "tg_send_contact": 5, "tg_send_dice": 5, "tg_edit_message": 10,
+        "fetch_tiktok_profile": 5, "fetch_with_cookies": 8,
         "tg_set_chat_photo": 2, "tg_send_animation": 5, "tg_send_video_note": 3, "tg_send_venue": 5,
         "tg_promote_member": 2, "tg_get_chat_member": 10, "tg_get_admins": 5,
         "tg_get_member_count": 10, "tg_create_forum_topic": 3, "tg_close_forum_topic": 3,
@@ -1249,6 +1250,26 @@ _TOOLS = [
      "parameters": {"type": "object", "properties": {
          "path": {"type": "string", "description": "Path in workspace e.g. photo.jpg"}},
       "required": ["path"]}},
+    {"name": "fetch_tiktok_profile",
+     "description": (
+         "Fetch REAL TikTok profile info using authenticated cookies on the server. "
+         "Returns actual follower count, likes, bio, videos. "
+         "Use this instead of web_search when user asks for TikTok profile data. "
+         "Cookies are used automatically — no need to specify them."
+     ),
+     "parameters": {"type": "object", "properties": {
+         "username": {"type": "string", "description": "TikTok username without @ e.g. 'verb.aep'"}},
+      "required": ["username"]}},
+    {"name": "fetch_with_cookies",
+     "description": (
+         "Fetch a URL using the server's authenticated cookies for that service. "
+         "Supports: youtube.com, tiktok.com, instagram.com, x.com/twitter.com, reddit.com. "
+         "Returns the page content/API response. Use for getting real authenticated data."
+     ),
+     "parameters": {"type": "object", "properties": {
+         "url": {"type": "string", "description": "Full URL to fetch"},
+         "output_format": {"type": "string", "enum": ["text", "json"], "description": "Expected output format"}},
+      "required": ["url"]}},
     {"name": "read_bot_logs", "description": (
         "Read the bot's own log file to debug issues, check recent errors, "
         "or monitor what's happening. Returns last N lines of bot.log."),
@@ -1770,6 +1791,84 @@ async def _execute_tool(
             return f"Не смог прочитать файл {path}: {e}", None
         await _send({"type": "tg_set_chat_photo", "data": data, "filename": path})
         return "[ОТПРАВЛЕНО] Аватарка чата установлена.", None
+    if name == "fetch_tiktok_profile":
+        username = args.get("username", "").lstrip("@").strip()
+        if not username:
+            return "Укажи username.", None
+        import subprocess, json as _json
+        cookie_path = "/root/cookies/tiktok.txt"
+        try:
+            # Use yt-dlp to get profile playlist metadata
+            result = subprocess.run(
+                ["yt-dlp", "--cookies", cookie_path, "--dump-json", "--flat-playlist",
+                 "--playlist-end", "1", f"https://www.tiktok.com/@{username}"],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                first = _json.loads(result.stdout.strip().splitlines()[0])
+                channel = first.get("channel") or first.get("uploader", username)
+                count = first.get("channel_follower_count") or "?"
+                return (f"TikTok @{username}:\n"
+                        f"Имя: {channel}\n"
+                        f"Подписчиков: {count}\n"
+                        f"Видео: {first.get('playlist_count','?')}\n"
+                        f"Bio: {first.get('description','—')}"), None
+            # Fallback: scrape via curl with cookies
+            curl = subprocess.run(
+                ["curl", "-s", "-b", cookie_path, "--user-agent",
+                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+                 f"https://www.tiktok.com/api/user/detail/?uniqueId={username}&aid=1988"],
+                capture_output=True, text=True, timeout=15
+            )
+            if curl.returncode == 0:
+                data = _json.loads(curl.stdout)
+                user = data.get("userInfo", {}).get("user", {})
+                stats = data.get("userInfo", {}).get("stats", {})
+                return (f"TikTok @{username} (через API):\n"
+                        f"Имя: {user.get('nickname','?')}\n"
+                        f"Подписчиков: {stats.get('followerCount','?')}\n"
+                        f"Лайки: {stats.get('heartCount','?')}\n"
+                        f"Видео: {stats.get('videoCount','?')}\n"
+                        f"Bio: {user.get('signature','—')}"), None
+            return f"Не смог получить данные профиля @{username}: {result.stderr[:200]}", None
+        except Exception as e:
+            return f"Ошибка fetch_tiktok_profile: {e}", None
+
+    if name == "fetch_with_cookies":
+        url = args.get("url", "")
+        if not url:
+            return "Укажи URL.", None
+        cookie_path_map = {
+            "youtube.com": "/root/cookies/youtube.txt",
+            "youtu.be": "/root/cookies/youtube.txt",
+            "tiktok.com": "/root/cookies/tiktok.txt",
+            "instagram.com": "/root/cookies/instagram.txt",
+            "x.com": "/root/cookies/x.txt",
+            "twitter.com": "/root/cookies/x.txt",
+            "reddit.com": "/root/cookies/reddit.txt",
+        }
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+        cookie_file = next((v for k, v in cookie_path_map.items() if k in host), None)
+        import subprocess
+        cmd = ["curl", "-s", "--max-time", "15", "--user-agent",
+               "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"]
+        if cookie_file and os.path.exists(cookie_file):
+            cmd += ["-b", cookie_file]
+        cmd.append(url)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            out = result.stdout[:6000]
+            if args.get("output_format") == "json":
+                import json as _j
+                try:
+                    _j.loads(out)  # validate
+                except Exception:
+                    pass
+            return out or "Пустой ответ.", None
+        except Exception as e:
+            return f"fetch_with_cookies error: {e}", None
+
     if name == "read_bot_logs":
         await _send({"type": "tg_read_logs",
                      "lines": args.get("lines", 50),
