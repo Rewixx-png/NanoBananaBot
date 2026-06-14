@@ -1726,7 +1726,14 @@ async def _media_to_agent(
             await safe_send(message.bot.send_document, chat_id=message.chat.id, document=buf,
                             caption=(media.get('caption') or '')[:1024], **kw)
 
-    prompt = (f'[Пользователь прикрепил файл: {filename}. '
+    from state import chat_context_buffer
+    ctx_lines = chat_context_buffer.get(message.chat.id, [])
+    ctx_block = ""
+    if ctx_lines:
+        ctx_block = ("[Контекст последних сообщений чата:]\n" +
+                     "\n".join(ctx_lines[-20:]) + "\n[/Контекст]\n\n")
+    prompt = (f'{ctx_block}'
+              f'[Пользователь прикрепил файл: {filename}. '
               f'Файл уже сохранён в workspace как /workspace/{filename}]\n{caption}')
     try:
         (agent_text, agent_project) = await asyncio.wait_for(
