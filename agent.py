@@ -223,10 +223,24 @@ async def _fc_scrape(url: str) -> str:
 
     # Fallback: Trafilatura (local, no network dependency)
     try:
-        import trafilatura
-        downloaded = await asyncio.get_event_loop().run_in_executor(
-            None, trafilatura.fetch_url, url
-        )
+        import socket, ipaddress, trafilatura
+        from urllib.parse import urlparse as _up
+        _p = _up(url)
+        _safe = _p.scheme in ("http", "https")
+        if _safe:
+            try:
+                for _info in socket.getaddrinfo(_p.hostname, None):
+                    _ip = ipaddress.ip_address(_info[4][0])
+                    if _ip.is_loopback or _ip.is_private or _ip.is_link_local:
+                        _safe = False; break
+            except Exception:
+                _safe = False
+        if not _safe:
+            logger.warning(f"Trafilatura SSRF blocked: {url!r}")
+        else:
+            downloaded = await asyncio.get_event_loop().run_in_executor(
+                None, trafilatura.fetch_url, url
+            )
         if downloaded:
             text = trafilatura.extract(downloaded, output_format="markdown",
                                        include_links=False, no_fallback=False)
