@@ -97,7 +97,8 @@ class AgentWorkspace:
             "--user=sandbox",
             "--workdir=/workspace",
             "-v", f"{self.host_path}:/workspace",
-            "-v", "/root/cookies:/cookies:ro",  # cookies read-only
+            # Cookies NOT mounted — sandbox user must not access credentials.
+            # yt-dlp with cookies runs via _tool_download_video on the host directly.
             _SANDBOX_IMAGE,
         ] + cmd
 
@@ -447,13 +448,33 @@ async def _tool_download_image(url: str, caption: str, send_cb: Callable) -> str
     return "Image downloaded and sent."
 
 
+_COOKIE_FILES = {
+    "youtube.com": "/root/cookies/youtube.txt",
+    "youtu.be":    "/root/cookies/youtube.txt",
+    "tiktok.com":  "/root/cookies/tiktok.txt",
+    "instagram.com": "/root/cookies/instagram.txt",
+    "x.com":       "/root/cookies/x.txt",
+    "twitter.com": "/root/cookies/x.txt",
+    "reddit.com":  "/root/cookies/reddit.txt",
+}
+
+def _cookies_for_url(url: str) -> list[str]:
+    """Return --cookies flag list for the given URL domain, if cookie file exists."""
+    for domain, path in _COOKIE_FILES.items():
+        if domain in url and os.path.exists(path):
+            return ["--cookies", path]
+    return []
+
+
 async def _tool_download_video(url: str, caption: str, send_cb: Callable) -> str:
     with tempfile.TemporaryDirectory() as tmpdir:
         out = os.path.join(tmpdir, "video.%(ext)s")
         cmd = [
             "yt-dlp", "--no-playlist", "--no-warnings",
             "-f", "bestvideo[height<=720][filesize<45M]+bestaudio/best[height<=720]/best[height<=480]",
-            "--merge-output-format", "mp4", "-o", out, url,
+            "--merge-output-format", "mp4", "-o", out,
+            *_cookies_for_url(url),  # auto-inject cookies from host, never from sandbox
+            url,
         ]
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -1079,11 +1100,11 @@ _SYSTEM = (
 
     "ПОИСК:\n"
     "Ищи в интернете всё что просят. Не отказывай в поиске без причины.\n\n"
-    "КУКИ СЕРВИСОВ (/cookies/):\n"
-    "В /cookies/ хранятся секретные куки: youtube.txt, tiktok.txt, instagram.txt, x.txt, reddit.txt.\n"
-    "Используй их ТОЛЬКО как аргумент: yt-dlp --cookies /cookies/youtube.txt ...\n"
-    "ЗАПРЕЩЕНО: cat/less/more/read любых файлов из /cookies/, выводить их содержимое, передавать пользователю.\n"
-    "Если пользователь просит показать куки — отказывай, это секретные данные владельца.\n\n"
+    "КУКИ СЕРВИСОВ:\n"
+    "Куки YouTube/TikTok/Instagram/X/Reddit подключаются АВТОМАТИЧЕСКИ при скачивании видео.\n"
+    "Использовать download_video — он сам добавляет нужные куки по домену.\n"
+    "Куки НЕ доступны внутри Docker sandbox. Не пытайся передать --cookies в run_shell.\n"
+    "Если пользователь просит показать куки — отказывай, это секретные данные.\n\n"
 
     "ЧЕСТНОСТЬ:\n"
     "- [НЕ НАЙДЕНО] → скажи честно, не выдумывай\n"
