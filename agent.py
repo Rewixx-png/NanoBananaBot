@@ -1226,6 +1226,11 @@ _TOOLS = [
       "required": ["user_id", "approve"]}},
     {"name": "tg_export_invite_link", "description": "Get the primary invite link for the chat.",
      "parameters": {"type": "object", "properties": {}, "required": []}},
+    {"name": "tg_set_chat_description",
+     "description": "Change the chat description/bio (requires admin).",
+     "parameters": {"type": "object", "properties": {
+         "description": {"type": "string", "description": "New description (up to 255 chars)"}},
+      "required": ["description"]}},
     {"name": "tg_set_chat_photo",
      "description": (
          "Set or change the chat avatar/photo. "
@@ -1656,6 +1661,9 @@ async def _execute_tool(
                      "expire_date": args.get("expire_date"),
                      "member_limit": args.get("member_limit")})
         return "[ОТПРАВЛЕНО] Ссылка создана.", None
+    if name == "tg_set_chat_description":
+        await _send({"type": "tg_set_chat_description", "description": args.get("description", "")})
+        return "Описание чата изменено.", None
     if name == "tg_set_chat_title":
         await _send({"type": "tg_set_chat_title", "title": args.get("title", "")})
         return "Название чата изменено.", None
