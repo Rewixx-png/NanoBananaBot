@@ -165,21 +165,38 @@ class _ToolBudget:
 # ── Firecrawl helpers ────────────────────────────────────────────
 
 async def _fc_search(query: str) -> str:
+    """Search via DuckDuckGo (primary, free, no key) then Firecrawl as fallback."""
+    # Primary: DuckDuckGo
+    try:
+        from ddgs import DDGS
+        results = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: list(DDGS().text(query[:500], max_results=8))
+        )
+        if results:
+            parts = []
+            for r in results:
+                title = r.get("title", "")
+                url   = r.get("href", "")
+                body  = r.get("body", "")[:600]
+                if url:
+                    parts.append(f"### {title}\nURL: {url}\n{body}".strip())
+            if parts:
+                return "\n\n".join(parts)
+    except Exception as e:
+        logger.warning(f"DDG search {query!r}: {e}")
+
+    # Fallback: Firecrawl if keys available
     keys = load_firecrawl_keys()
-    if not keys:
-        return "Firecrawl keys unavailable."
-    payload = {
-        "query": query[:500], "limit": 6,
-        "sources": [{"type": "web"}],
-        "scrapeOptions": {"formats": ["markdown"], "onlyMainContent": True},
-    }
     for key in keys:
         hdrs = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.post(
                     "https://api.firecrawl.dev/v2/search",
-                    json=payload, headers=hdrs,
+                    json={"query": query[:500], "limit": 6,
+                          "sources": [{"type": "web"}]},
+                    headers=hdrs,
                     timeout=aiohttp.ClientTimeout(total=_SEARCH_TIMEOUT),
                 ) as resp:
                     if resp.status == 200:
@@ -189,16 +206,16 @@ async def _fc_search(query: str) -> str:
                             results = results.get("results", []) or results.get("web", [])
                         parts = []
                         for r in results[:6]:
-                            title = r.get("title") or r.get("metadata", {}).get("title", "")
+                            title = r.get("title", "")
                             url   = r.get("url", "")
-                            body  = (r.get("markdown") or r.get("description") or "")[:800]
+                            body  = (r.get("markdown") or r.get("description") or "")[:600]
                             if url:
                                 parts.append(f"### {title}\nURL: {url}\n{body}".strip())
                         return "\n\n".join(parts) or "No results."
                     if resp.status in (401, 402):
                         remove_key(key, resp.status)
         except Exception as e:
-            logger.warning(f"web_search {query!r}: {e}")
+            logger.warning(f"Firecrawl search {query!r}: {e}")
     return "Search unavailable."
 
 
