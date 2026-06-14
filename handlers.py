@@ -2690,6 +2690,17 @@ async def handle_text_messages(message: types.Message):
                 await safe_send(message.bot.send_message, chat_id=message.chat.id, text=text_body,
                                 parse_mode=parse_mode, **kw)
                 return
+            if mtype == "inline_buttons":
+                text_body = (media.get("text") or "Выбери:")[:4000]
+                rows = media.get("buttons", [])
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=btn.get("text", "?")[:64], url=btn.get("url", ""))
+                     for btn in row if btn.get("url")]
+                    for row in rows if row
+                ])
+                await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                                text=text_body, reply_markup=keyboard, parse_mode='HTML', **kw)
+                return
             data     = media.get("data", b"")
             caption  = (media.get("caption") or "")[:1024]
             filename = media.get("filename") or "file"
