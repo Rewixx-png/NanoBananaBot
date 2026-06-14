@@ -14,11 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     # Data tools
     jq \
-    # Build tools (for packages that compile extensions)
-    build-essential \
     # Misc
     ca-certificates procps \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && for d in /etc/ImageMagick-6 /etc/ImageMagick-7; do [ -d "$d" ] && \
+       printf '<policymap>\n  <policy domain="coder" rights="none" pattern="MVG"/>\n  <policy domain="coder" rights="none" pattern="MSL"/>\n  <policy domain="coder" rights="none" pattern="EPHEMERAL"/>\n  <policy domain="coder" rights="none" pattern="URL"/>\n  <policy domain="coder" rights="none" pattern="HTTP"/>\n  <policy domain="coder" rights="none" pattern="HTTPS"/>\n  <policy domain="coder" rights="none" pattern="FTP"/>\n  <policy domain="coder" rights="none" pattern="PS"/>\n  <policy domain="coder" rights="none" pattern="EPS"/>\n  <policy domain="resource" name="disk" value="1GiB"/>\n</policymap>\n' > "$d/policy.xml"; done; true
 
 # ── Python libraries ─────────────────────────────────────────────
 RUN pip install --no-cache-dir \
