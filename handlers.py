@@ -2978,6 +2978,13 @@ async def handle_text_messages(message: types.Message):
                 except Exception as _e:
                     logger.warning(f"tg_invite_link failed: {_e}")
                 return
+            if mtype == "tg_set_chat_description":
+                try:
+                    await message.bot.set_chat_description(chat_id=message.chat.id,
+                        description=media.get("description","")[:255])
+                except Exception as _e:
+                    logger.warning(f"tg_set_chat_description failed: {_e}")
+                return
             if mtype == "tg_set_chat_title":
                 try:
                     await message.bot.set_chat_title(chat_id=message.chat.id,
