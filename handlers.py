@@ -2691,7 +2691,13 @@ async def handle_text_messages(message: types.Message):
                                 parse_mode=parse_mode, **kw)
                 return
             if mtype == "inline_buttons":
-                text_body = (media.get("text") or "Выбери:")[:4000]
+                import bleach as _bleach
+                _TG_TAGS = ['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del',
+                            'code', 'pre', 'blockquote', 'tg-spoiler', 'tg-emoji']
+                raw_text = (media.get("text") or "Выбери:")[:4000]
+                text_body = _bleach.clean(raw_text, tags=_TG_TAGS,
+                    attributes={'pre': [], 'code': ['class'], 'tg-emoji': ['emoji-id'],
+                                'blockquote': ['expandable']}, strip=True)
                 rows = media.get("buttons", [])
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=btn.get("text", "?")[:64], url=btn.get("url", ""))
