@@ -50,7 +50,8 @@ class AgentWorkspace:
 
     def __init__(self):
         self.host_path = tempfile.mkdtemp(prefix="agent_ws_")
-        os.chmod(self.host_path, 0o777)  # allow sandbox user (uid=1000) to write
+        os.chown(self.host_path, 1000, 1000)  # sandbox uid/gid
+        os.chmod(self.host_path, 0o700)
         logger.info(f"Workspace created: {self.host_path}")
 
     def cleanup(self):
