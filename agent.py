@@ -57,6 +57,11 @@ class AgentWorkspace:
     def cleanup(self):
         shutil.rmtree(self.host_path, ignore_errors=True)
 
+    def preload(self, files: dict[str, bytes]):
+        """Pre-populate workspace with files before agent starts."""
+        for name, data in files.items():
+            self.write(name, data)
+
     def _safe_path(self, rel_path: str) -> str:
         base = os.path.realpath(self.host_path)
         candidate = os.path.realpath(os.path.join(base, rel_path.lstrip("/")))
@@ -1438,12 +1443,15 @@ async def run_agent(
     status_cb: Callable[[str], Any],
     send_media_cb: Optional[Callable] = None,
     is_owner: bool = False,
+    initial_files: Optional[dict] = None,  # {filename: bytes} pre-loaded into workspace
 ) -> Tuple[Optional[str], Optional[dict]]:
     keys = load_keys()
     if not keys:
         return "Gemini keys are dead.", None
 
     ws       = AgentWorkspace()
+    if initial_files:
+        ws.preload(initial_files)
     debounce = _DebounceHook()
     budget   = _ToolBudget()
     contents: list = [{"role": "user", "parts": [{"text": f"Задача от {username}:\n{task}"}]}]
