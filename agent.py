@@ -1838,6 +1838,27 @@ async def _execute_tool(
         url = args.get("url", "")
         if not url:
             return "Укажи URL.", None
+        # SSRF guard: block private/loopback/link-local targets
+        import socket as _sock, ipaddress as _ipa
+        def _ssrf_safe(u: str) -> bool:
+            from urllib.parse import urlparse as _up
+            p = _up(u)
+            if p.scheme not in ("http", "https") or not p.hostname:
+                return False
+            _BLOCKED = [_ipa.ip_network(n) for n in (
+                "127.0.0.0/8", "::1/128", "10.0.0.0/8",
+                "172.16.0.0/12", "192.168.0.0/16",
+                "169.254.0.0/16", "fd00::/8",
+            )]
+            try:
+                for *_, sa in _sock.getaddrinfo(p.hostname, None):
+                    if any(_ipa.ip_address(sa[0]) in net for net in _BLOCKED):
+                        return False
+            except Exception:
+                return False
+            return True
+        if not _ssrf_safe(url):
+            return "Запрос к этому адресу запрещён (SSRF защита).", None
         cookie_path_map = {
             "youtube.com": "/root/cookies/youtube.txt",
             "youtu.be": "/root/cookies/youtube.txt",
@@ -1851,8 +1872,8 @@ async def _execute_tool(
         host = (urlparse(url).hostname or "").lower()
         cookie_file = next((v for k, v in cookie_path_map.items() if k in host), None)
         import subprocess
-        cmd = ["curl", "-s", "--max-time", "15", "--user-agent",
-               "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"]
+        cmd = ["curl", "-s", "--max-time", "15", "--max-redirs", "0",
+               "--user-agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"]
         if cookie_file and os.path.exists(cookie_file):
             cmd += ["-b", cookie_file]
         cmd.append(url)
