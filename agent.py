@@ -712,6 +712,19 @@ _COOKIE_MASK_RE = re.compile(
     r'(?m)^(#?HttpOnly_\S+\s+\S+\s+\S+\s+\S+\s+\d+\s+\S+\s+).+$'
 )
 
+def _snip_output(text: str, max_lines: int = 80, head: int = 40, tail: int = 30) -> str:
+    """Compress long command output — keep head+tail, skip middle. Saves tokens."""
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text
+    skipped = len(lines) - head - tail
+    return "\n".join(
+        lines[:head]
+        + [f"\n... [{skipped} строк скрыто] ...\n"]
+        + lines[-tail:]
+    )
+
+
 def _mask_cookies(text: str) -> str:
     """Mask Netscape cookie values in command output."""
     masked = _COOKIE_MASK_RE.sub(r'\1[***MASKED***]', text)
@@ -723,8 +736,7 @@ def _mask_cookies(text: str) -> str:
 async def _tool_run_python(code: str, ws: "AgentWorkspace", status_cb: Callable = None) -> str:
     import html as _html
     stdout, stderr, rc = await ws.docker_run(["python", "-c", code])
-    out = (stdout + ("\n" + stderr if stderr.strip() else "")).strip()
-    out = _mask_cookies(out)
+    out = _snip_output(_mask_cookies((stdout + ("\n" + stderr if stderr.strip() else "")).strip()))
     if status_cb:
         safe_code = _html.escape(code[:300])
         dots = "…" if len(code) > 300 else ""
@@ -741,7 +753,7 @@ async def _tool_run_python(code: str, ws: "AgentWorkspace", status_cb: Callable 
 async def _tool_run_shell(command: str, ws: "AgentWorkspace", status_cb: Callable = None) -> str:
     import html as _html
     stdout, stderr, rc = await ws.docker_run(["bash", "-c", command])
-    out = _mask_cookies((stdout + ("\n" + stderr if stderr.strip() else "")).strip())
+    out = _snip_output(_mask_cookies((stdout + ("\n" + stderr if stderr.strip() else "")).strip()))
     if status_cb:
         safe_cmd = _html.escape(command[:300])
         safe_out = _html.escape(out[:2500]) if out else "<i>(нет вывода)</i>"
@@ -936,7 +948,7 @@ _TOOLS = [
     },
     {
         "name": "scrape_url",
-        "description": "Read full content of a web page.",
+        "description": "Read full content of a web page via Jina Reader (r.jina.ai) — returns clean markdown without HTML garbage.",
         "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     },
     {
