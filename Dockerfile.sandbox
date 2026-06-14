@@ -1,12 +1,60 @@
 FROM python:3.11-slim
 
+# ── System tools ─────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl wget unzip \
+    # Network & downloads
+    git curl wget \
+    # Archives
+    zip unzip p7zip-full tar gzip bzip2 \
+    # Media processing
+    ffmpeg \
+    # Image tools
+    imagemagick \
+    # Document tools (PDF → text, etc.)
+    poppler-utils \
+    # Data tools
+    jq \
+    # Build tools (for packages that compile extensions)
+    build-essential \
+    # Misc
+    ca-certificates procps \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Python libraries ─────────────────────────────────────────────
 RUN pip install --no-cache-dir \
-    numpy pandas matplotlib pillow scipy sympy \
-    requests httpx beautifulsoup4 lxml \
+    \
+    # ── Data science & math ──
+    numpy pandas scipy sympy matplotlib seaborn \
+    scikit-learn statsmodels \
+    \
+    # ── Image & vision ──
+    pillow opencv-python-headless \
+    \
+    # ── HTTP / scraping ──
+    requests httpx aiohttp \
+    beautifulsoup4 lxml html5lib \
+    \
+    # ── File formats ──
+    openpyxl xlrd xlwt \
+    python-docx \
+    pyyaml toml \
+    pypdf2 reportlab \
+    \
+    # ── CLI / terminal output ──
+    rich click tqdm colorama tabulate humanize \
+    \
+    # ── Utilities ──
+    python-dotenv pydantic \
+    psutil arrow orjson \
+    cryptography \
+    \
+    # ── Code / dev ──
+    black flake8 pytest \
+    gitpython \
+    \
+    # ── Video / media ──
+    yt-dlp \
+    \
     && rm -rf /root/.cache
 
 RUN useradd -m -u 1000 -s /bin/bash sandbox
