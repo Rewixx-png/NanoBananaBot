@@ -2062,7 +2062,13 @@ async def run_agent(
 
             candidate = await _gemini_call(keys, contents, is_owner=is_owner)
             if not candidate:
-                return "Agent failed — Gemini did not respond.", None
+                # All keys may be in 429 cooldown — wait and retry once
+                await _st("⏳ Все ключи в кулдауне, жду 15 сек...")
+                await asyncio.sleep(15)
+                keys = load_keys()  # reload after cooldown
+                candidate = await _gemini_call(keys, contents, is_owner=is_owner)
+                if not candidate:
+                    return "Gemini не ответил — все ключи временно перегружены. Попробуй через минуту.", None
 
             parts = candidate.get("content", {}).get("parts", [])
             if not parts:
