@@ -1701,6 +1701,26 @@ async def _media_to_agent(
             buf = BufferedInputFile(media.get('data', b''), filename=media.get('filename', 'img.jpg'))
             await safe_send(message.bot.send_photo, chat_id=message.chat.id, photo=buf,
                             caption=(media.get('caption') or '')[:1024], **kw)
+        elif mtype == 'video':
+            buf = BufferedInputFile(media.get('data', b''), filename=media.get('filename', 'video.mp4'))
+            await safe_send(message.bot.send_video, chat_id=message.chat.id, video=buf,
+                            caption=(media.get('caption') or '')[:1024], **kw)
+        elif mtype == 'audio':
+            buf = BufferedInputFile(media.get('data', b''), filename=media.get('filename', 'audio.ogg'))
+            await safe_send(message.bot.send_audio, chat_id=message.chat.id, audio=buf,
+                            caption=(media.get('caption') or '')[:1024], **kw)
+        elif mtype == 'tg_set_chat_photo':
+            try:
+                photo_buf = BufferedInputFile(media.get('data', b''),
+                                              filename=media.get('filename', 'photo.jpg'))
+                await message.bot.set_chat_photo(chat_id=message.chat.id, photo=photo_buf)
+                await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                                text='✅ Аватарка беседы обновлена!', **kw)
+            except Exception as _e:
+                await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                                text=f'❌ Не смог сменить аватарку: {_e}', **kw)
+        elif mtype.startswith('tg_'):
+            pass  # other tg_* actions don't need to send media back
         else:
             buf = BufferedInputFile(media.get('data', b''), filename=media.get('filename', 'file'))
             await safe_send(message.bot.send_document, chat_id=message.chat.id, document=buf,
