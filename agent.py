@@ -460,8 +460,13 @@ _COOKIE_FILES = {
 
 def _cookies_for_url(url: str) -> list[str]:
     """Return --cookies flag list for the given URL domain, if cookie file exists."""
+    from urllib.parse import urlparse
+    try:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    except Exception:
+        return []
     for domain, path in _COOKIE_FILES.items():
-        if domain in url and os.path.exists(path):
+        if (hostname == domain or hostname.endswith("." + domain)) and os.path.exists(path):
             return ["--cookies", path]
     return []
 
