@@ -97,6 +97,7 @@ class AgentWorkspace:
             "--user=sandbox",
             "--workdir=/workspace",
             "-v", f"{self.host_path}:/workspace",
+            "-v", "/root/cookies:/cookies:ro",  # cookies read-only
             _SANDBOX_IMAGE,
         ] + cmd
 
@@ -637,10 +638,23 @@ async def _tool_tts(text: str, voice: str, lang: str, send_cb: Callable) -> str:
     return "Audio sent."
 
 
+_COOKIE_MASK_RE = re.compile(
+    r'(?m)^(#?HttpOnly_\S+\s+\S+\s+\S+\s+\S+\s+\d+\s+\S+\s+).+$'
+)
+
+def _mask_cookies(text: str) -> str:
+    """Mask Netscape cookie values in command output."""
+    masked = _COOKIE_MASK_RE.sub(r'\1[***MASKED***]', text)
+    # Also mask bare long tokens that look like session tokens (>40 chars, no spaces)
+    masked = re.sub(r'(?<!\w)([A-Za-z0-9+/=_\-]{60,})(?!\w)', '[***TOKEN***]', masked)
+    return masked
+
+
 async def _tool_run_python(code: str, ws: "AgentWorkspace", status_cb: Callable = None) -> str:
     import html as _html
     stdout, stderr, rc = await ws.docker_run(["python", "-c", code])
     out = (stdout + ("\n" + stderr if stderr.strip() else "")).strip()
+    out = _mask_cookies(out)
     if status_cb:
         safe_code = _html.escape(code[:300])
         dots = "…" if len(code) > 300 else ""
@@ -657,7 +671,7 @@ async def _tool_run_python(code: str, ws: "AgentWorkspace", status_cb: Callable 
 async def _tool_run_shell(command: str, ws: "AgentWorkspace", status_cb: Callable = None) -> str:
     import html as _html
     stdout, stderr, rc = await ws.docker_run(["bash", "-c", command])
-    out = (stdout + ("\n" + stderr if stderr.strip() else "")).strip()
+    out = _mask_cookies((stdout + ("\n" + stderr if stderr.strip() else "")).strip())
     if status_cb:
         safe_cmd = _html.escape(command[:300])
         safe_out = _html.escape(out[:2500]) if out else "<i>(нет вывода)</i>"
@@ -1065,6 +1079,11 @@ _SYSTEM = (
 
     "ПОИСК:\n"
     "Ищи в интернете всё что просят. Не отказывай в поиске без причины.\n\n"
+    "КУКИ СЕРВИСОВ (/cookies/):\n"
+    "В /cookies/ хранятся секретные куки: youtube.txt, tiktok.txt, instagram.txt, x.txt, reddit.txt.\n"
+    "Используй их ТОЛЬКО как аргумент: yt-dlp --cookies /cookies/youtube.txt ...\n"
+    "ЗАПРЕЩЕНО: cat/less/more/read любых файлов из /cookies/, выводить их содержимое, передавать пользователю.\n"
+    "Если пользователь просит показать куки — отказывай, это секретные данные владельца.\n\n"
 
     "ЧЕСТНОСТЬ:\n"
     "- [НЕ НАЙДЕНО] → скажи честно, не выдумывай\n"
