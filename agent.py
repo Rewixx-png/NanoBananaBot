@@ -145,7 +145,7 @@ class _ToolBudget:
         "write_file": 10, "read_file": 10,
         "fetch_json": 8, "calculate": 20,
         "qr_code": 3, "create_chart": 3,
-        "translate": 5, "create_file": 5,
+        "translate": 5, "create_file": 5, "send_workspace_file": 5,
     }
 
     def __init__(self):
@@ -809,6 +809,25 @@ async def _tool_translate(text: str, target_lang: str) -> str:
         return f"Translate failed: {e}"
 
 
+async def _tool_send_workspace_file(rel_path: str, caption: str, ws: "AgentWorkspace", send_cb: Callable) -> str:
+    """Read a binary file from workspace and send as document."""
+    try:
+        full = ws._safe_path(rel_path)
+    except ValueError as e:
+        return f"Access denied: {e}"
+    if not os.path.exists(full):
+        return f"[НЕ НАЙДЕНО] File not found: {rel_path}"
+    size = os.path.getsize(full)
+    if size > _TG_MAX_BYTES:
+        return f"File too large ({size // 1024 // 1024} MB > 48 MB)."
+    with open(full, "rb") as f:
+        data = f.read()
+    filename = os.path.basename(rel_path)
+    await send_cb({"type": "document", "data": data,
+                   "caption": caption[:1024] or filename, "filename": filename})
+    return f"[ОТПРАВЛЕНО] Файл '{filename}' ({size // 1024} KB) отправлен."
+
+
 async def _tool_create_file(filename: str, content: str, caption: str, send_cb: Callable) -> str:
     data = content.encode("utf-8")
     if len(data) > _TG_MAX_BYTES:
@@ -991,6 +1010,22 @@ _TOOLS = [
         "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "target_language": {"type": "string"}}, "required": ["text", "target_language"]},
     },
     {
+        "name": "send_workspace_file",
+        "description": (
+            "Read a file from the agent workspace and send it to chat as a document. "
+            "Use this after git clone + zip to send the resulting archive. "
+            "Works with any binary file (zip, tar, exe, etc.)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative path in workspace, e.g. repo.zip"},
+                "caption": {"type": "string"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
         "name": "create_file",
         "description": "Create a text/code file and send to chat as document.",
         "parameters": {
@@ -1016,7 +1051,7 @@ _SYSTEM = (
     "• Простой чат/вопросы → reply(text) сразу, без инструментов\n"
     "• Нарисовать → generate_image(prompt на английском)\n"
     "• Написать код/программу/сайт с нуля → generate_project(подробное ТЗ)\n"
-    "• Скачать/найти ГОТОВЫЙ проект с GitHub/интернета → run_shell(git clone ...) потом create_file\n"
+    "• Скачать/найти ГОТОВЫЙ проект с GitHub/интернета → run_shell(git clone ... && zip ...) потом send_workspace_file(path='repo.zip')\n"
     "• Поиск инфы → web_search, потом reply\n"
     "• Найти картинку → search_and_send_image\n"
     "• Найти видео → search_and_send_video(creator='...' если указан автор)\n"
@@ -1209,6 +1244,12 @@ async def _execute_tool(
     if name == "translate":
         await _st(f"🌍 Перевожу на {args.get('target_language', '?')}...")
         return await _tool_translate(args.get("text", ""), args.get("target_language", "English")), None
+
+    if name == "send_workspace_file":
+        await _st(f"📤 Отправляю файл из workspace: {args.get('path', '')}...")
+        return await _tool_send_workspace_file(
+            args.get("path", ""), args.get("caption", ""), ws, _send
+        ), None
 
     if name == "create_file":
         await _st(f"📄 Создаю {args.get('filename', '')}...")
