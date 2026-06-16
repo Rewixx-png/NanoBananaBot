@@ -25,15 +25,31 @@ class BanMiddleware(BaseMiddleware):
 class DualHistoryMiddleware(BaseMiddleware):
 
     async def __call__(self, handler: Callable[[TelegramObject, dict], Awaitable[Any]], event: TelegramObject, data: dict) -> Any:
-        if isinstance(event, Message) and event.text and event.from_user and not event.from_user.is_bot:
+        if isinstance(event, Message) and event.from_user and not event.from_user.is_bot:
             from dual_bot import add_dual_message
             from state import chat_context_buffer
             from config import MAX_HISTORY_MESSAGES
             user = event.from_user
             name = f"@{user.username}" if user.username else (user.first_name or str(user.id))
-            add_dual_message(event.chat.id, name, event.text)
             buf = chat_context_buffer.setdefault(event.chat.id, [])
-            buf.append(f"{name}: {event.text}")
+            import re as _re
+            def _smeta(s: str, n: int = 80) -> str:
+                return _re.sub(r'[\[\]{}<>]', '', str(s))[:n]
+
+            if event.text:
+                add_dual_message(event.chat.id, name, event.text)
+                buf.append(f"{name}: {event.text}")
+            elif event.photo:
+                cap = _smeta(event.caption or '')
+                buf.append(f"{name}: [фото]{': ' + cap if cap else ''}")
+            elif event.audio or event.voice or event.document:
+                media = event.audio or event.voice or event.document
+                fname = _smeta(getattr(media, 'file_name', '') or getattr(media, 'mime_type', 'файл'))
+                cap = _smeta(event.caption or '')
+                buf.append(f"{name}: [аудио/файл: {fname}]{': ' + cap if cap else ''}")
+            elif event.video or event.video_note:
+                cap = _smeta(event.caption or '')
+                buf.append(f"{name}: [видео]{': ' + cap if cap else ''}")
             if len(buf) > MAX_HISTORY_MESSAGES:
                 chat_context_buffer[event.chat.id] = buf[-MAX_HISTORY_MESSAGES:]
         return await handler(event, data)
@@ -129,6 +145,15 @@ async def on_shutdown():
         pass
     logger.info('Бот успешно остановлен')
 
+async def _nano_keys_sync_loop():
+    from nano_keys import init_db, sync_from_keyhunter
+    init_db()
+    sync_from_keyhunter()
+    while True:
+        await asyncio.sleep(300)  # каждые 5 минут
+        sync_from_keyhunter()
+
+
 async def main():
     global bot_instance, dp_instance
     signal.signal(signal.SIGINT, signal_handler)
@@ -156,6 +181,7 @@ async def main():
             dp_instance.start_polling(bot_instance),
             dp2.start_polling(bot2),
             start_bridge(),
+            _nano_keys_sync_loop(),
         )
     except Exception as e:
         logger.exception(f'Критическая ошибка при запуске бота: {e}')

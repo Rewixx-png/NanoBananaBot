@@ -14,11 +14,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     # Data tools
     jq \
+    # OCR
+    tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng \
+    # Build tools
+    build-essential \
     # Misc
     ca-certificates procps \
     && rm -rf /var/lib/apt/lists/* \
     && for d in /etc/ImageMagick-6 /etc/ImageMagick-7; do [ -d "$d" ] && \
        printf '<policymap>\n  <policy domain="coder" rights="none" pattern="MVG"/>\n  <policy domain="coder" rights="none" pattern="MSL"/>\n  <policy domain="coder" rights="none" pattern="EPHEMERAL"/>\n  <policy domain="coder" rights="none" pattern="URL"/>\n  <policy domain="coder" rights="none" pattern="HTTP"/>\n  <policy domain="coder" rights="none" pattern="HTTPS"/>\n  <policy domain="coder" rights="none" pattern="FTP"/>\n  <policy domain="coder" rights="none" pattern="PS"/>\n  <policy domain="coder" rights="none" pattern="EPS"/>\n  <policy domain="resource" name="disk" value="1GiB"/>\n</policymap>\n' > "$d/policy.xml"; done; true
+
+# ── Chromium + Playwright system deps ────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium chromium-driver \
+    fonts-liberation fonts-noto-cjk \
+    libatk-bridge2.0-0 libatk1.0-0 libcups2 libdbus-1-3 \
+    libdrm2 libgbm1 libgtk-3-0 libnspr4 libnss3 \
+    libxcomposite1 libxdamage1 libxfixes3 libxkbcommon0 \
+    libxrandr2 libxss1 xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
 
 # ── Python libraries ─────────────────────────────────────────────
 RUN pip install --no-cache-dir \
@@ -28,11 +42,19 @@ RUN pip install --no-cache-dir \
     scikit-learn statsmodels \
     \
     # ── Image & vision ──
-    pillow opencv-python-headless \
+    pillow opencv-python-headless pytesseract \
     \
     # ── HTTP / scraping ──
     requests httpx aiohttp \
     beautifulsoup4 lxml html5lib \
+    mechanize \
+    scrapy \
+    \
+    # ── Browser automation ──
+    playwright \
+    selenium \
+    webdriver-manager \
+    nodriver \
     \
     # ── File formats ──
     openpyxl xlrd xlwt \
@@ -53,10 +75,25 @@ RUN pip install --no-cache-dir \
     gitpython \
     \
     # ── Video / media ──
-    yt-dlp \
+    yt-dlp pydub demucs \
     \
     && rm -rf /root/.cache
 
+# ── Playwright: установить Chromium в /opt/pw-browsers ───────────
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN playwright install chromium --with-deps 2>/dev/null || playwright install chromium \
+    && chmod -R 755 /opt/pw-browsers
+
+# ── Symlink системного chromium для selenium/webdriver ───────────
+RUN ln -sf /usr/bin/chromium /usr/local/bin/google-chrome 2>/dev/null || true \
+    && ln -sf /usr/bin/chromedriver /usr/local/bin/chromedriver 2>/dev/null || true
+
 RUN useradd -m -u 1000 -s /bin/bash sandbox
+
+# ── Pre-download demucs models as sandbox user ───────────────────
+USER sandbox
+RUN python3 -c "from demucs.pretrained import get_model; get_model('htdemucs'); get_model('mdx_extra_q')" 2>/dev/null || true
+USER root
+
 USER sandbox
 WORKDIR /workspace
