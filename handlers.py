@@ -22,7 +22,7 @@ from ai_services import start_veo_generation, poll_veo_operation
 from utils import check_membership, is_banned, make_safe_caption
 from ai_services import generate_image_with_gpt, generate_image_with_gemini, generate_image_with_nvidia, generate_image_with_openrouter, generate_video_with_veo, explain_generation_error, generate_video_with_gemini, generate_text_with_gemini, classify_code_intent_with_gemini, classify_draw_intent_with_gemini, generate_image_via_code, upscale_image, generate_image_prompt, generate_code_with_gemini, generate_project_with_gemini, fetch_gemini_image_models, fetch_openai_image_models, fetch_veo_models, generate_image_with_replicate, fetch_gemini_tts_models, generate_tts_with_gemini, fetch_replicate_image_models, generate_bull_roast, analyze_photo_with_gemini, analyze_voice_with_gemini
 from agent import run_agent, classify_agent_intent
-from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID, DAILY_GEN_LIMIT, PAYMENT_USERNAME, CHAT_ID, GEMINI_IMAGE_TIMEOUT
+from config import IMAGE_COOLDOWN_SECONDS, TEXT_COOLDOWN_SECONDS, DELETE_MESSAGE_DELAY_SECONDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, FULL_ACCESS_CHAT_IMAGE_COOLDOWN, PAYMENT_PHONE, ALLOWED_USER_IDS, OWNER_USER_ID, ADMIN_IDS, DAILY_GEN_LIMIT, PAYMENT_USERNAME, CHAT_ID, GEMINI_IMAGE_TIMEOUT
 import logging
 logger = logging.getLogger(__name__)
 router = Router()
@@ -358,7 +358,7 @@ async def _process_file_task(message: types.Message, task_data: dict[str, Any], 
     try:
         text_response = await asyncio.wait_for(
             generate_text_with_gemini(prompt, message.chat.id, username=username, web_query=instruction, status_cb=_status_cb, allow_web=False),
-            timeout=300,
+            timeout=1200,
         )
     except asyncio.TimeoutError:
         logging.warning(f'File task timed out after 300s for chat={message.chat.id}, user={message.from_user.id}')
@@ -598,15 +598,37 @@ Firecrawl: 8-12 запросов → до 8 страниц каждый → 3 у
 /stats /prompts /limit /ban /unban /vip'''
     await message.reply(text)
 
+async def _rebuild_sandbox_bg(message):
+    import subprocess as _sp
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "build", "-f", f"{project_dir}/Dockerfile.sandbox",
+            "-t", "hatani-sandbox:latest", project_dir,
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        )
+        await proc.wait()
+        status = "✅ Контейнер пересобран" if proc.returncode == 0 else "❌ Ошибка пересборки"
+    except Exception as e:
+        status = f"❌ {e}"
+    try:
+        await message.answer(status)
+    except Exception:
+        pass
+
+
 @router.message(Command('clear'))
 async def cmd_clear(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
         return
-    from state import chat_context_buffer
+    from state import chat_context_buffer, chat_last_files
     await save_history(message.chat.id, [])
     chat_context_buffer.pop(message.chat.id, None)
+    chat_last_files.pop(message.chat.id, None)
     await message.reply('Окей, я забыл всю хуйню, которую мы тут обсуждали. Начинаем с чистого листа.')
+    if message.from_user.id == OWNER_USER_ID:
+        asyncio.create_task(_rebuild_sandbox_bg(message))
 import random as _random
 _KIRIESHKI_CHAT_ID = -1002830734467
 _KIRIESHKI_STICKER_SET = 'kirieshkikirieshki'
@@ -1657,10 +1679,16 @@ async def _media_to_agent(
     reply_kwargs: dict,
 ) -> bool:
     """Try to handle media+instruction via agent. Returns True if agent handled it."""
-    if not caption or not await classify_agent_intent(caption):
+    from state import chat_context_buffer as _ccb_check
+    _ctx_check = _ccb_check.get(message.chat.id, [])
+    _intent_text = caption or ""
+    if not _intent_text and _ctx_check:
+        # Нет caption — используем последние сообщения чата как контекст для классификации
+        _intent_text = "\n".join(_ctx_check[-5:])
+    if not _intent_text or not await classify_agent_intent(_intent_text):
         return False
     username = message.from_user.first_name or message.from_user.username or 'Аноним'
-    is_owner_user = message.from_user.id == OWNER_USER_ID
+    is_owner_user = message.from_user.id in ADMIN_IDS
     thinking_msg = await message.reply('⏳ Думаю...', **reply_kwargs)
     last_status_edit = 0.0
     last_status_text = ''
@@ -1726,7 +1754,14 @@ async def _media_to_agent(
             await safe_send(message.bot.send_document, chat_id=message.chat.id, document=buf,
                             caption=(media.get('caption') or '')[:1024], **kw)
 
-    from state import chat_context_buffer
+    from state import chat_context_buffer, chat_last_files
+    import time as _time
+    _MAX_FILE_CACHE = 20 * 1024 * 1024  # 20MB
+    if len(file_bytes) <= _MAX_FILE_CACHE:
+        import os as _os
+        _safe_name = _os.path.basename(filename) or "upload"
+        chat_last_files[message.chat.id] = {"filename": _safe_name, "data": file_bytes, "ts": _time.time()}
+
     ctx_lines = chat_context_buffer.get(message.chat.id, [])
     ctx_block = ""
     if ctx_lines:
@@ -1753,7 +1788,7 @@ async def _media_to_agent(
         (agent_text, agent_project) = await asyncio.wait_for(
             run_agent(prompt, message.chat.id, username, _status_cb, _send_cb,
                       is_owner=is_owner_user, initial_files={filename: file_bytes}),
-            timeout=300,
+            timeout=1200,
         )
     except asyncio.TimeoutError:
         agent_text, agent_project = 'Завис по таймауту.', None
@@ -1775,6 +1810,12 @@ async def _media_to_agent(
             await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
         except Exception:
             await safe_send(message.reply, _clean_plain_reply(agent_text), **reply_kwargs)
+        from state import chat_context_buffer as _ccb
+        from config import MAX_HISTORY_MESSAGES as _mhm
+        _buf = _ccb.setdefault(message.chat.id, [])
+        _buf.append(f"Hatani: {agent_text[:500]}")
+        if len(_buf) > _mhm:
+            _ccb[message.chat.id] = _buf[-_mhm:]
     asyncio.create_task(add_user_stat(message.from_user.id, username,
                                       message.from_user.first_name or 'Аноним', 'text'))
     asyncio.create_task(log_prompt(message.from_user.id, username,
@@ -2927,7 +2968,7 @@ async def handle_text_messages(message: types.Message):
                     logger.warning(f"tg_get_chat_info failed: {_e}")
                 return
             # Admin-only actions — verify requester is admin/creator first
-            _ADMIN_MTYPES = {"tg_ban", "tg_kick", "tg_restrict", "tg_pin", "tg_unpin",
+            _ADMIN_MTYPES = {"tg_ban", "tg_unban", "tg_kick", "tg_restrict", "tg_pin", "tg_unpin",
                              "tg_set_chat_title", "tg_invite_link", "tg_promote"}
             if mtype in _ADMIN_MTYPES and message.chat.type != "private":
                 try:
@@ -2947,6 +2988,13 @@ async def handle_text_messages(message: types.Message):
                         user_id=media.get("user_id"), until_date=until_dt)
                 except Exception as _e:
                     logger.warning(f"tg_ban failed: {_e}")
+                return
+            if mtype == "tg_unban":
+                try:
+                    await message.bot.unban_chat_member(chat_id=message.chat.id,
+                        user_id=media.get("user_id"), only_if_banned=True)
+                except Exception as _e:
+                    logger.warning(f"tg_unban failed: {_e}")
                 return
             if mtype == "tg_kick":
                 try:
@@ -3226,12 +3274,28 @@ async def handle_text_messages(message: types.Message):
             else:
                 await safe_send(message.bot.send_document, chat_id=message.chat.id, document=buf, caption=caption, **kw)
 
-        is_owner_user = message.from_user.id == OWNER_USER_ID
+        is_owner_user = message.from_user.id in ADMIN_IDS
+
+        # Прокинуть последний файл чата если он свежий (до 1 часа)
+        from state import chat_last_files as _clf
+        import time as _t
+        _cached = _clf.get(message.chat.id)
+        _initial_files = {}
+        if _cached and _t.time() - _cached["ts"] < 3600:
+            import os as _os2
+            _safe_name = _os2.path.basename(_cached["filename"]) or "upload"
+            _ws_path = _os2.path.realpath(f"/workspace/{_safe_name}")
+            if _ws_path.startswith("/workspace/"):
+                _initial_files = {_safe_name: _cached["data"]}
+                prompt = (f'[Ранее в этом чате был загружен файл: {_safe_name}. '
+                          f'Он уже доступен в workspace как /workspace/{_safe_name}]\n') + prompt
+
         try:
             (agent_text, agent_project) = await asyncio.wait_for(
                 run_agent(prompt, message.chat.id, username, _status_cb, _agent_send_cb,
-                          is_owner=is_owner_user),
-                timeout=300,
+                          is_owner=is_owner_user,
+                          initial_files=_initial_files if _initial_files else None),
+                timeout=1200,
             )
         except asyncio.TimeoutError:
             agent_text = 'Завис по таймауту. Попробуй покороче.'
@@ -3289,6 +3353,14 @@ async def handle_text_messages(message: types.Message):
                         _remember_generated_code_message(message.chat.id, sent_code_file.message_id, [file_entry], web_query)
                 if sent_msg and _code_files_sent:
                     _remember_generated_code_message(message.chat.id, sent_msg.message_id, _code_files_sent, web_query)
+
+        if agent_text:
+            from state import chat_context_buffer as _ccb2
+            from config import MAX_HISTORY_MESSAGES as _mhm2
+            _buf2 = _ccb2.setdefault(message.chat.id, [])
+            _buf2.append(f"Hatani: {agent_text[:500]}")
+            if len(_buf2) > _mhm2:
+                _ccb2[message.chat.id] = _buf2[-_mhm2:]
 
         asyncio.create_task(add_user_stat(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'text'))
         asyncio.create_task(log_prompt(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'text', web_query))

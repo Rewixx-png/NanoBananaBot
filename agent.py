@@ -29,16 +29,17 @@ from ai_services import (
     generate_tts_with_gemini,
 )
 from keys_manager import load_keys, load_firecrawl_keys, remove_key
+from nano_keys import get_live_keys as _nk_get_live, mark_cooldown as _nk_cooldown, sync_from_keyhunter as _nk_sync, init_db as _nk_init
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS       = 36
+MAX_STEPS       = 60
 _SEARCH_TIMEOUT = 20.0
 _SCRAPE_TIMEOUT = 25.0
 _LLM_TIMEOUT    = 60.0
 _PROJECT_TIMEOUT= 180.0
 _VDL_TIMEOUT    = 120.0
-_DOCKER_TIMEOUT = 30.0
+_DOCKER_TIMEOUT = 600.0
 _TG_MAX_BYTES   = 48 * 1024 * 1024
 _SANDBOX_IMAGE  = "hatani-sandbox:latest"
 
@@ -94,34 +95,72 @@ class AgentWorkspace:
                 result.append(rel)
         return result[:50]
 
-    async def docker_run(self, cmd: list[str], stdin: str = "") -> Tuple[str, str, int]:
+    async def docker_run(
+        self, cmd: list[str], stdin: str = "",
+        output_cb: Optional[Callable] = None,
+    ) -> Tuple[str, str, int]:
         """Run cmd inside sandbox container with workspace mounted."""
         docker_cmd = [
             "docker", "run", "--rm",
-            "--memory=512m", "--cpus=0.5",
+            "--memory=1024m", "--cpus=2",
             "--user=sandbox",
             "--workdir=/workspace",
             "-v", f"{self.host_path}:/workspace",
-            # Cookies NOT mounted — sandbox user must not access credentials.
-            # yt-dlp with cookies runs via _tool_download_video on the host directly.
             _SANDBOX_IMAGE,
         ] + cmd
 
         proc = await asyncio.create_subprocess_exec(
             *docker_cmd,
-            stdin=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+
+        out_lines: list[str] = []
+        err_lines: list[str] = []
+
+        async def _read_stream(stream, buf: list):
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                buf.append(line.decode(errors="replace"))
+
+        async def _flush_loop():
+            import time as _t
+            last = _t.monotonic()
+            while True:
+                await asyncio.sleep(2)
+                if output_cb:
+                    try:
+                        await output_cb("".join(out_lines + err_lines))
+                    except Exception:
+                        pass
+
+        read_out = asyncio.create_task(_read_stream(proc.stdout, out_lines))
+        read_err = asyncio.create_task(_read_stream(proc.stderr, err_lines))
+        flush_task = asyncio.create_task(_flush_loop()) if output_cb else None
+
         try:
-            out, err = await asyncio.wait_for(
-                proc.communicate(stdin.encode() if stdin else b""),
+            if stdin:
+                proc.stdin.write(stdin.encode())
+                await proc.stdin.drain()
+                proc.stdin.close()
+            await asyncio.wait_for(
+                asyncio.gather(read_out, read_err, proc.wait()),
                 timeout=_DOCKER_TIMEOUT,
             )
-            return out.decode(errors="replace"), err.decode(errors="replace"), proc.returncode
         except asyncio.TimeoutError:
             proc.kill()
-            return "", f"Timeout ({int(_DOCKER_TIMEOUT)}s)", 124
+            await asyncio.gather(read_out, read_err, return_exceptions=True)
+            if flush_task:
+                flush_task.cancel()
+            return "".join(out_lines), "".join(err_lines) + f"\nTimeout ({int(_DOCKER_TIMEOUT)}s)", 124
+        finally:
+            if flush_task:
+                flush_task.cancel()
+
+        return "".join(out_lines), "".join(err_lines), proc.returncode
 
 
 # ── Loop safety ──────────────────────────────────────────────────
@@ -145,7 +184,7 @@ class _DebounceHook:
 class _ToolBudget:
     LIMITS = {
         "web_search": 16, "scrape_url": 20, "generate_project": 4,
-        "think": 60, "reply": 6, "generate_image": 6,
+        "think": 30, "reply": 6, "generate_image": 6,
         "search_and_send_image": 6, "download_image": 10,
         "search_and_send_video": 4, "download_video": 4, "text_to_speech": 6,
         "run_python": 12, "run_shell": 16,
@@ -489,23 +528,28 @@ async def _tool_search_image(
 
 # ── Other tool implementations ───────────────────────────────────
 
-async def _tool_generate_image(prompt: str, send_cb: Callable, provider: str = "gemini") -> str:
-    """Generate image. Tries requested provider, falls back to Gemini with notification."""
+async def _tool_generate_image(prompt: str, send_cb: Callable, provider: str = "gemini", model: str = "") -> str:
+    """Generate image. Tries requested provider/model, falls back to Gemini with notification."""
     from ai_services import generate_image_with_gpt
     img_bytes: bytes | None = None
-    used_provider = "Gemini"
     note = ""
 
-    if provider.lower() in ("openai", "gpt", "gpt4", "dalle", "dall-e"):
-        img_bytes, err = await generate_image_with_gpt(prompt)
-        if img_bytes:
-            used_provider = "OpenAI"
-        else:
-            # GPT failed — fall back to Gemini and tell the user
+    _GPT_MODELS = {"gpt-image-2", "gpt-image-1.5", "dall-e-3", "dall-e-2"}
+    _GPT_PROVIDERS = {"openai", "gpt", "gpt4", "dalle", "dall-e"}
+
+    use_gpt = provider.lower() in _GPT_PROVIDERS or model in _GPT_MODELS or model.startswith("openai/")
+
+    if use_gpt:
+        gpt_model = model if model else "gpt-image-2"
+        img_bytes, err = await generate_image_with_gpt(prompt, model=gpt_model)
+        used_provider = f"OpenAI ({gpt_model})"
+        if not img_bytes:
             note = f"\n⚠️ OpenAI недоступен ({(err or '').split(':')[0].strip()[:80]}), сгенерировал через Gemini."
             img_bytes, err = await generate_image_with_gemini(prompt)
+            used_provider = "Gemini"
     else:
         img_bytes, err = await generate_image_with_gemini(prompt)
+        used_provider = "Gemini"
 
     if not img_bytes:
         return f"Image generation failed: {err or 'no data'}"
@@ -513,6 +557,32 @@ async def _tool_generate_image(prompt: str, send_cb: Callable, provider: str = "
     caption = f"🎨 {prompt[:900]}{note}"
     await send_cb({"type": "photo", "data": img_bytes, "caption": caption[:1024], "filename": "image.jpg"})
     return f"[ОТПРАВЛЕНО] Картинка через {used_provider}.{note}"
+
+
+async def _tool_list_image_models() -> str:
+    """Fetch available image-generation models from OpenAI API."""
+    from keys_manager import load_openai_keys
+    keys = load_openai_keys()
+    if not keys:
+        return "OpenAI ключи не настроены."
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://api.openai.com/v1/models",
+                headers={"Authorization": f"Bearer {keys[0]}"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return f"OpenAI API error: HTTP {resp.status}"
+                data = await resp.json()
+        models = [m["id"] for m in data.get("data", [])
+                  if any(k in m["id"] for k in ("dall-e", "gpt-image", "image"))]
+        models.sort()
+        if not models:
+            return "Нет доступных image-моделей на этом ключе."
+        return "Доступные image-модели OpenAI:\n" + "\n".join(f"• {m}" for m in models)
+    except Exception as e:
+        return f"Ошибка при запросе моделей: {e}"
 
 
 async def _tool_download_image(url: str, caption: str, send_cb: Callable) -> str:
@@ -768,13 +838,31 @@ def _mask_cookies(text: str) -> str:
 
 
 async def _tool_run_python(code: str, ws: "AgentWorkspace", status_cb: Callable = None) -> str:
-    import html as _html
-    stdout, stderr, rc = await ws.docker_run(["python", "-c", code])
+    import html as _html, time as _t
+    safe_code = _html.escape(code[:1500])
+    dots = "…" if len(code) > 1500 else ""
+
+    start_ts = _t.monotonic()
+
+    async def _live_cb(raw: str):
+        elapsed = int(_t.monotonic() - start_ts)
+        m, s = divmod(elapsed, 60)
+        t = f"{m}м {s}с" if m else f"{s}с"
+        live = _html.escape(_snip_output(_mask_cookies(raw.strip()))[:1800]) or "<i>...</i>"
+        if status_cb:
+            try:
+                await status_cb(
+                    f"⏳ Запускаю Python · {t}\n"
+                    f"<pre><code class=\"language-python\">{safe_code}{dots}</code></pre>\n"
+                    f"<pre><code>{live}</code></pre>"
+                )
+            except Exception:
+                pass
+
+    stdout, stderr, rc = await ws.docker_run(["python", "-c", code], output_cb=_live_cb)
     out = _snip_output(_mask_cookies((stdout + ("\n" + stderr if stderr.strip() else "")).strip()))
     if status_cb:
-        safe_code = _html.escape(code[:300])
-        dots = "…" if len(code) > 300 else ""
-        safe_out = _html.escape(out[:2500]) if out else "<i>(нет вывода)</i>"
+        safe_out = _html.escape(out[:2300]) if out else "<i>(нет вывода)</i>"
         await status_cb(
             f"🐍 Выполнено:\n"
             f"<pre><code class=\"language-python\">{safe_code}{dots}</code></pre>\n"
@@ -785,19 +873,221 @@ async def _tool_run_python(code: str, ws: "AgentWorkspace", status_cb: Callable 
 
 
 async def _tool_run_shell(command: str, ws: "AgentWorkspace", status_cb: Callable = None) -> str:
-    import html as _html
-    stdout, stderr, rc = await ws.docker_run(["bash", "-c", command])
+    import html as _html, time as _t
+    safe_cmd = _html.escape(command[:1500])
+    dots = "…" if len(command) > 1500 else ""
+
+    start_ts = _t.monotonic()
+
+    async def _live_cb(raw: str):
+        elapsed = int(_t.monotonic() - start_ts)
+        m, s = divmod(elapsed, 60)
+        t = f"{m}м {s}с" if m else f"{s}с"
+        live = _html.escape(_snip_output(_mask_cookies(raw.strip()))[:1800]) or "<i>...</i>"
+        if status_cb:
+            try:
+                await status_cb(
+                    f"⏳ Выполняю · {t}\n"
+                    f"<pre><code class=\"language-bash\">{safe_cmd}{dots}</code></pre>\n"
+                    f"<pre><code>{live}</code></pre>"
+                )
+            except Exception:
+                pass
+
+    stdout, stderr, rc = await ws.docker_run(["bash", "-c", command], output_cb=_live_cb)
     out = _snip_output(_mask_cookies((stdout + ("\n" + stderr if stderr.strip() else "")).strip()))
     if status_cb:
-        safe_cmd = _html.escape(command[:300])
-        safe_out = _html.escape(out[:2500]) if out else "<i>(нет вывода)</i>"
+        safe_out = _html.escape(out[:2300]) if out else "<i>(нет вывода)</i>"
         await status_cb(
             f"💻 Выполнено:\n"
-            f"<pre><code class=\"language-bash\">{safe_cmd}</code></pre>\n"
+            f"<pre><code class=\"language-bash\">{safe_cmd}{dots}</code></pre>\n"
             f"\n<b>Вывод:</b>\n"
             f"<pre><code>{safe_out}</code></pre>"
         )
     return out[:2000] or f"(exit {rc}, no output)"
+
+
+async def _tool_analyze_image(
+    path: str,
+    question: str,
+    ws: "AgentWorkspace",
+) -> str:
+    """Send workspace image to Gemini vision and return its response."""
+    import base64, mimetypes
+    safe_path = os.path.join(ws.host_path, os.path.basename(path))
+    if not os.path.exists(safe_path):
+        return f"Файл не найден: {path}"
+    with open(safe_path, "rb") as f:
+        img_bytes = f.read()
+    if len(img_bytes) > 20 * 1024 * 1024:
+        return "Файл слишком большой (>20MB) для анализа."
+    mime = mimetypes.guess_type(safe_path)[0] or "image/jpeg"
+    b64 = base64.b64encode(img_bytes).decode()
+    keys = load_keys()
+    if not keys:
+        return "Нет Gemini ключей."
+    payload = {
+        "contents": [{"parts": [
+            {"text": question or "Подробно опиши что на этом изображении."},
+            {"inlineData": {"mimeType": mime, "data": b64}},
+        ]}],
+        "generationConfig": {"temperature": 0.4, "mediaResolution": "MEDIA_RESOLUTION_HIGH"},
+    }
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    for key in keys:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    url, json=payload,
+                    headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        _cands = data.get("candidates", [])
+                        parts = (_cands[0].get("content", {}).get("parts", []) if _cands else [])
+                        return " ".join(p.get("text", "") for p in parts).strip() or "Нет ответа."
+                    if resp.status in (429, 403):
+                        remove_key(key, resp.status)
+                        continue
+        except Exception as e:
+            logger.warning(f"analyze_image: {e}")
+    return "Gemini не ответил."
+
+
+async def _tool_analyze_audio(
+    path: str,
+    question: str,
+    ws: "AgentWorkspace",
+) -> str:
+    """Send workspace audio to Gemini for quality analysis."""
+    import base64, mimetypes
+    safe_path = os.path.join(ws.host_path, os.path.basename(path))
+    if not os.path.exists(safe_path):
+        return f"Файл не найден: {path}"
+    with open(safe_path, "rb") as f:
+        audio_bytes = f.read()
+    if len(audio_bytes) > 20 * 1024 * 1024:
+        return "Файл слишком большой (>20MB) для анализа."
+    ext = os.path.splitext(safe_path)[1].lower().lstrip(".")
+    mime_map = {"mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg",
+                "flac": "audio/flac", "m4a": "audio/mp4", "aac": "audio/aac"}
+    mime = mime_map.get(ext, "audio/mpeg")
+    b64 = base64.b64encode(audio_bytes).decode()
+    keys = _nk_get_live()
+    if not keys:
+        return "Нет ключей для анализа."
+    payload = {
+        "contents": [{"parts": [
+            {"text": question or "Оцени качество этого аудио: звучание, баланс, артефакты, клиппинг. Дай конкретную оценку."},
+            {"inlineData": {"mimeType": mime, "data": b64}},
+        ]}],
+        "generationConfig": {"temperature": 0.4},
+    }
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    for key in keys[:5]:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    url, json=payload,
+                    headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        parts = (data.get("candidates", [{}])[0]
+                                 .get("content", {}).get("parts", []))
+                        return " ".join(p.get("text", "") for p in parts).strip() or "Нет ответа."
+                    if resp.status in (429, 403):
+                        _nk_cooldown(key, resp.status)
+        except Exception as e:
+            logger.warning(f"analyze_audio: {type(e).__name__}: {e}")
+    return "Gemini не ответил."
+
+
+async def _tool_playwright_browse(
+    url: str,
+    action: str,
+    selector: str = "",
+    value: str = "",
+    js_code: str = "",
+    ws: "AgentWorkspace" = None,
+    status_cb: Callable = None,
+    send_cb: Callable = None,
+) -> str:
+    import json as _json
+    import html as _html
+
+    params_json = _json.dumps({
+        "url": url, "action": action,
+        "selector": selector, "value": value, "js_code": js_code,
+    })
+    script = f"""
+import json, sys, os
+params  = {params_json!r}
+url     = params["url"]
+action  = params["action"]
+sel     = params["selector"]
+val     = params["value"]
+js_code = params["js_code"]
+
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
+
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    browser = p.chromium.launch(
+        headless=True,
+        executable_path="/usr/bin/chromium",
+        args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+    )
+    ctx  = browser.new_context(viewport={{"width": 1280, "height": 900}})
+    page = ctx.new_page()
+    page.set_default_timeout(20000)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=20000)
+    except Exception as e:
+        print(f"goto error: {{e}}", file=sys.stderr)
+
+    if action == "screenshot":
+        page.screenshot(path="/workspace/_pw_screen.png", full_page=True)
+        print("SCREENSHOT_DONE")
+    elif action == "scrape":
+        if sel:
+            els = page.query_selector_all(sel)
+            print("\\n".join(e.inner_text() for e in els[:20]))
+        else:
+            print(page.inner_text("body")[:6000])
+    elif action == "click":
+        page.click(sel)
+        page.screenshot(path="/workspace/_pw_screen.png")
+        print("SCREENSHOT_DONE")
+    elif action == "fill":
+        page.fill(sel, val)
+        print(f"Filled {{sel!r}} = {{val!r}}")
+    elif action == "eval":
+        print(str(page.evaluate(js_code))[:3000])
+    else:
+        print(f"Unknown action: {{action}}")
+    browser.close()
+"""
+    ws.write("_pw_script.py", script)
+    stdout, stderr, rc = await ws.docker_run(["python", "_pw_script.py"])
+    out = (stdout + ("\n" + stderr if stderr.strip() else "")).strip()
+
+    if "SCREENSHOT_DONE" in out and send_cb:
+        screen_host = os.path.join(ws.host_path, "_pw_screen.png")
+        if os.path.exists(screen_host):
+            await send_cb({"type": "tg_send_photo", "path": screen_host,
+                           "caption": f"📸 {url[:80]}"})
+        out = f"Скриншот отправлен | {url}"
+
+    if status_cb:
+        safe = _html.escape(out[:2000]) if out else "<i>(нет вывода)</i>"
+        await status_cb(
+            f"🌐 Playwright [{_html.escape(action)}]: <code>{_html.escape(url[:100])}</code>\n"
+            f"<pre><code>{safe}</code></pre>"
+        )
+    return _snip_output(out)[:2000] or f"(exit {rc}, no output)"
 
 
 async def _tool_fetch_json(url: str) -> str:
@@ -939,6 +1229,19 @@ async def _tool_translate(text: str, target_lang: str) -> str:
         return f"Translate failed: {e}"
 
 
+async def _tool_read_bot_logs(lines: int = 100) -> str:
+    """Read the last N lines of the bot's own log file from the host."""
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log")
+    if not os.path.exists(log_path):
+        return "bot.log not found."
+    try:
+        with open(log_path, "r", errors="replace") as f:
+            all_lines = f.readlines()
+        return "".join(all_lines[-lines:])[-3000:] or "(empty)"
+    except Exception as e:
+        return f"Error reading bot.log: {e}"
+
+
 async def _tool_send_workspace_file(rel_path: str, caption: str, ws: "AgentWorkspace", send_cb: Callable) -> str:
     """Read a binary file from workspace and send as document."""
     try:
@@ -972,7 +1275,7 @@ async def _tool_create_file(filename: str, content: str, caption: str, send_cb: 
 _TOOLS = [
     {
         "name": "think",
-        "description": "Internal reasoning — plan, analyze, decide next step. Use before first search and before generate_project.",
+        "description": "Use before EVERY tool call. Write 1-2 sentences: what you will do next and why. User sees this as a thinking block.",
         "parameters": {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]},
     },
     {
@@ -1089,6 +1392,13 @@ _TOOLS = [
             "user_id": {"type": "integer", "description": "User to ban"},
             "reason": {"type": "string"},
             "until_date": {"type": "integer", "description": "Unix timestamp when ban expires (omit for permanent)"},
+        }, "required": ["user_id"]},
+    },
+    {
+        "name": "tg_unban_user",
+        "description": "Unban a user from the chat / remove from blacklist (requires admin).",
+        "parameters": {"type": "object", "properties": {
+            "user_id": {"type": "integer", "description": "User to unban"},
         }, "required": ["user_id"]},
     },
     {
@@ -1270,13 +1580,6 @@ _TOOLS = [
          "url": {"type": "string", "description": "Full URL to fetch"},
          "output_format": {"type": "string", "enum": ["text", "json"], "description": "Expected output format"}},
       "required": ["url"]}},
-    {"name": "read_bot_logs", "description": (
-        "Read the bot's own log file to debug issues, check recent errors, "
-        "or monitor what's happening. Returns last N lines of bot.log."),
-     "parameters": {"type": "object", "properties": {
-         "lines": {"type": "integer", "description": "Number of last lines to return (default 50, max 200)"},
-         "filter": {"type": "string", "description": "Optional grep-like filter string"}},
-      "required": []}},
     # ── End Telegram API tools ───────────────────────────────────────
     {
         "name": "search_and_send_image",
@@ -1295,14 +1598,23 @@ _TOOLS = [
         },
     },
     {
+        "name": "list_image_models",
+        "description": "Fetch available image-generation models from OpenAI API. Call this first if user wants to pick a specific GPT/DALL-E model.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
         "name": "generate_image",
-        "description": "Generate an AI image from a text prompt and send to chat. "
-                       "If user specified a provider (openai/gpt/gemini), pass it.",
+        "description": (
+            "Generate an AI image from a text prompt and send to chat. "
+            "provider='gemini' (default) or 'openai'. "
+            "For OpenAI: use list_image_models to see available models, then pass the model name."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "description": "Detailed image description in English"},
-                "provider": {"type": "string", "description": "Provider hint: 'openai', 'gpt', 'gemini'. Default: gemini"},
+                "prompt":   {"type": "string", "description": "Detailed image description in English"},
+                "model":    {"type": "string", "description": "Exact model ID from list_image_models, e.g. 'dall-e-3'"},
+                "provider": {"type": "string", "description": "'openai' or 'gemini'. Default: gemini"},
             },
             "required": ["prompt"],
         },
@@ -1354,20 +1666,75 @@ _TOOLS = [
     {
         "name": "run_python",
         "description": (
-            "Execute Python code in isolated Docker sandbox (internet access, 512MB RAM). "
+            "Execute Python code in isolated Docker sandbox (internet access, 1024MB RAM). "
             "Files written to /workspace persist between calls. "
             "Has: numpy, pandas, matplotlib, pillow, scipy, sympy. Use print() for output."
         ),
         "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]},
     },
     {
+        "name": "analyze_audio",
+        "description": (
+            "Send an audio file from workspace to Gemini for quality analysis. "
+            "ALWAYS use after creating/processing audio to verify quality before sending to user. "
+            "Checks for clipping, bad balance, artifacts, and whether the result matches the request."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path":     {"type": "string", "description": "Relative path in workspace, e.g. 'output.mp3'"},
+                "question": {"type": "string", "description": "What to check, e.g. 'Is bass balanced? Any clipping?'"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "analyze_image",
+        "description": (
+            "Send an image file from workspace to Gemini vision for analysis. "
+            "Use when you need to understand image content, read text from it, compare visuals, etc. "
+            "Much better than pytesseract for general image understanding."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path":     {"type": "string", "description": "Relative path in workspace, e.g. 'photo.jpg'"},
+                "question": {"type": "string", "description": "What to ask about the image"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
         "name": "run_shell",
         "description": (
-            "Execute shell commands in isolated Docker sandbox (internet access, 512MB RAM). "
+            "Execute shell commands in isolated Docker sandbox (internet access, 1024MB RAM). "
             "Files in /workspace persist between calls. "
             "Use for: file operations, data processing, compiling, converting."
         ),
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+    },
+    {
+        "name": "playwright_browse",
+        "description": (
+            "Control a real Chromium browser in Docker sandbox. "
+            "Actions: 'screenshot' — take full-page screenshot and send to chat; "
+            "'scrape' — extract text from page or CSS selector; "
+            "'click' — click element by CSS selector, then screenshot; "
+            "'fill' — fill input field (selector + value); "
+            "'eval' — run JavaScript and return result. "
+            "Use for JS-heavy sites, SPAs, login flows, visual page checks."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url":      {"type": "string", "description": "Full URL to open"},
+                "action":   {"type": "string", "enum": ["screenshot", "scrape", "click", "fill", "eval"]},
+                "selector": {"type": "string", "description": "CSS selector (for click/fill/scrape)"},
+                "value":    {"type": "string", "description": "Text to fill (for fill action)"},
+                "js_code":  {"type": "string", "description": "JS expression to evaluate (for eval action)"},
+            },
+            "required": ["url", "action"],
+        },
     },
     {
         "name": "write_file",
@@ -1380,6 +1747,11 @@ _TOOLS = [
             },
             "required": ["path", "content"],
         },
+    },
+    {
+        "name": "read_bot_logs",
+        "description": "Read the last N lines of bot.log from host. Returns the actual log text — READ IT and report what you see. Do NOT say 'logs requested' — analyze and summarize what's in the returned content.",
+        "parameters": {"type": "object", "properties": {"lines": {"type": "integer", "description": "How many last lines to read (default 100)"}}, "required": []},
     },
     {
         "name": "read_file",
@@ -1458,7 +1830,8 @@ _TOOLS = [
 
 _SYSTEM = (
     "Ты — Hatani AI, злобный и резкий AI-агент. Говоришь грубо, с матом, коротко. "
-    "Задачи выполняешь профессионально и честно.\n\n"
+    "Задачи выполняешь профессионально и честно.\n"
+    "ЗАПРЕЩЕНО: писать комментарии в коде (#, //, /* */, --). Никогда. Нигде. Вообще.\n\n"
 
     "ТЫ ОДНОВРЕМЕННО И БОТ И АГЕНТ:\n"
     "• Простой чат/вопросы → reply(text) сразу, без инструментов\n"
@@ -1471,11 +1844,34 @@ _SYSTEM = (
     "• Найти видео → search_and_send_video(creator='...' если указан автор)\n"
     "• Скачать видео по ссылке → download_video\n"
     "• Сервер/команды/код → run_shell / run_python (Docker sandbox, ЕСТЬ ИНТЕРНЕТ)\n"
-    "• Данные/файлы → fetch_json, create_chart, translate, qr_code, create_file\n\n"
+    "• Данные/файлы → fetch_json, create_chart, translate, qr_code, create_file\n"
+    "• Логи бота → read_bot_logs(lines=100) — читает bot.log с хоста (НЕ искать лог в Docker!). "
+    "После вызова tool вернёт текст логов — ПРОЧИТАЙ его и расскажи что там написано!\n\n"
+    "КОНТЕЙНЕР (Docker sandbox hatani-sandbox) — что установлено:\n"
+    "Системные: git curl wget ffmpeg imagemagick tesseract-ocr(rus+eng) chromium chromium-driver build-essential jq poppler-utils zip unzip p7zip-full\n"
+    "Python: numpy pandas scipy sympy matplotlib seaborn scikit-learn pillow opencv pytesseract\n"
+    "         requests httpx aiohttp beautifulsoup4 lxml scrapy mechanize playwright selenium nodriver\n"
+    "         openpyxl xlrd python-docx pyyaml pypdf2 reportlab pydantic cryptography psutil\n"
+    "         yt-dlp pydub demucs(htdemucs model cached) gitpython black pytest rich click\n"
+    "RAM: 1024MB, CPU: 2 ядра, таймаут команды: 10 мин. Интернет: ЕСТЬ.\n"
+    "ВАЖНО: работаешь под юзером sandbox (НЕ root). apt-get, sudo — НЕ РАБОТАЮТ. Только pip install.\n"
+    "Все нужные пакеты уже установлены — не трать шаги на их установку.\n"
+    "Demucs: ВСЕГДА используй модель `-n mdx_extra_q` (быстрее htdemucs в 3 раза на CPU) + `-j 2 --segment 7`. "
+    "Пример: demucs -n mdx_extra_q --two-stems=vocals -j 2 --segment 7 -o /workspace/out /workspace/audio.wav\n"
+    "Прогресс-бар demucs не отображается (использует \\r), это нормально — жди завершения.\n\n"
+    "АУДИО ОБРАБОТКА:\n"
+    "После создания/обработки аудиофайла ВСЕГДА вызывай analyze_audio(path='...', question='Оцени качество: баланс, клиппинг, соответствие задаче'). "
+    "Если Gemini говорит что есть проблемы (слишком громкий бас, клиппинг, плохой баланс) — "
+    "исправь параметры и обработай заново ПЕРЕД отправкой пользователю. "
+    "Отправляй только тот результат который сам считаешь качественным.\n\n"
     "КРИТИЧНО — reply завершает задачу НАВСЕГДА:\n"
-    "Вызывай reply ТОЛЬКО когда задача полностью выполнена.\n"
+    "Вызывай reply ТОЛЬКО когда задача полностью выполнена и файл/результат уже отправлен.\n"
     "Пока работаешь — используй think для размышлений, НЕ reply.\n"
-    "Если нужно прокомментировать промежуточный результат — think, не reply.\n\n"
+    "ДУМАЙ ПЕРЕД КАЖДЫМ ДЕЙСТВИЕМ:\n"
+    "Перед каждой командой/инструментом вызывай think() где:\n"
+    "1. Объясни что ты собираешься сделать (1-2 предложения)\n"
+    "2. Почему именно так\n"
+    "НЕ думай одно и то же дважды. После think — сразу действуй.\n\n"
 
     "ПОИСК:\n"
     "Ищи в интернете всё что просят. Не отказывай в поиске без причины.\n"
@@ -1491,7 +1887,7 @@ _SYSTEM = (
     "Кнопки: send_with_buttons\n"
     "Чат-инфо: tg_get_chat_info, tg_get_admins, tg_get_member_count, "
     "tg_get_chat_member, tg_get_sticker_set, tg_export_invite_link\n"
-    "Модерация (нужен админ): tg_ban_user, tg_kick_user, tg_restrict_member, "
+    "Модерация (нужен админ): tg_ban_user, tg_unban_user, tg_kick_user, tg_restrict_member, "
     "tg_promote_member, tg_create_invite_link, tg_set_chat_title, tg_set_chat_description, "
     "tg_set_chat_photo (аватарка БЕСЕДЫ/ЧАТА), tg_set_bot_photo (аватарка САМОГО БОТА), "
     "tg_approve_join_request, tg_create_forum_topic, tg_close_forum_topic\n"
@@ -1558,11 +1954,14 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
         "contents": contents,
         "tools": [{"functionDeclarations": _TOOLS}],
         "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
-        "generationConfig": {"temperature": 0.7, "thinkingConfig": {"thinkingLevel": "minimal"}},
+        "generationConfig": {"temperature": 0.7, "thinkingConfig": {"thinkingLevel": "high"}},
         "safetySettings": safety,
     }
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
-    for key in keys:
+    live_keys = _nk_get_live()
+    if not live_keys:
+        return {}
+    for key in live_keys:
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.post(
@@ -1572,12 +1971,21 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        return data.get("candidates", [{}])[0]
-                    if resp.status in (429, 403):
-                        remove_key(key, resp.status)
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            return candidates[0]
+                        reason = data.get("promptFeedback", {}).get("blockReason", "UNKNOWN")
+                        logger.warning(f"agent gemini: empty candidates, blockReason={reason}")
+                        if reason == "PROHIBITED_CONTENT":
+                            return {"_blocked": "PROHIBITED_CONTENT"}
                         continue
+                    if resp.status in (429, 403):
+                        _nk_cooldown(key, resp.status)
+                        continue
+                    body = await resp.text()
+                    logger.warning(f"agent gemini: HTTP {resp.status}: {body[:300]}")
         except Exception as e:
-            logger.warning(f"agent gemini: {e}")
+            logger.warning(f"agent gemini exception: {type(e).__name__}: {e}")
     return {}
 
 
@@ -1588,6 +1996,7 @@ async def _execute_tool(
     debounce: _DebounceHook, budget: _ToolBudget,
     status_cb: Callable, send_cb: Optional[Callable],
     ws: AgentWorkspace,
+    is_owner: bool = False,
 ) -> Tuple[str, Optional[dict]]:
 
     async def _st(t):
@@ -1599,13 +2008,24 @@ async def _execute_tool(
             try: await send_cb(m)
             except Exception as e: logger.warning(f"send_cb: {e}")
 
+    _PRIVILEGED = {
+        "tg_ban_user", "tg_unban_user", "tg_kick_user", "tg_restrict_member", "tg_promote_member",
+        "tg_delete_message", "tg_pin_message", "tg_unpin_message",
+        "tg_set_chat_title", "tg_set_chat_description", "tg_set_chat_photo",
+        "tg_set_bot_photo", "tg_create_invite_link", "read_bot_logs",
+    }
+    if name in _PRIVILEGED and not is_owner:
+        return "Недостаточно прав. Это действие доступно только администраторам.", None
+
     if e := debounce.check(name, args): return e, None
     if e := budget.charge(name):        return e, None
 
     if name == "think":
+        import html as _html
         t = args.get("thought", "")
         logger.info(f"[think] {t[:300]}")
-        await _st(f"💭 {t[:120]}...")
+        safe_t = _html.escape(t[:1200])
+        await _st(f"💭 <b>Размышляю:</b>\n<blockquote expandable>{safe_t}</blockquote>")
         return "ok", None
 
     if name == "web_search":
@@ -1677,6 +2097,10 @@ async def _execute_tool(
         await _send({"type": "tg_ban", "user_id": args.get("user_id"),
                      "reason": args.get("reason", ""), "until_date": args.get("until_date")})
         return f"Пользователь {args.get('user_id')} заблокирован.", None
+
+    if name == "tg_unban_user":
+        await _send({"type": "tg_unban", "user_id": args.get("user_id")})
+        return f"Пользователь {args.get('user_id')} разбанен.", None
 
     if name == "tg_kick_user":
         await _send({"type": "tg_kick", "user_id": args.get("user_id"),
@@ -1802,7 +2226,7 @@ async def _execute_tool(
             result = subprocess.run(
                 ["yt-dlp", "--cookies", cookie_path, "--dump-json", "--flat-playlist",
                  "--playlist-end", "1", f"https://www.tiktok.com/@{username}"],
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True, timeout=180
             )
             if result.returncode == 0 and result.stdout.strip():
                 first = _json.loads(result.stdout.strip().splitlines()[0])
@@ -1915,11 +2339,6 @@ async def _execute_tool(
         except Exception as e:
             return f"fetch_with_cookies error: {e}", None
 
-    if name == "read_bot_logs":
-        await _send({"type": "tg_read_logs",
-                     "lines": args.get("lines", 50),
-                     "filter": args.get("filter","")})
-        return "Логи запрошены.", None
     # ── End Telegram API tools ───────────────────────────────────────
 
     if name == "search_and_send_image":
@@ -1933,9 +2352,17 @@ async def _execute_tool(
             args.get("creator", ""), _send, status_cb
         ), None
 
+    if name == "list_image_models":
+        await _st("📋 Запрашиваю модели OpenAI...")
+        return await _tool_list_image_models(), None
+
     if name == "generate_image":
         await _st("🎨 Генерирую картинку...")
-        return await _tool_generate_image(args.get("prompt", ""), _send, args.get("provider", "gemini")), None
+        return await _tool_generate_image(
+            args.get("prompt", ""), _send,
+            provider=args.get("provider", "gemini"),
+            model=args.get("model", ""),
+        ), None
 
     if name == "download_image":
         await _st("⬇️ Скачиваю картинку...")
@@ -1956,6 +2383,18 @@ async def _execute_tool(
         await _st(f"🐍 Запускаю Python в Docker:\n<pre><code class=\"language-python\">{safe_code}{'…' if len(code) > 300 else ''}</code></pre>")
         return await _tool_run_python(code, ws, _st), None
 
+    if name == "analyze_audio":
+        await _st("🎧 Слушаю результат через Gemini...")
+        return await _tool_analyze_audio(
+            path=args.get("path", ""), question=args.get("question", ""), ws=ws
+        ), None
+
+    if name == "analyze_image":
+        await _st("🔍 Анализирую изображение через Gemini...")
+        return await _tool_analyze_image(
+            path=args.get("path", ""), question=args.get("question", ""), ws=ws
+        ), None
+
     if name == "run_shell":
         import html as _html
         cmd = args.get("command", "")
@@ -1963,10 +2402,32 @@ async def _execute_tool(
         await _st(f"💻 Выполняю команду в Docker:\n<pre><code class=\"language-bash\">{safe_cmd}</code></pre>")
         return await _tool_run_shell(cmd, ws, _st), None
 
+    if name == "playwright_browse":
+        await _st(f"🌐 Открываю браузер: {args.get('url', '')[:80]}...")
+        return await _tool_playwright_browse(
+            url=args.get("url", ""),
+            action=args.get("action", "screenshot"),
+            selector=args.get("selector", ""),
+            value=args.get("value", ""),
+            js_code=args.get("js_code", ""),
+            ws=ws, status_cb=_st, send_cb=send_media_cb,
+        ), None
+
     if name == "write_file":
         path, content = args.get("path", "file.txt"), args.get("content", "")
         ws.write(path, content)
         return f"Written: {path} ({len(content)} chars)", None
+
+    if name == "read_bot_logs":
+        if not is_owner:
+            return "Недостаточно прав. Это действие доступно только администраторам.", None
+        import html as _html
+        log_text = await _tool_read_bot_logs(args.get("lines", 100))
+        # Показываем в статус-сообщении — обрезаем хвост для отображения
+        display = log_text[-2500:] if len(log_text) > 2500 else log_text
+        safe_log = _html.escape(display)
+        await _st(f"📋 <b>Логи бота:</b>\n<pre><code>{safe_log}</code></pre>")
+        return log_text, None  # агент видит полный текст
 
     if name == "read_file":
         return ws.read(args.get("path", "")), None
@@ -2039,21 +2500,30 @@ async def run_agent(
     _TOOL_LABELS: dict[str, str] = {
         "think": "Размышляю...", "web_search": "Ищу в интернете...",
         "scrape_url": "Читаю страницу...", "fetch_json": "Запрашиваю данные...",
-        "generate_project": "Генерирую проект...", "generate_image": "Рисую...",
+        "generate_project": "Генерирую проект...", "list_image_models": "Запрашиваю модели...", "generate_image": "Рисую...",
         "search_and_send_image": "Ищу картинку...", "download_image": "Скачиваю картинку...",
         "search_and_send_video": "Ищу видео...", "download_video": "Скачиваю видео...",
         "text_to_speech": "Озвучиваю...", "run_python": "Запускаю Python...",
-        "run_shell": "Выполняю команду...", "write_file": "Записываю файл...",
-        "read_file": "Читаю файл...", "calculate": "Считаю...", "translate": "Перевожу...",
+        "analyze_audio": "Слушаю результат...", "analyze_image": "Анализирую изображение...", "run_shell": "Выполняю команду...", "playwright_browse": "Открываю браузер...",
+        "write_file": "Записываю файл...",
+        "read_bot_logs": "Читаю логи бота...", "read_file": "Читаю файл...", "calculate": "Считаю...", "translate": "Перевожу...",
         "qr_code": "Генерирую QR...", "create_chart": "Строю график...",
         "create_file": "Создаю файл...", "send_workspace_file": "Отправляю файл...",
         "send_with_buttons": "Отправляю кнопки...", "reply": "Формулирую ответ...",
     }
     last_action = "Формулирую план..."
+    import time as _time
+    _start_ts = _time.monotonic()
+
+    def _fmt_status(action: str, step: int) -> str:
+        elapsed = int(_time.monotonic() - _start_ts)
+        m, s = divmod(elapsed, 60)
+        t = f"{m}м {s}с" if m else f"{s}с"
+        return f"🤖 Шаг {step+1}/{MAX_STEPS} · {t} · {action}"
 
     try:
         for step in range(MAX_STEPS):
-            await _st(f"🤖 {last_action}")
+            await _st(_fmt_status(last_action, step))
 
             if MAX_STEPS - step <= 3:
                 contents.append({"role": "user", "parts": [{"text":
@@ -2061,11 +2531,26 @@ async def run_agent(
                 }]})
 
             candidate = await _gemini_call(keys, contents, is_owner=is_owner)
+
+            # PROHIBITED_CONTENT — context is poisoned, retry with clean prompt
+            if candidate.get("_blocked") == "PROHIBITED_CONTENT":
+                from state import chat_context_buffer
+                chat_context_buffer.pop(chat_id, None)
+                # Rebuild contents without chat context
+                clean_task = task.split("[/Справочный контекст]")[-1].strip() or task
+                contents = [{"role": "user", "parts": [{"text": clean_task}]}]
+                if initial_files:
+                    for fname in initial_files:
+                        contents[0]["parts"].insert(0, {"text":
+                            f"[Файл загружен в workspace: /workspace/{fname}]"})
+                candidate = await _gemini_call(keys, contents, is_owner=is_owner)
+                if not candidate or candidate.get("_blocked"):
+                    return "Запрос заблокирован фильтром. Попробуй перефразировать.", None
+
             if not candidate:
-                # All keys may be in 429 cooldown — wait and retry once
-                await _st("⏳ Все ключи в кулдауне, жду 15 сек...")
-                await asyncio.sleep(15)
-                keys = load_keys()  # reload after cooldown
+                # All keys may be in 429 cooldown — wait for cooldown to expire (65s)
+                await _st("⏳ Все ключи в кулдауне, жду 70 сек...")
+                await asyncio.sleep(70)
                 candidate = await _gemini_call(keys, contents, is_owner=is_owner)
                 if not candidate:
                     return "Gemini не ответил — все ключи временно перегружены. Попробуй через минуту.", None
@@ -2086,9 +2571,11 @@ async def run_agent(
                 name = fn.get("name", "")
                 args = fn.get("args", {})
                 result, project = await _execute_tool(
-                    name, args, debounce, budget, status_cb, send_media_cb, ws
+                    name, args, debounce, budget, status_cb, send_media_cb, ws,
+                    is_owner=is_owner,
                 )
                 last_action = _TOOL_LABELS.get(name, f"{name}...")
+                await _st(_fmt_status(last_action, step))
                 if name == "generate_project" and project is not None:
                     return None, project
                 if name == "reply":
@@ -2146,7 +2633,10 @@ async def classify_agent_intent(prompt: str) -> bool:
         },
     }
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
-    for key in keys:
+    live_keys = _nk_get_live()
+    if not live_keys:
+        return False
+    for key in live_keys:
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.post(
@@ -2169,5 +2659,5 @@ async def classify_agent_intent(prompt: str) -> bool:
                         remove_key(key, resp.status)
                         continue
         except Exception as e:
-            logger.warning(f"classify_agent_intent request error: {e}")
+            logger.warning(f"classify_agent_intent request error: {type(e).__name__}: {e}")
     return False
