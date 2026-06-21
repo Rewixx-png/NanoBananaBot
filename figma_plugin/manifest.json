@@ -1,0 +1,10 @@
+{
+  "name": "NanoHatani Bridge",
+  "id": "nanohatani-figma-bridge",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "networkAccess": {
+    "allowedDomains": ["http://94.156.179.21:7432"]
+  }
+}

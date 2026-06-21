@@ -228,7 +228,7 @@ def _protect_search_targets(query: str, source: str) -> str:
 
 
 async def _extract_search_query(user_message: str) -> str:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return _clean_web_query(user_message)
     system = (
@@ -290,7 +290,7 @@ def _parse_query_plan(raw: str) -> list[str]:
 async def _plan_firecrawl_queries(user_request: str, seed_query: str) -> list[str]:
     source = user_request.strip() or seed_query.strip()
     fallback = _dedupe_texts(_web_query_variants(source) + _web_query_variants(seed_query))[:18]
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return fallback
     system = (
@@ -400,7 +400,7 @@ def _extract_links_from_markdown(md: str) -> list[str]:
 
 
 async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str='') -> Tuple[str, bool]:
-    keys = load_firecrawl_keys()
+    keys = await load_firecrawl_keys()
     if not keys:
         return ('', False)
 
@@ -412,7 +412,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
                 pass
 
     async def _refine_queries(contexts: list[str], attempted: list[str]) -> list[str]:
-        keys2 = load_keys()
+        keys2 = await load_keys()
         if not keys2:
             return []
         source = raw_request or query
@@ -476,7 +476,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
 
         # Fallback: Firecrawl if keys available and DDG failed
         if not raw_results:
-            query_keys = load_firecrawl_keys()
+            query_keys = await load_firecrawl_keys()
             for key in query_keys:
                 headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
                 payload = {'query': search_query[:500], 'limit': 8, 'sources': [{'type': 'web'}]}
@@ -505,7 +505,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
             return ('', api_available)
 
         await _st(f'📄 Читаю {len(top_urls)} страниц...')
-        scrape_keys = load_firecrawl_keys() or query_keys
+        scrape_keys = await load_firecrawl_keys() or query_keys
         scraped_pages = await asyncio.gather(*[_firecrawl_scrape_url(u, scrape_keys) for u in top_urls], return_exceptions=True)
 
         parts = []
@@ -536,7 +536,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
                     depth2_urls.append(u)
 
             if depth2_urls:
-                scrape_keys = load_firecrawl_keys() or scrape_keys
+                scrape_keys = await load_firecrawl_keys() or scrape_keys
                 depth2_pages = await asyncio.gather(*[_firecrawl_scrape_url(u, scrape_keys) for u in depth2_urls], return_exceptions=True)
                 depth3_candidates = []
                 for url, page_md in zip(depth2_urls, depth2_pages):
@@ -553,7 +553,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
                             seen_urls.add(u)
                             depth3_urls.append(u)
                     if depth3_urls:
-                        scrape_keys = load_firecrawl_keys() or scrape_keys
+                        scrape_keys = await load_firecrawl_keys() or scrape_keys
                         depth3_pages = await asyncio.gather(*[_firecrawl_scrape_url(u, scrape_keys) for u in depth3_urls], return_exceptions=True)
                         for url, page_md in zip(depth3_urls, depth3_pages):
                             if not isinstance(page_md, str) or not page_md or len(page_md.strip()) < 150:
@@ -672,7 +672,7 @@ def _fallback_web_answer(query: str, web_context: str) -> str:
 
 
 async def synthesize_web_answer(prompt: str, web_context: str) -> str:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return _fallback_web_answer(prompt, web_context)
     if not web_context or len(web_context.strip()) < 80:
@@ -722,7 +722,7 @@ async def synthesize_web_answer(prompt: str, web_context: str) -> str:
 
 
 async def classify_code_intent_with_gemini(prompt: str) -> bool:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return False
     system = '''Classify the user's intent. Return ONLY JSON: {"code_request": true/false}.
@@ -772,7 +772,7 @@ def _guess_image_mime(image_bytes: bytes) -> str:
 
 
 async def classify_draw_intent_with_gemini(prompt: str, has_replied_image: bool=False) -> dict[str, Any]:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return {'draw_request': False, 'edit_request': False, 'prompt': ''}
     system = '''Classify whether the user wants the bot to create or edit a visual image. Return ONLY JSON:
@@ -815,7 +815,7 @@ Do not require exact trigger words. Infer natural intent from slang, Russian, En
 
 
 async def review_image_with_gemini(image_bytes: bytes, prompt: str) -> Tuple[bool, str]:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys or not image_bytes:
         return (False, 'No Gemini key or image bytes available for visual review.')
     system = '''You are a practical QA critic for AI-generated images. Return ONLY JSON:
@@ -1020,7 +1020,7 @@ def _execute_pil_code_to_png(code: str) -> Tuple[Optional[bytes], Optional[str]]
 
 
 async def generate_image_via_code(prompt: str, state_data: Optional[dict[str, Any]] = None, max_attempts: int = 5) -> Tuple[Optional[bytes], Optional[str], str]:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return (None, 'Нет API ключей.', '')
     attempts = max(1, min(max_attempts, 5))
@@ -1119,7 +1119,7 @@ async def generate_reviewed_image_with_gemini(prompt: str, image_bytes: Optional
     return (None, last_error or 'Не удалось получить изображение.', critique)
 
 async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='', web_query: str='', status_cb=None, allow_web: bool=True, is_owner: bool=False) -> str:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return 'Блять, ключи закончились, иди нахуй.'
     from state import chat_context_buffer
@@ -1267,7 +1267,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
     return reply_text
 
 async def generate_video_with_gemini(prompt: str, video_path: str) -> str:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return 'Блять, ключи закончились, иди нахуй.'
     temp_dir = tempfile.mkdtemp()
@@ -1322,7 +1322,7 @@ async def generate_video_with_gemini(prompt: str, video_path: str) -> str:
     return 'Все ключи проебаны или сдохли, отъебись.'
 
 async def analyze_photo_with_gemini(image_bytes: bytes, prompt: str) -> str:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return 'Блять, ключи закончились, иди нахуй.'
     if not prompt:
@@ -1364,7 +1364,7 @@ async def analyze_photo_with_gemini(image_bytes: bytes, prompt: str) -> str:
     return 'Все ключи проебаны или сдохли, отъебись.'
 
 async def analyze_voice_with_gemini(audio_bytes: bytes, mime_type: str, prompt: str) -> str:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return 'Блять, ключи закончились, иди нахуй.'
     if not prompt:
@@ -1405,7 +1405,7 @@ async def analyze_voice_with_gemini(audio_bytes: bytes, mime_type: str, prompt: 
     return 'Все ключи проебаны или сдохли, отъебись.'
 
 async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes]=None, model: str='gemini-3.1-flash-image-preview', images_bytes: list=None, temperature: float=1.0, state_data: dict = None) -> Tuple[Optional[bytes], Optional[str]]:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return (None, 'Нет доступных API ключей.')
     all_images = images_bytes if images_bytes else [image_bytes] if image_bytes else []
@@ -1495,9 +1495,13 @@ async def generate_image_with_gpt(prompt: str, image_bytes: Optional[bytes]=None
             state_data['status'] = 'Генерирую через OpenRouter...'
         return await generate_image_with_openrouter(prompt, model=model, images_bytes=images_bytes, state_data=state_data)
     all_ref_images = images_bytes if images_bytes else [image_bytes] if image_bytes else []
-    api_keys = load_openai_keys()
+    logging.info(f"generate_image_with_gpt: model={model}, ref_images={len(all_ref_images)}, prompt_len={len(prompt)}")
+    api_keys = await load_openai_keys()
+    if all_ref_images:
+        # sk- ключи имеют gpt-image-2 доступ — ставим их первыми
+        api_keys = sorted(api_keys, key=lambda k: (k.startswith('sk-proj-'), k))
     prompt_text = prompt if prompt else 'A highly detailed beautiful picture'
-    request_timeout = aiohttp.ClientTimeout(total=OPENAI_TIMEOUT)
+    request_timeout = aiohttp.ClientTimeout(total=360 if all_ref_images else OPENAI_TIMEOUT)
     last_error = None
     for idx, api_key in enumerate(api_keys):
         if state_data:
@@ -1506,12 +1510,22 @@ async def generate_image_with_gpt(prompt: str, image_bytes: Optional[bytes]=None
         async with aiohttp.ClientSession() as session:
             try:
                 if all_ref_images and (not model.startswith('dall-e')):
+                    # edits endpoint не поддерживает версионные имена (gpt-image-2-2026-...)
+                    _edit_model = model.split('-202')[0] if '-202' in model else model
                     form = aiohttp.FormData()
-                    form.add_field('model', model)
+                    form.add_field('model', _edit_model)
                     form.add_field('prompt', prompt_text)
-                    for img in all_ref_images:
-                        form.add_field('image[]', img, filename='input.jpg', content_type='image/jpeg')
+                    form.add_field('quality', 'high')
+                    if len(all_ref_images) == 1:
+                        form.add_field('image', all_ref_images[0], filename='image.jpg', content_type='image/jpeg')
+                    else:
+                        for img in all_ref_images:
+                            form.add_field('image[]', img, filename='input.jpg', content_type='image/jpeg')
                     async with session.post('https://api.openai.com/v1/images/edits', data=form, headers=headers, timeout=request_timeout) as resp:
+                        logging.info(f"edits endpoint status={resp.status}, model={model}, ref_images={len(all_ref_images)}, key_prefix={api_key[:16]}")
+                        if resp.status != 200:
+                            err_body = await resp.text()
+                            logging.warning(f"edits error: {err_body[:300]}")
                         (result, error) = await parse_openai_image_response(resp)
                 else:
                     if model == 'dall-e-3':
@@ -1529,18 +1543,34 @@ async def generate_image_with_gpt(prompt: str, image_bytes: Optional[bytes]=None
                         logging.warning(f'Запрос заблокирован цензурой OpenAI на ключе {api_key[:12]}. Прерываю цикл.')
                         return (None, error)
                     elif 'access to model' in lowered_err and model != 'gpt-image-1.5':
-                        # Key exists but lacks access to requested model — try gpt-image-1.5 fallback
-                        logging.info(f'Ключ {api_key[:12]} нет доступа к {model}, пробую gpt-image-1.5')
-                        fallback_payload = {'model': 'gpt-image-1.5', 'prompt': prompt_text}
-                        try:
-                            async with session.post('https://api.openai.com/v1/images/generations', json=fallback_payload, headers={**headers, 'Content-Type': 'application/json'}, timeout=request_timeout) as fb_resp:
-                                (fb_result, fb_error) = await parse_openai_image_response(fb_resp)
-                                if fb_result:
-                                    logging.info(f'gpt-image-1.5 сработал на ключе {api_key[:12]}')
-                                    return (fb_result, None)
-                                last_error = fb_error
-                        except Exception:
-                            pass
+                        logging.info(f'Ключ {api_key[:12]} нет доступа к {model}')
+                        if all_ref_images:
+                            # Есть фото — пробуем edits с базовой моделью gpt-image-2
+                            try:
+                                fb_form = aiohttp.FormData()
+                                fb_form.add_field('model', 'gpt-image-2')
+                                fb_form.add_field('prompt', prompt_text)
+                                fb_form.add_field('quality', 'high')
+                                fb_form.add_field('image', all_ref_images[0], filename='image.jpg', content_type='image/jpeg')
+                                async with session.post('https://api.openai.com/v1/images/edits', data=fb_form, headers=headers, timeout=request_timeout) as fb_resp:
+                                    logging.info(f'edits fallback gpt-image-2 status={fb_resp.status}')
+                                    (fb_result, fb_error) = await parse_openai_image_response(fb_resp)
+                                    if fb_result:
+                                        logging.info(f'edits gpt-image-2 сработал на ключе {api_key[:12]}')
+                                        return (fb_result, None)
+                                    last_error = fb_error
+                            except Exception as _fe:
+                                logging.warning(f'edits fallback failed: {_fe}')
+                        else:
+                            try:
+                                fallback_payload = {'model': 'gpt-image-1.5', 'prompt': prompt_text}
+                                async with session.post('https://api.openai.com/v1/images/generations', json=fallback_payload, headers={**headers, 'Content-Type': 'application/json'}, timeout=request_timeout) as fb_resp:
+                                    (fb_result, fb_error) = await parse_openai_image_response(fb_resp)
+                                    if fb_result:
+                                        return (fb_result, None)
+                                    last_error = fb_error
+                            except Exception:
+                                pass
                     elif 'billing' in lowered_err or 'quota' in lowered_err or 'limit' in lowered_err or '(401)' in error or 'unauthorized' in lowered_err or 'hard limit' in lowered_err or 'not active' in lowered_err:
                         logging.warning(f'Удаляю нерабочий OpenAI ключ {api_key[:12]}... Ошибка: {error}')
                         remove_key(api_key)
@@ -1559,7 +1589,8 @@ async def generate_image_with_gpt(prompt: str, image_bytes: Optional[bytes]=None
     logging.info('Все OpenAI ключи упали, пробую через OpenRouter (openai/gpt-5.4-image-2)...')
     if state_data:
         state_data['status'] = 'Переключаюсь на OpenRouter...'
-    (or_result, or_error) = await generate_image_with_openrouter(prompt, model='openai/gpt-5.4-image-2', state_data=state_data)
+        state_data['fallback_openrouter'] = True
+    (or_result, or_error) = await generate_image_with_openrouter(prompt, model='openai/gpt-5.4-image-2', images_bytes=all_ref_images or None, state_data=state_data)
     if or_result:
         return (or_result, None)
     logging.warning(f'OpenRouter тоже не помог: {or_error}')
@@ -1572,13 +1603,18 @@ def is_openai_verification_error(error_msg: str) -> bool:
     return 'organization must be verified' in lowered or 'must be verified' in lowered or 'verify organization' in lowered
 
 async def generate_image_with_openrouter(prompt: str, model: str='google/gemini-3.1-flash-image-preview', images_bytes: Optional[List[bytes]]=None, state_data: Optional[Dict[str, Any]]=None):
-    api_keys = load_openrouter_keys()
+    api_keys = await load_openrouter_keys()
     if not api_keys:
         return (None, 'Нет ключей OpenRouter. Добавьте sk-or-... ключи в r.txt.')
     prompt_text = prompt if prompt else 'A highly detailed beautiful picture'
     url = 'https://openrouter.ai/api/v1/chat/completions'
     modalities = ['image'] if 'flux' in model or 'seedream' in model or 'riverflow' in model else ['image', 'text']
-    payload = {'model': model, 'modalities': modalities, 'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': prompt_text}]}]}
+    msg_content = [{'type': 'text', 'text': prompt_text}]
+    if images_bytes:
+        for img in images_bytes[:4]:
+            b64 = base64.b64encode(img).decode()
+            msg_content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64}'}})
+    payload = {'model': model, 'modalities': modalities, 'messages': [{'role': 'user', 'content': msg_content}]}
     request_timeout = aiohttp.ClientTimeout(total=300)
     last_error = None
     for idx, api_key in enumerate(api_keys):
@@ -1691,7 +1727,7 @@ def is_openai_timeout_error(error_msg: str) -> bool:
     return 'таймаут openai' in lowered or 'timeout' in lowered
 
 async def explain_generation_error(prompt: str, error_msg: str, image_bytes: bytes=None) -> str:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return ''
     key = keys[0]
@@ -1712,7 +1748,7 @@ async def explain_generation_error(prompt: str, error_msg: str, image_bytes: byt
     return ''
 
 async def analyze_image_for_veo(image_bytes: bytes, user_prompt: str='') -> str:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return user_prompt or ''
     key = keys[0]
@@ -1733,7 +1769,7 @@ async def analyze_image_for_veo(image_bytes: bytes, user_prompt: str='') -> str:
     return user_prompt or ''
 
 async def start_veo_generation(prompt: str, model: str='veo-2.0-generate-001', image_bytes: bytes=None, state_data: dict = None) -> tuple:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return (None, None, 'Нет Gemini ключей для генерации видео.')
     prompt_text = prompt if prompt else 'A beautiful cinematic scene'
@@ -1816,7 +1852,7 @@ async def translate_to_english(prompt: str) -> str:
     import re
     if not re.search('[а-яёА-ЯЁ]', prompt):
         return prompt
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return prompt
     key = keys[0]
@@ -1949,7 +1985,7 @@ def _normalize_project_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def generate_project_with_gemini(prompt: str) -> Dict[str, Any]:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return {'ok': False, 'error': 'Ключи сдохли.'}
     user_prompt = f'''User request:
@@ -1997,7 +2033,7 @@ Generate the deliverable as real files. Remember: ONLY JSON with project_name, s
 
 
 async def generate_code_with_gemini(prompt: str) -> str:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return 'Ключи сдохли.'
     _REFUSAL_MARKERS = ["i can't", 'i cannot', "i'm unable", 'i am unable', "i won't", 'i will not', "i'm not able", "i don't feel comfortable", 'не могу', 'не буду', 'отказываюсь', 'не стану', 'невозможно выполнить', 'нарушает', 'незаконно', 'противоречит', 'не могу помочь', 'this request', 'этот запрос', 'harmful', 'illegal', 'unethical', 'safety', 'policy', 'guidelines']
@@ -2105,7 +2141,7 @@ async def fetch_gemini_image_models() -> list:
     now = __import__('time').time()
     if cache_key in _models_cache and now - _models_cache[cache_key]['ts'] < _MODELS_CACHE_TTL:
         return _models_cache[cache_key]['data']
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return []
     url = f'https://generativelanguage.googleapis.com/v1beta/models?key={keys[0]}&pageSize=200'
@@ -2131,7 +2167,7 @@ async def fetch_gemini_tts_models() -> list:
     now = __import__('time').time()
     if cache_key in _models_cache and now - _models_cache[cache_key]['ts'] < _MODELS_CACHE_TTL:
         return _models_cache[cache_key]['data']
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return []
     url = f'https://generativelanguage.googleapis.com/v1beta/models?key={keys[0]}&pageSize=200'
@@ -2160,7 +2196,7 @@ async def fetch_openai_image_models() -> list:
     skip = {'dall-e-2', 'gpt-image-1-mini'}
     result = []
     seen = set()
-    api_keys = load_openai_keys()
+    api_keys = await load_openai_keys()
     for key in api_keys:
         try:
             async with aiohttp.ClientSession() as session:
@@ -2178,7 +2214,7 @@ async def fetch_openai_image_models() -> list:
         except Exception as e:
             logging.warning(f'fetch_openai_image_models key {key[:12]}: {e}')
             continue
-    or_keys = load_openrouter_keys()
+    or_keys = await load_openrouter_keys()
     if or_keys:
         try:
             async with aiohttp.ClientSession() as session:
@@ -2202,7 +2238,7 @@ async def fetch_veo_models() -> list:
     now = __import__('time').time()
     if cache_key in _models_cache and now - _models_cache[cache_key]['ts'] < _MODELS_CACHE_TTL:
         return _models_cache[cache_key]['data']
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return []
     url = f'https://generativelanguage.googleapis.com/v1beta/models?key={keys[0]}&pageSize=200'
@@ -2223,7 +2259,7 @@ async def fetch_veo_models() -> list:
     return []
 
 async def generate_image_prompt(prompt: str, images_bytes: list, prev_prompts: list=None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return (None, None, 'Нет ключей')
     key = keys[0]
@@ -2335,20 +2371,136 @@ async def generate_image_with_replicate(prompt: str, model: str='aisha-ai-offici
                 return (None, str(e))
     return (None, 'Все Replicate ключи недоступны.')
 
-async def generate_tts_with_gemini(text: str, model: str, voice_name: str, temperature: float=1.0, language_code: str='ru-RU', scene: str='', style: str='', pace: str='', accent: str='') -> Tuple[Optional[bytes], Optional[str]]:
+def _split_text(text: str, max_chars: int = 800) -> list:
+    import re
+    sentences = re.split(r'(?<=[.!?\n])\s+', text)
+    chunks = []
+    current_chunk = []
+    current_len = 0
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if current_len + len(s) > max_chars:
+            if current_chunk:
+                chunks.append(" ".join(current_chunk))
+            current_chunk = [s]
+            current_len = len(s)
+        else:
+            current_chunk.append(s)
+            current_len += len(s) + 1
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+    return chunks
+
+async def generate_tts_with_gemini(text: str, model: str, voice_name: str, temperature: float=1.0, language_code: str='ru-RU', scene: str='', style: str='', pace: str='', accent: str='', _is_chunk: bool=False) -> Tuple[Optional[bytes], Optional[str]]:
     import wave
     import io
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return (None, 'Нет ключей Gemini.')
+
+    if '#### TRANSCRIPT' in text:
+        text = text.split('#### TRANSCRIPT')[-1].strip()
+
+    if not _is_chunk and len(text) > 800:
+        chunks = _split_text(text, 800)
+        tasks = []
+        for chunk in chunks:
+            tasks.append(generate_tts_with_gemini(
+                chunk, model, voice_name, temperature, language_code,
+                scene, style, pace, accent, _is_chunk=True
+            ))
+        results = await asyncio.gather(*tasks)
+        pcm_chunks = []
+        for res, err in results:
+            if err:
+                return (None, f"Ошибка в части текста: {err}")
+            if res:
+                pcm_chunks.append(res)
+        if not pcm_chunks:
+            return (None, "Не удалось сгенерировать части аудио.")
+        pcm_data = b"".join(pcm_chunks)
+        import tempfile
+        import subprocess
+        import os
+        (fd, temp_wav) = tempfile.mkstemp(suffix='.wav')
+        os.close(fd)
+        with wave.open(temp_wav, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(24000)
+            wav_file.writeframes(pcm_data)
+        temp_ogg = temp_wav.replace('.wav', '.ogg')
+        subprocess.run(['ffmpeg', '-i', temp_wav, '-c:a', 'libopus', '-b:a', '48k', '-y', temp_ogg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ogg_data = None
+        if os.path.exists(temp_ogg):
+            with open(temp_ogg, 'rb') as f:
+                ogg_data = f.read()
+            os.remove(temp_ogg)
+        os.remove(temp_wav)
+        if ogg_data:
+            return (ogg_data, None)
+        wav_io = io.BytesIO()
+        with wave.open(wav_io, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(24000)
+            wav_file.writeframes(pcm_data)
+        return (wav_io.getvalue(), None)
+
     full_text = ''
     has_advanced = scene or style or pace or accent
-    if has_advanced:
+    if pace:
+        pace_lower = pace.lower()
+        if 'extremely fast' in pace_lower or 'жестко быстро' in pace_lower or 'очень очень быстро' in pace_lower:
+            text = '[extremely fast] ' + text
+        elif 'very fast' in pace_lower or 'очень быстро' in pace_lower:
+            text = '[very fast] ' + text
+        elif 'fast' in pace_lower or 'быстро' in pace_lower:
+            text = '[fast] ' + text
+        elif 'extremely slow' in pace_lower or 'жестко медленно' in pace_lower:
+            text = '[extremely slow] ' + text
+        elif 'very slow' in pace_lower or 'очень медленно' in pace_lower:
+            text = '[very slow] ' + text
+        elif 'slow' in pace_lower or 'медленно' in pace_lower:
+            text = '[slow] ' + text
+    if style:
+        style_lower = style.lower()
+        for tag in ['whispering', 'shouting', 'cheerful', 'excited', 'serious', 'tired', 'panicked']:
+            if tag in style_lower:
+                text = f'[{tag}] ' + text
+                break
+        if 'шепот' in style_lower or 'тихо' in style_lower:
+            text = '[whispering] ' + text
+        elif 'крик' in style_lower or 'громко' in style_lower:
+            text = '[shouting] ' + text
+        elif 'весел' in style_lower or 'радост' in style_lower:
+            text = '[cheerful] ' + text
+        elif 'возбужд' in style_lower or 'эмоционально' in style_lower:
+            text = '[excited] ' + text
+        elif 'серьезн' in style_lower:
+            text = '[serious] ' + text
+        elif 'устал' in style_lower:
+            text = '[tired] ' + text
+        elif 'паник' in style_lower or 'испуг' in style_lower:
+            text = '[panicked] ' + text
+    if not has_advanced:
+        full_text += (
+            "You are an advanced text-to-speech system. Please synthesize the transcript below into spoken audio exactly as written.\n"
+            "#### TRANSCRIPT\n"
+        )
+    else:
+        full_text += (
+            "You are an advanced text-to-speech system. Please synthesize the following text into spoken audio "
+            "following the performance guidelines below. Do not read the audio profile or director's notes aloud. "
+            "Read only the text under the TRANSCRIPT section.\n\n"
+        )
         full_text += f'# AUDIO PROFILE: {voice_name}\n'
         if scene:
             full_text += f'## THE SCENE: {scene}\n'
         if style or pace or accent:
-            full_text += "### DIRECTOR'S NOTES\n"
+            full_text += "### PERFORMANCE\n"
             if style:
                 full_text += f'Style: {style}\n'
             if pace:
@@ -2357,60 +2509,109 @@ async def generate_tts_with_gemini(text: str, model: str, voice_name: str, tempe
                 full_text += f'Accent: {accent}\n'
         full_text += '\n#### TRANSCRIPT\n'
     full_text += text
-    url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={keys[0]}'
-    payload = {'contents': [{'parts': [{'text': full_text}]}], 'generationConfig': {'temperature': temperature, 'responseModalities': ['AUDIO'], 'speechConfig': {'languageCode': language_code, 'voiceConfig': {'prebuiltVoiceConfig': {'voiceName': voice_name}}}}}
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=300)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    candidate = data.get('candidates', [{}])[0]
-                    parts = candidate.get('content', {}).get('parts', [])
-                    for part in parts:
-                        if 'inlineData' in part:
-                            b64_data = part['inlineData']['data']
-                            pcm_data = base64.b64decode(b64_data)
-                            import tempfile
-                            import subprocess
-                            import os
-                            (fd, temp_wav) = tempfile.mkstemp(suffix='.wav')
-                            os.close(fd)
-                            with wave.open(temp_wav, 'wb') as wav_file:
-                                wav_file.setnchannels(1)
-                                wav_file.setsampwidth(2)
-                                wav_file.setframerate(24000)
-                                wav_file.writeframes(pcm_data)
-                            temp_ogg = temp_wav.replace('.wav', '.ogg')
-                            subprocess.run(['ffmpeg', '-i', temp_wav, '-c:a', 'libopus', '-b:a', '48k', '-y', temp_ogg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            ogg_data = None
-                            if os.path.exists(temp_ogg):
-                                with open(temp_ogg, 'rb') as f:
-                                    ogg_data = f.read()
-                                os.remove(temp_ogg)
-                            os.remove(temp_wav)
-                            if ogg_data:
-                                return (ogg_data, None)
-                            wav_io = io.BytesIO()
-                            with wave.open(wav_io, 'wb') as wav_file:
-                                wav_file.setnchannels(1)
-                                wav_file.setsampwidth(2)
-                                wav_file.setframerate(24000)
-                                wav_file.writeframes(pcm_data)
-                            return (wav_io.getvalue(), None)
-                    return (None, 'Gemini не вернул аудио.')
-                else:
-                    err = await resp.text()
-                    return (None, f'Ошибка Gemini TTS ({resp.status}): {err[:150]}')
-        except asyncio.TimeoutError:
-            return (None, 'Сетевая ошибка: Таймаут (API долго думало, попробуй текст поменьше)')
-        except Exception as e:
-            import traceback
-            logging.error(f"TTS Error: {traceback.format_exc()}")
-            return (None, f'Сетевая ошибка: {type(e).__name__} {e}')
+    last_err = 'Нет доступных ключей.'
+    keys_pool = keys.copy()
+    import random as _random
+    _random.shuffle(keys_pool)
+    for key in keys_pool:
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}'
+        payload = {
+            'contents': [{'parts': [{'text': full_text}]}],
+            'generationConfig': {
+                'temperature': temperature,
+                'responseModalities': ['AUDIO'],
+                'speechConfig': {
+                    'languageCode': language_code,
+                    'voiceConfig': {'prebuiltVoiceConfig': {'voiceName': voice_name}}
+                }
+            },
+            'safetySettings': [
+                {'category': 'HARM_CATEGORY_HARASSMENT',       'threshold': 'BLOCK_NONE'},
+                {'category': 'HARM_CATEGORY_HATE_SPEECH',       'threshold': 'BLOCK_NONE'},
+                {'category': 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'threshold': 'BLOCK_NONE'},
+                {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_NONE'},
+                {'category': 'HARM_CATEGORY_CIVIC_INTEGRITY',   'threshold': 'BLOCK_NONE'},
+            ]
+        }
+        async with aiohttp.ClientSession() as session:
+            for attempt in range(2):
+                try:
+                    async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            candidates = data.get('candidates', [])
+                            if not candidates:
+                                remove_key(key, 400)
+                                last_err = 'Gemini заблокировал текст или вернул пустой ответ.'
+                                break
+                            candidate = candidates[0]
+                            finish_reason = candidate.get('finishReason', '')
+                            if finish_reason and finish_reason != 'STOP' and finish_reason != 'MAX_TOKENS':
+                                remove_key(key, 400)
+                                last_err = f'Ошибка генерации (Finish Reason: {finish_reason}).'
+                                break
+                            parts = candidate.get('content', {}).get('parts', [])
+                            for part in parts:
+                                if 'inlineData' in part:
+                                    b64_data = part['inlineData']['data']
+                                    pcm_data = base64.b64decode(b64_data)
+                                    if _is_chunk:
+                                        return (pcm_data, None)
+                                    import tempfile
+                                    import subprocess
+                                    import os
+                                    (fd, temp_wav) = tempfile.mkstemp(suffix='.wav')
+                                    os.close(fd)
+                                    with wave.open(temp_wav, 'wb') as wav_file:
+                                        wav_file.setnchannels(1)
+                                        wav_file.setsampwidth(2)
+                                        wav_file.setframerate(24000)
+                                        wav_file.writeframes(pcm_data)
+                                    temp_ogg = temp_wav.replace('.wav', '.ogg')
+                                    subprocess.run(['ffmpeg', '-i', temp_wav, '-c:a', 'libopus', '-b:a', '48k', '-y', temp_ogg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    ogg_data = None
+                                    if os.path.exists(temp_ogg):
+                                        with open(temp_ogg, 'rb') as f:
+                                            ogg_data = f.read()
+                                        os.remove(temp_ogg)
+                                    os.remove(temp_wav)
+                                    if ogg_data:
+                                        return (ogg_data, None)
+                                    wav_io = io.BytesIO()
+                                    with wave.open(wav_io, 'wb') as wav_file:
+                                        wav_file.setnchannels(1)
+                                        wav_file.setsampwidth(2)
+                                        wav_file.setframerate(24000)
+                                        wav_file.writeframes(pcm_data)
+                                    return (wav_io.getvalue(), None)
+                            last_err = 'Gemini не вернул аудио-данные.'
+                            break
+                        else:
+                            remove_key(key, resp.status)
+                            last_err = f'Ошибка Gemini TTS ({resp.status})'
+                            if attempt < 1:
+                                await asyncio.sleep(0.3)
+                                continue
+                            break
+                except asyncio.TimeoutError:
+                    last_err = 'Сетевая ошибка: Таймаут (API долго думало)'
+                    if attempt < 1:
+                        await asyncio.sleep(0.3)
+                        continue
+                    break
+                except Exception as e:
+                    import traceback
+                    logging.error(f"TTS Error: {traceback.format_exc()}")
+                    last_err = f'Сетевая ошибка: {type(e).__name__} {e}'
+                    if attempt < 1:
+                        await asyncio.sleep(0.3)
+                        continue
+                    break
+    return (None, f'Все API ключи исчерпаны или недоступны. Последняя ошибка: {last_err}')
     return (None, 'Все модели недоступны.')
 
 async def generate_bull_roast(name: str, username: str = '') -> list:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return ['Нет ключей Gemini, иди нахуй.']
     target = f'@{username}' if username else name

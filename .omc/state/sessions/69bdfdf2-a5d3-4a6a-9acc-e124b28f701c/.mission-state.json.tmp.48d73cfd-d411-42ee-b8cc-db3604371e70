@@ -1,0 +1,45 @@
+{
+  "updatedAt": "2026-06-12T08:36:00.051Z",
+  "missions": [
+    {
+      "id": "session:69bdfdf2-a5d3-4a6a-9acc-e124b28f701c:none",
+      "source": "session",
+      "name": "none",
+      "objective": "Session mission",
+      "createdAt": "2026-06-12T08:36:00.051Z",
+      "updatedAt": "2026-06-12T08:36:00.051Z",
+      "status": "running",
+      "workerCount": 1,
+      "taskCounts": {
+        "total": 1,
+        "pending": 0,
+        "blocked": 0,
+        "inProgress": 1,
+        "completed": 0,
+        "failed": 0
+      },
+      "agents": [
+        {
+          "name": "code-modernization:security-auditor:a9f5da5",
+          "role": "code-modernization:security-auditor",
+          "ownership": "a9f5da5caecad599b",
+          "status": "running",
+          "currentStep": null,
+          "latestUpdate": null,
+          "completedSummary": null,
+          "updatedAt": "2026-06-12T08:36:00.051Z"
+        }
+      ],
+      "timeline": [
+        {
+          "id": "session-start:a9f5da5caecad599b:2026-06-12T08:36:00.051Z",
+          "at": "2026-06-12T08:36:00.051Z",
+          "kind": "update",
+          "agent": "code-modernization:security-auditor:a9f5da5",
+          "detail": "started code-modernization:security-auditor:a9f5da5",
+          "sourceKey": "session-start:a9f5da5caecad599b"
+        }
+      ]
+    }
+  ]
+}

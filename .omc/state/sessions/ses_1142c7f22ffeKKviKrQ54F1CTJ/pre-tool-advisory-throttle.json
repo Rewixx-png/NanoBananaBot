@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "entries": {
+    "79a93d4a2f8f50b95f852280616242fee1855dc99a3c75211917f55e72e95fae": {
+      "last_emitted_at_ms": 1782078053587,
+      "message": "Use parallel execution for independent tasks. Use run_in_background for long operations (npm install, builds, tests)."
+    },
+    "445ed27a3872b681d98190bae61ccb84954e1bc4e140df5370be958dee776b3a": {
+      "last_emitted_at_ms": 1782077746587,
+      "message": "Verify changes work after editing. Test functionality before marking complete."
+    },
+    "459c54e5f35d6a58dcd90d2aecc21fa6d1f35d241bc5b134c506f87dc7b6d67b": {
+      "last_emitted_at_ms": 1782077717909,
+      "message": "Combine searches in parallel when investigating multiple patterns."
+    },
+    "466399dafa2d20f60587180bad0a07358eb7f2bce724df0ff682f038ad33f5ad": {
+      "last_emitted_at_ms": 1782077609382,
+      "message": "Read multiple files in parallel when possible for faster analysis."
+    },
+    "4f7a67fba0a8473e9883d9e8dffbb2d72e00a4a1eeb4fa80cb14213b167dc90f": {
+      "last_emitted_at_ms": 1782076361203,
+      "message": "Mark todos in_progress BEFORE starting, completed IMMEDIATELY after finishing."
+    },
+    "9482b873d03e78859b9be3db95626996076e965bd160ba83c95df21074f3ae06": {
+      "last_emitted_at_ms": 1782075789078,
+      "message": "Spawning agent: unknown (inherit) [BACKGROUND] | Task: Create handlers/chat.py"
+    },
+    "e7fcaa82c321f0ff7ae56de23966315aa581be32b1480e431b01f09c1f85ab4d": {
+      "last_emitted_at_ms": 1782075772392,
+      "message": "Spawning agent: unknown (inherit) [BACKGROUND] | Task: Create handlers/core.py"
+    },
+    "ba073ba707f5caabfe27f64072acefcad354a96e8fe49a25861facbbaabda6c9": {
+      "last_emitted_at_ms": 1782075766778,
+      "message": "Spawning agent: unknown (inherit) [BACKGROUND] | Task: Create handlers/media.py"
+    },
+    "6d7b0840264cbd0e84c6e02a6f727dfcf87b254e7f28ee240ad1860be13e02fe": {
+      "last_emitted_at_ms": 1782075757200,
+      "message": "Spawning agent: unknown (inherit) [BACKGROUND] | Task: Create handlers/admin.py"
+    },
+    "e06422cd87b5b853fe8020ec9a4aa2fcfc7bd0cff4007abde10b134910331679": {
+      "last_emitted_at_ms": 1782075730653,
+      "message": "Spawning agent: unknown (inherit) [BACKGROUND] | Task: Create handlers/common.py"
+    },
+    "059968dbfe1b3b524dbe0b7a0227aa4097b75443acbe35d6fcea4b2c6b9c4424": {
+      "last_emitted_at_ms": 1782075133832,
+      "message": "Spawning agent: plan (inherit)"
+    }
+  },
+  "updated_at": "2026-06-21T21:40:53.587Z"
+}

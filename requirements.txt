@@ -1,0 +1,15 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+aiohttp
+aiogram>=3.0.0
+aiosqlite
+python-dotenv
+playwright
+qrcode
+matplotlib
+Pillow
+numpy
+bleach
+trafilatura
+duckduckgo-search
+picwish
+torch
