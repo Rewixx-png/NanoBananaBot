@@ -49,14 +49,21 @@ _SANDBOX_IMAGE  = "hatani-sandbox:latest"
 class AgentWorkspace:
     """Temp directory on host, bind-mounted into Docker for isolated execution."""
 
-    def __init__(self):
-        self.host_path = tempfile.mkdtemp(prefix="agent_ws_")
-        os.chown(self.host_path, 1000, 1000)  # sandbox uid/gid
-        os.chmod(self.host_path, 0o700)
-        logger.info(f"Workspace created: {self.host_path}")
+    def __init__(self, existing_path: str = ""):
+        if existing_path and os.path.isdir(existing_path):
+            self.host_path = existing_path
+            self._persistent = True
+            logger.info(f"Workspace reused: {self.host_path}")
+        else:
+            self.host_path = tempfile.mkdtemp(prefix="agent_ws_")
+            os.chown(self.host_path, 1000, 1000)
+            os.chmod(self.host_path, 0o700)
+            self._persistent = False
+            logger.info(f"Workspace created: {self.host_path}")
 
     def cleanup(self):
-        shutil.rmtree(self.host_path, ignore_errors=True)
+        if not self._persistent:
+            shutil.rmtree(self.host_path, ignore_errors=True)
 
     def preload(self, files: dict[str, bytes]):
         """Pre-populate workspace with files before agent starts."""
@@ -454,7 +461,7 @@ async def _tool_search_image(
     status_cb: Callable,
 ) -> str:
     """Autonomous image search: formulate query → find URLs → evaluate → retry."""
-    keys = load_keys()
+    keys = await load_keys()
     search_desc = description or query
     tried_queries: list[str] = []
     max_rounds = 3
@@ -729,7 +736,7 @@ async def _tool_search_video(
     query: str, description: str, creator: str, send_cb: Callable, status_cb: Callable
 ) -> str:
     """Autonomous video search with optional creator verification."""
-    keys = load_keys()
+    keys = await load_keys()
     max_rounds = 3
     tried_queries: list[str] = []
 
@@ -923,7 +930,7 @@ async def _tool_analyze_image(
         return "Файл слишком большой (>20MB) для анализа."
     mime = mimetypes.guess_type(safe_path)[0] or "image/jpeg"
     b64 = base64.b64encode(img_bytes).decode()
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return "Нет Gemini ключей."
     payload = {
@@ -974,7 +981,7 @@ async def _tool_analyze_audio(
                 "flac": "audio/flac", "m4a": "audio/mp4", "aac": "audio/aac"}
     mime = mime_map.get(ext, "audio/mpeg")
     b64 = base64.b64encode(audio_bytes).decode()
-    keys = _nk_get_live()
+    keys = await _nk_get_live()
     if not keys:
         return "Нет ключей для анализа."
     payload = {
@@ -999,7 +1006,7 @@ async def _tool_analyze_audio(
                                  .get("content", {}).get("parts", []))
                         return " ".join(p.get("text", "") for p in parts).strip() or "Нет ответа."
                     if resp.status in (429, 403):
-                        _nk_cooldown(key, resp.status)
+                        await _nk_cooldown(key, resp.status)
         except Exception as e:
             logger.warning(f"analyze_audio: {type(e).__name__}: {e}")
     return "Gemini не ответил."
@@ -1206,7 +1213,7 @@ async def _tool_create_chart(
 
 
 async def _tool_translate(text: str, target_lang: str) -> str:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return "No Gemini keys."
     payload = {
@@ -1854,8 +1861,9 @@ _SYSTEM = (
     "         openpyxl xlrd python-docx pyyaml pypdf2 reportlab pydantic cryptography psutil\n"
     "         yt-dlp pydub demucs(htdemucs model cached) gitpython black pytest rich click\n"
     "RAM: 1024MB, CPU: 2 ядра, таймаут команды: 10 мин. Интернет: ЕСТЬ.\n"
-    "ВАЖНО: работаешь под юзером sandbox (НЕ root). apt-get, sudo — НЕ РАБОТАЮТ. Только pip install.\n"
+    "ВАЖНО: работаешь под юзером sandbox (НЕ root). apt-get, sudo — НЕ РАБОТАЮТ. Для установки Python-библиотек ОБЯЗАТЕЛЬНО используй uv: `uv pip install --system <пакет>` вместо pip install.\n"
     "Все нужные пакеты уже установлены — не трать шаги на их установку.\n"
+    "ЗАПРЕЩЕНО: glob('/**/*', recursive=True), find /, os.walk('/') и любой рекурсивный обход всей файловой системы — зависает навсегда. Работай только в /workspace.\n"
     "Demucs: ВСЕГДА используй модель `-n mdx_extra_q` (быстрее htdemucs в 3 раза на CPU) + `-j 2 --segment 7`. "
     "Пример: demucs -n mdx_extra_q --two-stems=vocals -j 2 --segment 7 -o /workspace/out /workspace/audio.wav\n"
     "Прогресс-бар demucs не отображается (использует \\r), это нормально — жди завершения.\n\n"
@@ -1896,6 +1904,10 @@ _SYSTEM = (
     "Если пользователь говорит 'смени аву бота' → tg_set_bot_photo. "
     "Если 'смени аву беседы/чата' → tg_set_chat_photo.\n"
     "Утилиты: tg_send_chat_action, read_bot_logs\n\n"
+    "ЛИМИТЫ ФАЙЛОВ (ВАЖНО!):\n"
+    "Бот работает на локальном Telegram Bot API сервере. Это снимает стандартное ограничение в 50 МБ.\n"
+    "Твой лимит на отправку и скачивание файлов через Telegram составляет **2 ГБ (2000 МБ)**!\n"
+    "Ты можешь свободно скачивать и отправлять огромные видео, архивы и файлы.\n\n"
     "КУКИ СЕРВИСОВ (ВАЖНО!):\n"
     "У бота есть авторизованные куки для этих платформ: YouTube, TikTok, Instagram, X/Twitter, Reddit.\n"
     "Куки подключаются АВТОМАТИЧЕСКИ при использовании download_video и search_and_send_video.\n"
@@ -1958,7 +1970,7 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
         "safetySettings": safety,
     }
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
-    live_keys = _nk_get_live()
+    live_keys = await _nk_get_live()
     if not live_keys:
         return {}
     for key in live_keys:
@@ -1980,7 +1992,7 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                             return {"_blocked": "PROHIBITED_CONTENT"}
                         continue
                     if resp.status in (429, 403):
-                        _nk_cooldown(key, resp.status)
+                        await _nk_cooldown(key, resp.status)
                         continue
                     body = await resp.text()
                     logger.warning(f"agent gemini: HTTP {resp.status}: {body[:300]}")
@@ -1991,12 +2003,26 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
 
 # ── Execute one tool ─────────────────────────────────────────────
 
+async def _tg_api(method: str, params: dict) -> dict:
+    """Direct Telegram Bot API call — returns parsed JSON."""
+    from config import BOT_TOKEN as _TK
+    url = f"https://api.telegram.org/bot{_TK}/{method}"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(url, json=params,
+                              timeout=aiohttp.ClientTimeout(total=10)) as r:
+                return await r.json()
+    except Exception as e:
+        return {"ok": False, "description": str(e)}
+
+
 async def _execute_tool(
     name: str, args: dict,
     debounce: _DebounceHook, budget: _ToolBudget,
     status_cb: Callable, send_cb: Optional[Callable],
     ws: AgentWorkspace,
     is_owner: bool = False,
+    chat_id: int = 0,
 ) -> Tuple[str, Optional[dict]]:
 
     async def _st(t):
@@ -2090,8 +2116,18 @@ async def _execute_tool(
         return "[ОТПРАВЛЕНО] Сообщение переслано.", None
 
     if name == "tg_get_chat_info":
-        await _send({"type": "tg_get_chat_info"})
-        return "Запрос информации о чате отправлен.", None
+        r = await _tg_api("getChat", {"chat_id": chat_id})
+        rc = await _tg_api("getChatMemberCount", {"chat_id": chat_id})
+        if not r.get("ok"):
+            return f"Ошибка: {r.get('description','unknown')}", None
+        c = r["result"]
+        count = rc.get("result", "?")
+        result = (f"Чат: {c.get('title','N/A')}\nID: {c.get('id')}\n"
+                  f"Тип: {c.get('type')}\nУчастников: {count}\n"
+                  f"Описание: {c.get('description','—')}\nUsername: @{c.get('username','—')}")
+        import html as _html
+        await _st(f"ℹ️ <b>Инфо о чате:</b>\n<pre>{_html.escape(result)}</pre>")
+        return result, None
 
     if name == "tg_ban_user":
         await _send({"type": "tg_ban", "user_id": args.get("user_id"),
@@ -2179,14 +2215,31 @@ async def _execute_tool(
                      "custom_title": args.get("custom_title","")})
         return f"Пользователь {args.get('user_id')} обновлён.", None
     if name == "tg_get_chat_member":
-        await _send({"type": "tg_get_member", "user_id": args.get("user_id")})
-        return "Информация об участнике запрошена.", None
+        r = await _tg_api("getChatMember", {"chat_id": chat_id, "user_id": args.get("user_id")})
+        if not r.get("ok"):
+            return f"Ошибка: {r.get('description','unknown')}", None
+        m = r["result"]
+        u = m.get("user", {})
+        result = (f"Пользователь: {u.get('first_name','')} {u.get('last_name','')} "
+                  f"(@{u.get('username','—')})\nID: {u.get('id')}\nСтатус: {m.get('status')}")
+        return result, None
+
     if name == "tg_get_admins":
-        await _send({"type": "tg_get_admins"})
-        return "Список администраторов запрошен.", None
+        r = await _tg_api("getChatAdministrators", {"chat_id": chat_id})
+        if not r.get("ok"):
+            return f"Ошибка: {r.get('description','unknown')}", None
+        admins = []
+        for m in r["result"]:
+            u = m.get("user", {})
+            name_str = f"{u.get('first_name','')} (@{u.get('username','—')}) [{m.get('status')}]"
+            admins.append(name_str)
+        return "Администраторы:\n" + "\n".join(admins), None
+
     if name == "tg_get_member_count":
-        await _send({"type": "tg_get_member_count"})
-        return "Количество участников запрошено.", None
+        r = await _tg_api("getChatMemberCount", {"chat_id": chat_id})
+        if not r.get("ok"):
+            return f"Ошибка: {r.get('description','unknown')}", None
+        return f"Участников в чате: {r['result']}", None
     if name == "tg_create_forum_topic":
         await _send({"type": "tg_create_forum_topic", "name": args.get("name",""),
                      "icon_emoji": args.get("icon_emoji","")})
@@ -2482,11 +2535,19 @@ async def run_agent(
     is_owner: bool = False,
     initial_files: Optional[dict] = None,  # {filename: bytes} pre-loaded into workspace
 ) -> Tuple[Optional[str], Optional[dict]]:
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return "Gemini keys are dead.", None
 
-    ws       = AgentWorkspace()
+    import time as _time
+    from state import chat_workspaces as _cws
+    _WS_TTL = 7200  # 2 часа
+    _existing = _cws.get(chat_id)
+    _existing_path = ""
+    if _existing and _time.time() - _existing["ts"] < _WS_TTL:
+        _existing_path = _existing["path"]
+    ws = AgentWorkspace(existing_path=_existing_path)
+    _cws[chat_id] = {"path": ws.host_path, "ts": _time.time()}
     if initial_files:
         ws.preload(initial_files)
     debounce = _DebounceHook()
@@ -2572,7 +2633,7 @@ async def run_agent(
                 args = fn.get("args", {})
                 result, project = await _execute_tool(
                     name, args, debounce, budget, status_cb, send_media_cb, ws,
-                    is_owner=is_owner,
+                    is_owner=is_owner, chat_id=chat_id,
                 )
                 last_action = _TOOL_LABELS.get(name, f"{name}...")
                 await _st(_fmt_status(last_action, step))
@@ -2593,7 +2654,7 @@ async def run_agent(
 async def classify_agent_intent(prompt: str) -> bool:
     """Returns True if this request should go through the agent loop.
     Uses Gemini to understand intent — no keyword matching."""
-    keys = load_keys()
+    keys = await load_keys()
     if not keys:
         return False
 
@@ -2633,7 +2694,7 @@ async def classify_agent_intent(prompt: str) -> bool:
         },
     }
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
-    live_keys = _nk_get_live()
+    live_keys = await _nk_get_live()
     if not live_keys:
         return False
     for key in live_keys:

@@ -5,6 +5,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 BOT_TOKEN_2 = os.getenv("BOT_TOKEN_2", "")
+TELEGRAM_API_URL = os.getenv("TELEGRAM_API_URL", "http://localhost:18081")
 FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
 DUAL_HISTORY_SIZE = 100
 CHAT_ID = -1002033901364

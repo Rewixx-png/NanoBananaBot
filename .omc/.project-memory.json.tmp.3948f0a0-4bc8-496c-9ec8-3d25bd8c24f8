@@ -1,0 +1,161 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1781253265200,
+  "projectRoot": "/root/Projects/NanoHatani",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "__pycache__": {
+      "path": "__pycache__",
+      "purpose": null,
+      "fileCount": 14,
+      "lastAccessed": 1781253265165,
+      "keyFiles": [
+        "ai_services.cpython-310.pyc",
+        "bot.cpython-310.pyc",
+        "config.cpython-310.pyc",
+        "database.cpython-310.pyc",
+        "dual_bot.cpython-310.pyc"
+      ]
+    },
+    "figma_plugin": {
+      "path": "figma_plugin",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1781253265169,
+      "keyFiles": [
+        "code.js",
+        "manifest.json",
+        "ui.html"
+      ]
+    },
+    "media": {
+      "path": "media",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1781253265179,
+      "keyFiles": []
+    },
+    "models": {
+      "path": "models",
+      "purpose": "Data models",
+      "fileCount": 1,
+      "lastAccessed": 1781253265188,
+      "keyFiles": [
+        "anime.pth"
+      ]
+    },
+    "thoughts": {
+      "path": "thoughts",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1781253265188,
+      "keyFiles": []
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "handlers.py",
+      "accessCount": 17,
+      "lastAccessed": 1781253370893,
+      "type": "file"
+    },
+    {
+      "path": "ai_services.py",
+      "accessCount": 5,
+      "lastAccessed": 1781253370982,
+      "type": "file"
+    },
+    {
+      "path": "state.py",
+      "accessCount": 3,
+      "lastAccessed": 1781253322618,
+      "type": "file"
+    },
+    {
+      "path": "config.py",
+      "accessCount": 3,
+      "lastAccessed": 1781253369098,
+      "type": "file"
+    },
+    {
+      "path": "keys_manager.py",
+      "accessCount": 3,
+      "lastAccessed": 1781253369794,
+      "type": "file"
+    },
+    {
+      "path": "figma_bridge.py",
+      "accessCount": 3,
+      "lastAccessed": 1781253380188,
+      "type": "file"
+    },
+    {
+      "path": "main.py",
+      "accessCount": 2,
+      "lastAccessed": 1781253319033,
+      "type": "file"
+    },
+    {
+      "path": "database.py",
+      "accessCount": 2,
+      "lastAccessed": 1781253324470,
+      "type": "file"
+    },
+    {
+      "path": "dual_bot.py",
+      "accessCount": 2,
+      "lastAccessed": 1781253332347,
+      "type": "file"
+    },
+    {
+      "path": "esrgan_model.py",
+      "accessCount": 2,
+      "lastAccessed": 1781253333837,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 2,
+      "lastAccessed": 1781253334840,
+      "type": "file"
+    },
+    {
+      "path": "utils.py",
+      "accessCount": 1,
+      "lastAccessed": 1781106677016,
+      "type": "file"
+    },
+    {
+      "path": ".env.example",
+      "accessCount": 1,
+      "lastAccessed": 1781253335528,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

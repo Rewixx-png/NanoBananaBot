@@ -9,3 +9,10 @@ bot.log
 *.log
 models/
 .env
+*.mp4
+*.zip
+*.pth
+*.tar.gz
+*.rar
+*.db
+*.pth.tar

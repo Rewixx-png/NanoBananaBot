@@ -1,7 +1,7 @@
 import json
 import re
 import os
-import sqlite3
+import aiosqlite
 import logging
 import time
 from config import API_KEYS_FILE, OPENAI_API_KEY
@@ -111,34 +111,46 @@ def save_api_config(config):
             elif isinstance(val, str) and val.strip():
                 out_data[key] = val.strip()
     out_json = '```json\n' + json.dumps(out_data, ensure_ascii=False, indent=2) + '\n```\n'
-    with open(API_KEYS_FILE, 'w') as f:
-        f.write(out_json)
-
-def load_keys():
+    tmp_file = API_KEYS_FILE + ".tmp"
     try:
-        con = sqlite3.connect(REWTEST_DB, timeout=3)
-        cur = con.execute("SELECT key FROM keys WHERE service='Gemini' AND is_live=1")
-        keys = [row[0] for row in cur.fetchall() if not _is_dead(row[0])]
-        con.close()
-        if keys:
-            return keys
+        with open(tmp_file, 'w', encoding='utf-8') as f:
+            f.write(out_json)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_file, API_KEYS_FILE)
+    except Exception as e:
+        logging.error(f'Ошибка при атомарном сохранении API-конфига: {e}')
+        if os.path.exists(tmp_file):
+            try:
+                os.remove(tmp_file)
+            except Exception:
+                pass
+
+async def load_keys():
+    try:
+        async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
+            async with db.execute("SELECT key FROM keys WHERE service='Gemini' AND is_live=1") as cur:
+                rows = await cur.fetchall()
+                keys = [row[0] for row in rows if not _is_dead(row[0])]
+                if keys:
+                    return keys
     except Exception:
         pass
     return [k for k in load_api_config().get('gemini', []) if not _is_dead(k)]
 
-def load_openai_keys():
+async def load_openai_keys():
     key = os.getenv('OPENAI_API_KEY', '').strip()
     if key:
         return [key]
     if OPENAI_API_KEY.strip():
         return [OPENAI_API_KEY.strip()]
     try:
-        con = sqlite3.connect(REWTEST_DB, timeout=3)
-        cur = con.execute("SELECT key FROM keys WHERE service='OpenAI' AND is_live=1")
-        keys = [row[0] for row in cur.fetchall() if not _is_dead(row[0])]
-        con.close()
-        if keys:
-            return keys
+        async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
+            async with db.execute("SELECT key FROM keys WHERE service='OpenAI' AND is_live=1") as cur:
+                rows = await cur.fetchall()
+                keys = [row[0] for row in rows if not _is_dead(row[0])]
+                if keys:
+                    return keys
     except Exception:
         pass
     try:
@@ -151,8 +163,8 @@ def load_openai_keys():
         logging.error(f'Ошибка загрузки OpenAI ключей: {e}')
     return []
 
-def load_openai_key():
-    keys = load_openai_keys()
+async def load_openai_key():
+    keys = await load_openai_keys()
     return keys[0] if keys else ''
 
 def load_nvidia_keys():
@@ -166,14 +178,14 @@ def load_nvidia_keys():
         logging.error(f'Ошибка загрузки NVIDIA ключей: {e}')
     return []
 
-def load_openrouter_keys():
+async def load_openrouter_keys():
     try:
-        con = sqlite3.connect(REWTEST_DB, timeout=3)
-        cur = con.execute("SELECT key FROM keys WHERE service='OpenRouter' AND is_live=1")
-        keys = [row[0] for row in cur.fetchall() if not _is_dead(row[0])]
-        con.close()
-        if keys:
-            return keys
+        async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
+            async with db.execute("SELECT key FROM keys WHERE service='OpenRouter' AND is_live=1") as cur:
+                rows = await cur.fetchall()
+                keys = [row[0] for row in rows if not _is_dead(row[0])]
+                if keys:
+                    return keys
     except Exception:
         pass
     try:
@@ -193,14 +205,14 @@ def load_replicate_keys():
         logging.error(f'Ошибка загрузки Replicate ключей: {e}')
     return []
 
-def load_groq_keys():
+async def load_groq_keys():
     try:
-        con = sqlite3.connect(REWTEST_DB, timeout=3)
-        cur = con.execute("SELECT key FROM keys WHERE service='Groq' AND is_live=1")
-        keys = [row[0] for row in cur.fetchall() if not _is_dead(row[0])]
-        con.close()
-        if keys:
-            return keys
+        async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
+            async with db.execute("SELECT key FROM keys WHERE service='Groq' AND is_live=1") as cur:
+                rows = await cur.fetchall()
+                keys = [row[0] for row in rows if not _is_dead(row[0])]
+                if keys:
+                    return keys
     except Exception as e:
         logging.warning(f'load_groq_keys DB error: {e}')
     try:
@@ -213,7 +225,7 @@ def load_groq_keys():
         logging.error(f'Ошибка загрузки Groq ключей: {e}')
     return []
 
-def load_firecrawl_keys():
+async def load_firecrawl_keys():
     env_keys = normalize_key_list(os.getenv('FIRECRAWL_KEYS', ''))
     single_env_key = os.getenv('FIRECRAWL_API_KEY', '').strip()
     if single_env_key:
@@ -221,12 +233,12 @@ def load_firecrawl_keys():
     if env_keys:
         return list(dict.fromkeys([k for k in env_keys if not _is_dead(k)]))
     try:
-        con = sqlite3.connect(REWTEST_DB, timeout=3)
-        cur = con.execute("SELECT key FROM keys WHERE service='Firecrawl' AND is_live=1")
-        keys = [row[0] for row in cur.fetchall() if not _is_dead(row[0])]
-        con.close()
-        if keys:
-            return keys
+        async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
+            async with db.execute("SELECT key FROM keys WHERE service='Firecrawl' AND is_live=1") as cur:
+                rows = await cur.fetchall()
+                keys = [row[0] for row in rows if not _is_dead(row[0])]
+                if keys:
+                    return keys
     except Exception as e:
         logging.warning(f'load_firecrawl_keys DB error: {e}')
     try:

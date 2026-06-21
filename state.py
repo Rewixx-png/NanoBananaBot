@@ -22,3 +22,4 @@ dual_tasks: dict = {}
 generated_code_messages: dict = {}
 chat_context_buffer: dict = {}  # chat_id -> list[str], все сообщения чата (не только боту)
 chat_last_files: dict = {}  # chat_id -> {"filename": str, "data": bytes, "ts": float}
+chat_workspaces: dict = {}  # chat_id -> {"path": str, "ts": float}

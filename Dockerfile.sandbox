@@ -35,7 +35,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python libraries ─────────────────────────────────────────────
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir uv
+
+RUN uv pip install --system --no-cache \
     \
     # ── Data science & math ──
     numpy pandas scipy sympy matplotlib seaborn \
@@ -88,7 +90,8 @@ RUN playwright install chromium --with-deps 2>/dev/null || playwright install ch
 RUN ln -sf /usr/bin/chromium /usr/local/bin/google-chrome 2>/dev/null || true \
     && ln -sf /usr/bin/chromedriver /usr/local/bin/chromedriver 2>/dev/null || true
 
-RUN useradd -m -u 1000 -s /bin/bash sandbox
+RUN useradd -m -u 1000 -s /bin/bash sandbox \
+    && chmod 777 /usr/local/lib/python3.11/site-packages /usr/local/bin 2>/dev/null || true
 
 # ── Pre-download demucs models as sandbox user ───────────────────
 USER sandbox

@@ -15,6 +15,16 @@ async def init_db():
             await db.execute('\n                CREATE TABLE IF NOT EXISTS pending_generations (\n                    id TEXT PRIMARY KEY,\n                    gen_type TEXT,\n                    user_id INTEGER,\n                    chat_id INTEGER,\n                    source_message_id INTEGER,\n                    message_thread_id INTEGER,\n                    prompt TEXT,\n                    model TEXT,\n                    provider TEXT,\n                    file_ids TEXT,\n                    veo_operation_name TEXT,\n                    veo_api_key TEXT,\n                    model_label TEXT,\n                    created_at REAL\n                )\n            ')
             await db.execute('\n                CREATE TABLE IF NOT EXISTS user_stats (\n                    user_id INTEGER,\n                    username TEXT,\n                    first_name TEXT,\n                    date_str TEXT,\n                    gen_type TEXT,\n                    count INTEGER DEFAULT 0,\n                    PRIMARY KEY (user_id, date_str, gen_type)\n                )\n            ')
             await db.execute('CREATE TABLE IF NOT EXISTS banned_users (user_id INTEGER PRIMARY KEY)')
+            await db.execute('CREATE TABLE IF NOT EXISTS vip_users (user_id INTEGER PRIMARY KEY, paid_until REAL)')
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS daily_limits_usage (
+                    chat_id INTEGER,
+                    user_id INTEGER,
+                    period TEXT,
+                    count INTEGER,
+                    PRIMARY KEY (chat_id, user_id)
+                )
+            ''')
             await db.execute('\n                CREATE TABLE IF NOT EXISTS prompt_logs (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    user_id INTEGER,\n                    username TEXT,\n                    first_name TEXT,\n                    gen_type TEXT,\n                    prompt TEXT,\n                    created_at REAL\n                )\n            ')
             await db.execute('\n                CREATE TABLE IF NOT EXISTS chat_limits (\n                    chat_id INTEGER PRIMARY KEY,\n                    req_limit INTEGER,\n                    days INTEGER\n                )\n            ')
             await db.execute('''
@@ -209,3 +219,39 @@ async def get_interrupted_agent_tasks() -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f'Ошибка получения agent_tasks: {e}')
         return []
+
+async def get_all_vip_users() -> dict:
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            async with db.execute('SELECT user_id, paid_until FROM vip_users') as cur:
+                rows = await cur.fetchall()
+                return {r[0]: r[1] for r in rows}
+    except Exception as e:
+        logger.error(f'Ошибка при получении VIP-пользователей: {e}')
+        return {}
+
+async def set_vip_user_db(user_id: int, paid_until: float):
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            await db.execute('INSERT OR REPLACE INTO vip_users (user_id, paid_until) VALUES (?, ?)', (user_id, paid_until))
+            await db.commit()
+    except Exception as e:
+        logger.error(f'Ошибка сохранения VIP-пользователя {user_id}: {e}')
+
+async def get_all_daily_limits_usage() -> dict:
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            async with db.execute('SELECT chat_id, user_id, period, count FROM daily_limits_usage') as cur:
+                rows = await cur.fetchall()
+                return {(r[0], r[1]): {'period': r[2], 'count': r[3]} for r in rows}
+    except Exception as e:
+        logger.error(f'Ошибка при получении лимитов использования: {e}')
+        return {}
+
+async def save_daily_limit_db(chat_id: int, user_id: int, period: str, count: int):
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            await db.execute('INSERT OR REPLACE INTO daily_limits_usage (chat_id, user_id, period, count) VALUES (?, ?, ?, ?)', (chat_id, user_id, period, count))
+            await db.commit()
+    except Exception as e:
+        logger.error(f'Ошибка сохранения лимита использования (chat={chat_id}, user={user_id}): {e}')

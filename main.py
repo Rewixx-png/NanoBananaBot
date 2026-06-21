@@ -3,11 +3,50 @@ import logging
 import signal
 import sys
 from aiogram import Bot, Dispatcher, BaseMiddleware
+
+import re as _re
+import os as _os
+import io as _io
+import shutil as _shutil
+_orig_download_file = Bot.download_file
+async def _patched_download_file(self, file_path, destination=None, *args, **kwargs):
+    if file_path:
+        if file_path.startswith("/var/lib/telegram-bot-api/"):
+            host_path = file_path.replace(
+                "/var/lib/telegram-bot-api/",
+                "/var/lib/docker/volumes/tiktokhatanibot_telegram-bot-api-data/_data/"
+            )
+        else:
+            host_path = _os.path.join(
+                "/var/lib/docker/volumes/tiktokhatanibot_telegram-bot-api-data/_data/",
+                self.token,
+                file_path
+            )
+        if _os.path.exists(host_path):
+            if destination is None:
+                def _read_sync():
+                    with open(host_path, 'rb') as f:
+                        return _io.BytesIO(f.read())
+                return await asyncio.to_thread(_read_sync)
+            else:
+                if isinstance(destination, (str, _os.PathLike)):
+                    _os.makedirs(_os.path.dirname(destination), exist_ok=True)
+                    await asyncio.to_thread(_shutil.copy2, host_path, destination)
+                    return destination
+                else:
+                    def _write_sync():
+                        with open(host_path, 'rb') as f_src:
+                            _shutil.copyfileobj(f_src, destination)
+                    await asyncio.to_thread(_write_sync)
+                    return destination
+    return await _orig_download_file(self, file_path, destination, *args, **kwargs)
+Bot.download_file = _patched_download_file
+
 from aiogram.types import TelegramObject, Message, CallbackQuery
 from config import BOT_TOKEN, BANNED_USER_IDS
-from database import init_db, get_all_pending_gens, delete_pending_gen, get_banned_users_db, get_all_chat_limits
+from database import init_db, get_all_pending_gens, delete_pending_gen, get_banned_users_db, get_all_chat_limits, get_all_vip_users, get_all_daily_limits_usage
 from handlers import router, refresh_models
-from state import banned_user_ids, chat_custom_limits
+from state import banned_user_ids, chat_custom_limits, paid_unlimited_until, daily_gen_limits
 from typing import Callable, Any, Awaitable
 
 class BanMiddleware(BaseMiddleware):
@@ -130,7 +169,13 @@ async def on_startup(bot: Bot):
     chat_lims = await get_all_chat_limits()
     for (cid, (req_limit, days)) in chat_lims.items():
         chat_custom_limits[cid] = (req_limit, days)
-    logger.info(f'База данных инициализирована. Загружено банов: {len(banned_user_ids)}, лимитов чатов: {len(chat_custom_limits)}')
+    vips = await get_all_vip_users()
+    for uid, paid_until in vips.items():
+        paid_unlimited_until[uid] = paid_until
+    usage = await get_all_daily_limits_usage()
+    for key, val in usage.items():
+        daily_gen_limits[key] = val
+    logger.info(f'База данных инициализирована. Загружено банов: {len(banned_user_ids)}, лимитов чатов: {len(chat_custom_limits)}, VIP-пользователей: {len(vips)}, лимитов использования: {len(usage)}')
     asyncio.create_task(resume_pending_generations(bot))
     asyncio.create_task(refresh_models())
 
@@ -147,11 +192,11 @@ async def on_shutdown():
 
 async def _nano_keys_sync_loop():
     from nano_keys import init_db, sync_from_keyhunter
-    init_db()
-    sync_from_keyhunter()
+    await init_db()
+    await sync_from_keyhunter()
     while True:
         await asyncio.sleep(300)  # каждые 5 минут
-        sync_from_keyhunter()
+        await sync_from_keyhunter()
 
 
 async def main():
@@ -161,7 +206,12 @@ async def main():
     logger.info('Запускаю бота...')
     try:
         from dual_bot import bot2, dp2, router2, set_bot1_ref, init_bot2
-        bot_instance = Bot(token=BOT_TOKEN)
+        from aiogram.client.telegram import TelegramAPIServer
+        from aiogram.client.session.aiohttp import AiohttpSession
+        from config import TELEGRAM_API_URL
+
+        session = AiohttpSession(api=TelegramAPIServer.from_base(TELEGRAM_API_URL))
+        bot_instance = Bot(token=BOT_TOKEN, session=session)
         dp_instance = Dispatcher()
         dp_instance.message.middleware(BanMiddleware())
         dp_instance.message.middleware(DualHistoryMiddleware())
