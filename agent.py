@@ -250,7 +250,7 @@ async def _fc_search(query: str) -> str:
         logger.warning(f"DDG search {query!r}: {e}")
 
     # Fallback: Firecrawl if keys available
-    keys = load_firecrawl_keys()
+    keys = await load_firecrawl_keys()
     for key in keys:
         hdrs = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         try:
@@ -330,7 +330,7 @@ async def _fc_scrape(url: str) -> str:
         logger.warning(f"Trafilatura scrape {url!r}: {e}")
 
     # Last resort: Firecrawl if keys available
-    keys = load_firecrawl_keys()
+    keys = await load_firecrawl_keys()
     for key in keys:
         try:
             async with aiohttp.ClientSession() as s:
@@ -374,7 +374,7 @@ async def _search_image_urls(query: str) -> list[str]:
         f"{query} hd wallpaper screenshot",
         f"{query} image",
     ]
-    fc_keys = load_firecrawl_keys()
+    fc_keys = await load_firecrawl_keys()
     if fc_keys:
         for q in search_queries:
             payload = {"query": q[:400], "limit": 6, "sources": [{"type": "web"}],
