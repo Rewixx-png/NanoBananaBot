@@ -55,9 +55,20 @@ class AgentWorkspace:
             self._persistent = True
             logger.info(f"Workspace reused: {self.host_path}")
         else:
-            self.host_path = tempfile.mkdtemp(prefix="agent_ws_")
-            os.chown(self.host_path, 1000, 1000)
-            os.chmod(self.host_path, 0o700)
+            project_dir = os.path.dirname(os.path.abspath(__file__))
+            ws_dir = os.path.join(project_dir, ".agent_workspaces")
+            os.makedirs(ws_dir, exist_ok=True)
+            try:
+                os.chown(ws_dir, 1000, 1000)
+                os.chmod(ws_dir, 0o777)
+            except Exception:
+                pass
+            self.host_path = tempfile.mkdtemp(prefix="agent_ws_", dir=ws_dir)
+            try:
+                os.chown(self.host_path, 1000, 1000)
+                os.chmod(self.host_path, 0o777)
+            except Exception:
+                pass
             self._persistent = False
             logger.info(f"Workspace created: {self.host_path}")
 
@@ -107,6 +118,24 @@ class AgentWorkspace:
         output_cb: Optional[Callable] = None,
     ) -> Tuple[str, str, int]:
         """Run cmd inside sandbox container with workspace mounted."""
+        def _fix_workspace_permissions():
+            try:
+                os.chown(self.host_path, 1000, 1000)
+                os.chmod(self.host_path, 0o777)
+                for root, dirs, files in os.walk(self.host_path):
+                    for d in dirs:
+                        path = os.path.join(root, d)
+                        os.chown(path, 1000, 1000)
+                        os.chmod(path, 0o777)
+                    for f in files:
+                        path = os.path.join(root, f)
+                        os.chown(path, 1000, 1000)
+                        os.chmod(path, 0o777)
+            except Exception as e:
+                logger.warning(f"Failed to fix workspace permissions recursive: {e}")
+
+        await asyncio.to_thread(_fix_workspace_permissions)
+
         docker_cmd = [
             "docker", "run", "--rm",
             "--memory=1024m", "--cpus=2",

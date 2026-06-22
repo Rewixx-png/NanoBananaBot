@@ -16,3 +16,4 @@ models/
 *.rar
 *.db
 *.pth.tar
+.agent_workspaces/
