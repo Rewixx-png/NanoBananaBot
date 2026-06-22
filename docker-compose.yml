@@ -12,3 +12,4 @@ services:
       - /root/RewTest:/root/RewTest
       - /root/cookies:/root/cookies
       - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker/volumes/tiktokhatanibot_telegram-bot-api-data/_data:/var/lib/docker/volumes/tiktokhatanibot_telegram-bot-api-data/_data

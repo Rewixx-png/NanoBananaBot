@@ -39,6 +39,14 @@ async def _patched_download_file(self, file_path, destination=None, *args, **kwa
                             _shutil.copyfileobj(f_src, destination)
                     await asyncio.to_thread(_write_sync)
                     return destination
+    if file_path and file_path.startswith("/var/lib/telegram-bot-api/"):
+        prefix = f"/var/lib/telegram-bot-api/{self.token}/"
+        if file_path.startswith(prefix):
+            file_path = file_path[len(prefix):]
+        else:
+            file_path = file_path.replace("/var/lib/telegram-bot-api/", "")
+            if file_path.startswith(self.token + "/"):
+                file_path = file_path[len(self.token) + 1:]
     return await _orig_download_file(self, file_path, destination, *args, **kwargs)
 Bot.download_file = _patched_download_file
 
