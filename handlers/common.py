@@ -91,9 +91,13 @@ _KICK_DIRECTIVE = 'KICK_USER:'
 _KIRIESHKI_CHAT_ID = -1002830734467
 _KIRIESHKI_STICKER_SET = 'kirieshkikirieshki'
 _KIRIESHKI_STICKER_CHANCE = 0.10
+_PERMA_STICKER_SET = 'SHCHperma9740'
+_PERMA_STICKER_CHANCE = 0.10
 _KIRIESHKI_STICKER_CACHE_TTL = 86400
 _kirieshki_sticker_file_ids: list[str] = []
 _kirieshki_sticker_cache_ts = 0.0
+_perma_sticker_file_ids: list[str] = []
+_perma_sticker_cache_ts = 0.0
 _RANDOM_GIF_CHANCE = 0.10
 _RANDOM_MEDIA_MIN_INTERVAL = 30
 _random_media_last_ts_by_chat: dict[int, float] = {}
@@ -425,6 +429,26 @@ async def _send_kirieshki_sticker(message: types.Message) -> bool:
         logging.warning(f'Kirieshki sticker reply failed: {type(e).__name__}: {e}')
     return False
 
+async def _send_perma_sticker(message: types.Message) -> bool:
+    global _perma_sticker_file_ids, _perma_sticker_cache_ts
+    if message.chat.id != _KIRIESHKI_CHAT_ID:
+        return False
+    bot = message.bot
+    if bot is None:
+        return False
+    try:
+        now = time.monotonic()
+        if not _perma_sticker_file_ids or now - _perma_sticker_cache_ts > _KIRIESHKI_STICKER_CACHE_TTL:
+            sticker_set = await bot.get_sticker_set(name=_PERMA_STICKER_SET)
+            _perma_sticker_file_ids = [sticker.file_id for sticker in sticker_set.stickers if sticker.file_id]
+            _perma_sticker_cache_ts = now
+        if _perma_sticker_file_ids:
+            sent = await safe_send(message.reply_sticker, sticker=random.choice(_perma_sticker_file_ids))
+            return bool(sent)
+    except Exception as e:
+        logging.warning(f'Perma sticker reply failed: {type(e).__name__}: {e}')
+    return False
+
 async def _send_random_gif(message: types.Message) -> bool:
     if message.chat.id != _KIRIESHKI_CHAT_ID:
         return False
@@ -447,10 +471,13 @@ async def _maybe_send_random_chat_media(message: types.Message):
         return
     roll = secrets.randbelow(100)
     sticker_threshold = int(_KIRIESHKI_STICKER_CHANCE * 100)
-    gif_threshold = sticker_threshold + int(_RANDOM_GIF_CHANCE * 100)
+    perma_sticker_threshold = sticker_threshold + int(_PERMA_STICKER_CHANCE * 100)
+    gif_threshold = perma_sticker_threshold + int(_RANDOM_GIF_CHANCE * 100)
     sent = False
     if roll < sticker_threshold:
         sent = await _send_kirieshki_sticker(message)
+    elif roll < perma_sticker_threshold:
+        sent = await _send_perma_sticker(message)
     elif roll < gif_threshold:
         sent = await _send_random_gif(message)
     if sent:
