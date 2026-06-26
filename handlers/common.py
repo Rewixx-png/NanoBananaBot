@@ -64,6 +64,29 @@ from state import (
 logger = logging.getLogger(__name__)
 
 MAX_DOCUMENT_UPLOAD_BYTES = 5_000_000
+
+
+async def _ensure_image_generation_allowed(message: types.Message) -> bool:
+    from utils import check_membership
+    from handlers.admin import _check_daily_limit
+    if not await check_membership(message.bot, message.from_user.id, message.chat.id):
+        return False
+    allowed, limit_msg = _check_daily_limit(message.from_user.id, message.chat.id)
+    if not allowed:
+        await message.reply(limit_msg)
+        return False
+    return True
+
+
+async def _download_message_photo(bot, message: types.Message):
+    if not message or not message.photo:
+        return None
+    try:
+        file_info = await bot.get_file(message.photo[-1].file_id)
+        downloaded = await bot.download_file(file_info.file_path)
+        return downloaded.read()
+    except Exception:
+        return None
 MAX_TEXT_DOCUMENT_BYTES = 80_000
 MAX_ZIP_TEXT_BYTES = 200_000
 MAX_ZIP_TEXT_FILE_BYTES = 50_000
@@ -103,9 +126,6 @@ _RANDOM_MEDIA_MIN_INTERVAL = 30
 _random_media_last_ts_by_chat: dict[int, float] = {}
 
 _RANDOM_GIF_PATHS = [
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), 'media', 'random_gifs', 'kirieshki_1.mp4'),
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), 'media', 'random_gifs', 'kirieshki_2.mp4'),
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), 'media', 'random_gifs', 'kirieshki_3.mp4'),
     os.path.join(os.path.dirname(os.path.dirname(__file__)), 'media', 'random_gifs', 'kirieshki_4.mp4'),
 ]
 
@@ -590,7 +610,7 @@ def _tts_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text='— Язык —', callback_data='noop')])
     rows.append([InlineKeyboardButton(text=f"{('✅' if l == cur_lang else '')}{name}", callback_data=f'ttscfg:{request_id}:lang:{l}') for (name, l) in _TTS_LANGS])
     rows.append([InlineKeyboardButton(text='— Голос —', callback_data='noop')])
-    for i in range(0, 15, 3):
+    for i in range(0, len(TTS_VOICES), 3):
         rows.append(make_voice_row(TTS_VOICES[i:i + 3]))
     rows.append([InlineKeyboardButton(text='🔊 Прослушать голос', callback_data=f'ttsprev:{request_id}')])
     rows.append([InlineKeyboardButton(text='🚀 Генерировать', callback_data=f'ttsgen:{request_id}')])

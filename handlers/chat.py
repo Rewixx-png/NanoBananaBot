@@ -42,7 +42,8 @@ from handlers.common import (
     _tts_cfg_keyboard
 )
 
-from handlers.media import _nsfw_awaiting_input, _tts_awaiting_input
+from handlers.media_gen import _nsfw_awaiting_input
+from handlers.media_tts import _tts_awaiting_input
 
 from database import (
     save_history,

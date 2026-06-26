@@ -28,8 +28,8 @@ from ai_services import (
     generate_project_with_gemini,
     generate_tts_with_gemini,
 )
-from keys_manager import load_keys, load_firecrawl_keys, remove_key
-from nano_keys import get_live_keys as _nk_get_live, mark_cooldown as _nk_cooldown, sync_from_keyhunter as _nk_sync, init_db as _nk_init
+from keys import load_keys, load_firecrawl_keys, remove_key
+from keys import get_live_keys as _nk_get_live, mark_cooldown as _nk_cooldown, sync_from_keyhunter as _nk_sync, init_db as _nk_init
 
 logger = logging.getLogger(__name__)
 
@@ -597,7 +597,7 @@ async def _tool_generate_image(prompt: str, send_cb: Callable, provider: str = "
 
 async def _tool_list_image_models() -> str:
     """Fetch available image-generation models from OpenAI API."""
-    from keys_manager import load_openai_keys
+    from keys import load_openai_keys
     keys = load_openai_keys()
     if not keys:
         return "OpenAI ключи не настроены."

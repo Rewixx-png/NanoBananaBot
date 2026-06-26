@@ -117,6 +117,10 @@ async def cmd_clear(message: types.Message):
     await save_history(message.chat.id, [])
     chat_context_buffer.pop(message.chat.id, None)
     chat_last_files.pop(message.chat.id, None)
+    from state import running_agent_tasks as _rat
+    _task = _rat.pop(message.chat.id, None)
+    if _task and not _task.done():
+        _task.cancel()
     await message.reply('Окей, я забыл всю хуйню, которую мы тут обсуждали. Начинаем с чистого листа.')
     if message.from_user.id == OWNER_USER_ID:
         asyncio.create_task(_rebuild_sandbox_bg(message))
