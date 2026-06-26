@@ -1,6 +1,9 @@
+import asyncio
 import logging
 import aiohttp
 from typing import Tuple, Optional
+
+from services.security_utils import is_safe_url
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,9 @@ async def _upscale_imageupscaling(image_bytes: bytes) -> Tuple[Optional[bytes], 
                     items = await resp.json()
                     for item in items:
                         if item.get('original_filename') == original_filename and item.get('completed'):
+                            if not is_safe_url(item['image_url']):
+                                logger.warning(f'Upscale returned unsafe image URL, blocked: {str(item.get("image_url"))[:120]}')
+                                continue
                             async with session.get(item['image_url'], timeout=dl_timeout) as dl:
                                 if dl.status == 200:
                                     return (await dl.read(), None)

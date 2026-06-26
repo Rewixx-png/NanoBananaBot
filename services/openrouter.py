@@ -6,6 +6,7 @@ import aiohttp
 from typing import Tuple, Optional, List, Dict, Any
 
 from keys import load_openrouter_keys, remove_key
+from services.security_utils import is_safe_url
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ async def generate_image_with_openrouter(
                                         if img_url.startswith('data:'):
                                             return (base64.b64decode(img_url.split(',', 1)[1]), None)
                                         if img_url.startswith('http'):
+                                            if not is_safe_url(img_url):
+                                                logging.warning(f'OpenRouter returned unsafe image URL, blocked: {img_url[:120]}')
+                                                continue
                                             async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=60)) as img_resp:
                                                 if img_resp.status == 200:
                                                     return (await img_resp.read(), None)
