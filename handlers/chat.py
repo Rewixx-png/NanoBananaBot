@@ -614,6 +614,12 @@ async def cmd_up(message: types.Message):
     loop = asyncio.get_running_loop()
     last_update = [0.0]
 
+    async def _update_progress(text: str):
+        try:
+            await wait_msg.edit_text(text)
+        except Exception:
+            pass
+
     def _progress(current: int, total: int):
         now = time.time()
         if now - last_update[0] < 2.0 and current < total:
@@ -622,7 +628,7 @@ async def cmd_up(message: types.Message):
         pct = min(current * 100 // total, 100)
         bar = '█' * (pct // 10) + '░' * (10 - pct // 10)
         asyncio.run_coroutine_threadsafe(
-            wait_msg.edit_text(f'⬆️ ESRGAN [{bar}] {pct}% — тайл {current}/{total}'),
+            _update_progress(f'⬆️ ESRGAN [{bar}] {pct}% — тайл {current}/{total}'),
             loop,
         )
 
