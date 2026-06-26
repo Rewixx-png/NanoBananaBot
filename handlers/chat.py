@@ -605,7 +605,10 @@ async def cmd_up(message: types.Message):
     downloaded = await message.bot.download_file(file_info.file_path)
     image_bytes = downloaded.read()
     await wait_msg.edit_text("⬆️ Улучшаю качество через AI upscaler...")
-    upscaled, up_err = await upscale_image(image_bytes)
+    try:
+        upscaled, up_err = await asyncio.wait_for(upscale_image(image_bytes), timeout=90)
+    except asyncio.TimeoutError:
+        upscaled, up_err = None, 'Апскейл завис на 90 секундах — сервис не отвечает.'
     try:
         await wait_msg.delete()
     except Exception:
