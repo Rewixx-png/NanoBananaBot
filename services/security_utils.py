@@ -16,6 +16,7 @@ _PRIVATE_NETWORKS = [
     ipaddress.ip_network('fe80::/10'),
     ipaddress.ip_network('0.0.0.0/8'),
     ipaddress.ip_network('100.64.0.0/10'),
+    ipaddress.ip_network('::ffff:0:0/96'),  # IPv4-mapped IPv6 — covers ::ffff:127.0.0.1 etc.
 ]
 
 
@@ -45,6 +46,9 @@ def is_safe_url(url: str) -> bool:
             ip = ipaddress.ip_address(ip_str)
         except ValueError:
             return False
+        # Unwrap IPv4-mapped IPv6 (::ffff:x.x.x.x) to bare IPv4 for blocklist check
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
         for net in _PRIVATE_NETWORKS:
             if ip in net:
                 logger.warning(f'Blocked SSRF attempt: {url!r} resolved to {ip_str} ({net})')
