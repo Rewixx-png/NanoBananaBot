@@ -17,3 +17,12 @@ models/
 *.db
 *.pth.tar
 .agent_workspaces/
+.claude/
+.omc/
+.omo/
+.serena/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

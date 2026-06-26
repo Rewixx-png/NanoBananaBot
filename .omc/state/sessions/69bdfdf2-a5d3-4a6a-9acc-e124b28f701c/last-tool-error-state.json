@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"python3 -c \\\"\\nimport asyncio, aiohttp, sys\\nfrom PIL import Image\\nimport io\\nsys.path.insert(0, '/root/Projects/NanoHatani')\\nfrom keys_manager import load_openai_keys\\n\\nimg = Image.new...",
-  "error": "Exit code 1\nTraceback (most recent call last):\n  File \"/usr/local/lib/python3.10/dist-packages/aiohttp/client_reqrep.py\", line 539, in start\n    message, payload = await protocol.read()  # type: ignore[union-attr]\n  File \"/usr/local/lib/python3.10/dist-packages/aiohttp/streams.py\", line 707, in read\n    await self._waiter\nasyncio.exceptions.CancelledError\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"<string>\", line 31, in <modu...",
-  "timestamp": "2026-06-16T13:17:15.831Z",
-  "retry_count": 1
-}
