@@ -74,7 +74,7 @@ def _load_model():
     return _model
 
 def upscale_anime(image_bytes: bytes, progress_callback=None) -> bytes:
-    torch.set_num_threads(8)
+    torch.set_num_threads(4)
     model = _load_model()
     img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
     img_np = np.array(img).astype(np.float32) / 255.0

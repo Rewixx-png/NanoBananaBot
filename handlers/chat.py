@@ -607,10 +607,10 @@ async def cmd_up(message: types.Message):
     image_bytes = downloaded.read()
     await wait_msg.edit_text("⬆️ Запускаю ESRGAN...")
     try:
-        upscaled = await asyncio.wait_for(asyncio.to_thread(upscale_anime, image_bytes), timeout=120)
+        upscaled = await asyncio.wait_for(asyncio.to_thread(upscale_anime, image_bytes), timeout=300)
         up_err = None
     except asyncio.TimeoutError:
-        upscaled, up_err = None, 'ESRGAN завис на 120 секундах.'
+        upscaled, up_err = None, 'ESRGAN не уложился в 5 минут — фото слишком большое.'
     try:
         await wait_msg.delete()
     except Exception:
