@@ -1,6 +1,6 @@
 from aiogram import Router
 from .admin import admin_router
-from .media import media_router, refresh_models
+from .media_gen import media_router, refresh_models
 from .core import core_router
 from .chat import chat_router
 

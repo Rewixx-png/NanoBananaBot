@@ -199,7 +199,7 @@ async def on_shutdown():
     logger.info('Бот успешно остановлен')
 
 async def _nano_keys_sync_loop():
-    from nano_keys import init_db, sync_from_keyhunter
+    from keys import init_db, sync_from_keyhunter
     await init_db()
     await sync_from_keyhunter()
     while True:

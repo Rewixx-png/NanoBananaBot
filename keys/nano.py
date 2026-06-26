@@ -8,7 +8,7 @@ import time
 import logging
 import random
 
-from keys_manager import REWTEST_DB
+from keys.manager import REWTEST_DB
 
 NANO_KEYS_DB = "/root/Projects/NanoHatani/nano_keys.db"
 _COOLDOWN_429 = 65.0

@@ -53,8 +53,10 @@ class RRDBNet(nn.Module):
         feat = self.lrelu(self.conv_up1(F.interpolate(feat, scale_factor=2, mode='nearest')))
         feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode='nearest')))
         return self.conv_last(self.lrelu(self.conv_hr(feat)))
+
 _model = None
-_MODEL_PATH = '/root/Projects/NanoHatani/models/anime.pth'
+import os as _os
+_MODEL_PATH = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'models', 'anime.pth')
 _TILE = 256
 _TILE_PAD = 10
 
@@ -71,15 +73,17 @@ def _load_model():
     _model = m
     return _model
 
-def upscale_anime(image_bytes: bytes) -> bytes:
+def upscale_anime(image_bytes: bytes, progress_callback=None) -> bytes:
+    torch.set_num_threads(8)
     model = _load_model()
     img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-    (w, h) = img.size
     img_np = np.array(img).astype(np.float32) / 255.0
     img_t = torch.from_numpy(img_np.transpose(2, 0, 1)).unsqueeze(0)
     (_, _, H, W) = img_t.shape
     (out_h, out_w) = (H * 4, W * 4)
     output = torch.zeros(1, 3, out_h, out_w)
+    total_tiles = ((H + _TILE - 1) // _TILE) * ((W + _TILE - 1) // _TILE)
+    current_tile = 0
     for row in range(0, H, _TILE):
         for col in range(0, W, _TILE):
             r0 = max(row - _TILE_PAD, 0)
@@ -98,8 +102,12 @@ def upscale_anime(image_bytes: bytes) -> bytes:
             dest_c0 = col * 4
             dest_c1 = min(col + _TILE, W) * 4
             output[:, :, dest_r0:dest_r1, dest_c0:dest_c1] = tile_out[:, :, out_r0:out_r1, out_c0:out_c1]
+            current_tile += 1
+            if progress_callback:
+                progress_callback(current_tile, total_tiles)
     out_np = output.squeeze(0).clamp(0, 1).numpy().transpose(1, 2, 0)
     out_img = Image.fromarray((out_np * 255).astype(np.uint8))
     buf = io.BytesIO()
     out_img.save(buf, format='PNG')
+    torch.set_num_threads(1)
     return buf.getvalue()

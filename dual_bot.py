@@ -7,7 +7,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Message
 from aiogram.exceptions import TelegramRetryAfter
 from config import BOT_TOKEN_2, DUAL_HISTORY_SIZE, BANNED_USER_IDS, TELEGRAM_API_URL
-from keys_manager import load_keys, load_firecrawl_keys, remove_key
+from keys import load_keys, load_firecrawl_keys, remove_key
 from state import dual_histories, dual_tasks
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.client.session.aiohttp import AiohttpSession
