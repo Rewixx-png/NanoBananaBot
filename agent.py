@@ -1903,6 +1903,8 @@ _SYSTEM = (
     "Отправляй только тот результат который сам считаешь качественным.\n\n"
     "КРИТИЧНО — reply завершает задачу НАВСЕГДА:\n"
     "Вызывай reply ТОЛЬКО когда задача полностью выполнена и файл/результат уже отправлен.\n"
+    "НИКОГДА не пиши «call:default_api» или «call:» в тексте — юзай НАСТОЯЩИЙ инструмент reply.\n"
+    "Если хочешь ответить — вызови reply ИНСТРУМЕНТОМ, а не текстом.\n\n"
     "Пока работаешь — используй think для размышлений, НЕ reply.\n"
     "ДУМАЙ ПЕРЕД КАЖДЫМ ДЕЙСТВИЕМ:\n"
     "Перед каждой командой/инструментом вызывай think() где:\n"
@@ -2660,6 +2662,12 @@ async def run_agent(
 
             if not fn_calls:
                 text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
+                # Strip hallucinated tool-call-as-text patterns
+                text = re.sub(r'\bcall:default_api:\w+\{[^}]*\}\s*', '', text).strip()
+                # If model wrote call:...reply{text: "..."} as text, extract the message
+                m = re.search(r'call:default_api:reply\{text:\s*"([^"]*)"', text)
+                if m and len(m.group(1)) > len(text) * 0.5:
+                    text = m.group(1)
                 return text or "Done.", None
 
             tool_responses: list = []
