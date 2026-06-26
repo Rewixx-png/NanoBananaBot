@@ -27,7 +27,7 @@ from services.code_service import classify_code_intent_with_gemini, generate_cod
 from services.gemini_image import generate_image_with_gemini, analyze_photo_with_gemini, generate_reviewed_image_with_gemini, classify_draw_intent_with_gemini, review_image_with_gemini, generate_image_prompt, fetch_gemini_image_models
 from services.pil_codegen import generate_image_via_code
 from services.upscale_service import upscale_image
-from services.gemini_text import generate_text_with_gemini, generate_bull_roast
+from services.gemini_text import generate_text_with_gemini, generate_bull_roast, _models_cache, _MODELS_CACHE_TTL, _pretty_model_name
 from services.error_explainer import explain_generation_error
 
 logger = logging.getLogger(__name__)

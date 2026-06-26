@@ -28,6 +28,11 @@ def _ensure_ai_imports():
         g['_pretty_model_name'] = _pmn
 
 
+# ── Shared module-level state (imported by other services via ai_services) ─
+_models_cache: dict = {}
+_MODELS_CACHE_TTL: float = 3600.0
+
+
 # ── Gemini text service ───────────────────────────────────────────────────
 def _thinking_config(model_name: str, level: str) -> dict[str, object]:
     # Gemini 3.x series (3.1, 3.5, …) → thinkingLevel (minimal/low/medium/high)
