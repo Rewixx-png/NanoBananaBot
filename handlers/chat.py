@@ -601,27 +601,53 @@ async def cmd_up(message: types.Message):
         await message.reply("Прикрепи фото для апскейла.")
         return
     wait_msg = await message.reply("⏳ Скачиваю фото...")
-    photo = message.photo[-1]
-    file_info = await message.bot.get_file(photo.file_id)
-    downloaded = await message.bot.download_file(file_info.file_path)
-    image_bytes = downloaded.read()
-    await wait_msg.edit_text("⬆️ Запускаю ESRGAN...")
     try:
-        upscaled = await asyncio.wait_for(asyncio.to_thread(upscale_anime, image_bytes), timeout=300)
-        up_err = None
+        photo = message.photo[-1]
+        file_info = await message.bot.get_file(photo.file_id)
+        downloaded = await message.bot.download_file(file_info.file_path)
+        image_bytes = downloaded.read()
+    except Exception as e:
+        logger.exception(f'/up download failed: {e}')
+        await wait_msg.edit_text(f'❌ Не смог скачать фото: {e}')
+        return
+
+    last_update = [0.0]
+
+    def _progress(current: int, total: int):
+        now = time.time()
+        if now - last_update[0] < 2.0 and current < total:
+            return
+        last_update[0] = now
+        pct = min(current * 100 // total, 100)
+        bar = '█' * (pct // 10) + '░' * (10 - pct // 10)
+        asyncio.run_coroutine_threadsafe(
+            wait_msg.edit_text(f'⬆️ ESRGAN [{bar}] {pct}% — тайл {current}/{total}'),
+            asyncio.get_running_loop(),
+        )
+
+    try:
+        await wait_msg.edit_text('⬆️ ESRGAN [░░░░░░░░░░] 0% — загружаю модель...')
+        upscaled = await asyncio.wait_for(
+            asyncio.to_thread(upscale_anime, image_bytes, progress_callback=_progress),
+            timeout=300,
+        )
     except asyncio.TimeoutError:
-        upscaled, up_err = None, 'ESRGAN не уложился в 5 минут — фото слишком большое.'
+        logger.warning(f'/up timeout after 300s for user {message.from_user.id}')
+        await wait_msg.edit_text('❌ ESRGAN не уложился в 5 минут — фото слишком большое.')
+        return
+    except Exception as e:
+        logger.exception(f'/up failed: {e}')
+        await wait_msg.edit_text(f'❌ Ошибка ESRGAN: {type(e).__name__}: {e}')
+        return
+
     try:
         await wait_msg.delete()
     except Exception:
         pass
-    if upscaled:
-        await message.reply_document(
-            document=BufferedInputFile(upscaled, filename="upscaled.png"),
-            caption="✨ Улучшенная версия 2x — без сжатия"
-        )
-    else:
-        await message.reply(f"❌ Ошибка апскейла: {up_err}")
+    await message.reply_document(
+        document=BufferedInputFile(upscaled, filename="upscaled.png"),
+        caption="✨ Улучшенная версия 2x — без сжатия"
+    )
 
 @chat_router.message(F.voice | F.audio | F.video_note)
 async def handle_voice_audio(message: types.Message):
