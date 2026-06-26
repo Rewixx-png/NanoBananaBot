@@ -94,8 +94,9 @@ from ai_services import (
     analyze_photo_with_gemini,
     analyze_voice_with_gemini,
     generate_video_with_gemini,
-    upscale_image
+    upscale_image,
 )
+from esrgan_model import upscale_anime
 
 from agent import (
     run_agent,
@@ -604,11 +605,12 @@ async def cmd_up(message: types.Message):
     file_info = await message.bot.get_file(photo.file_id)
     downloaded = await message.bot.download_file(file_info.file_path)
     image_bytes = downloaded.read()
-    await wait_msg.edit_text("⬆️ Улучшаю качество через AI upscaler...")
+    await wait_msg.edit_text("⬆️ Запускаю ESRGAN...")
     try:
-        upscaled, up_err = await asyncio.wait_for(upscale_image(image_bytes), timeout=90)
+        upscaled = await asyncio.wait_for(asyncio.to_thread(upscale_anime, image_bytes), timeout=120)
+        up_err = None
     except asyncio.TimeoutError:
-        upscaled, up_err = None, 'Апскейл завис на 90 секундах — сервис не отвечает.'
+        upscaled, up_err = None, 'ESRGAN завис на 120 секундах.'
     try:
         await wait_msg.delete()
     except Exception:
