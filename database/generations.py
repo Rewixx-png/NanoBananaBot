@@ -1,5 +1,6 @@
 import aiosqlite
 import json
+import os
 import time
 import logging
 from typing import List, Dict, Any, Optional
@@ -7,6 +8,48 @@ from typing import List, Dict, Any, Optional
 from database.connection import DB_PATH
 
 logger = logging.getLogger(__name__)
+
+# ── Fernet encryption for veo_api_key ─────────────────────────────────────
+
+_fernet = None
+
+
+def _get_fernet():
+    """Load or create a Fernet instance from DB_ENCRYPTION_KEY env var."""
+    global _fernet
+    if _fernet is not None:
+        return _fernet
+    from cryptography.fernet import Fernet
+    key = os.getenv('DB_ENCRYPTION_KEY', '').strip()
+    if key:
+        _fernet = Fernet(key.encode() if isinstance(key, str) else key)
+    else:
+        logger.warning(
+            'DB_ENCRYPTION_KEY not set in .env — using a temporary key. '
+            'Set DB_ENCRYPTION_KEY to persist Veo API keys across restarts.'
+        )
+        _fernet = Fernet(Fernet.generate_key())
+    return _fernet
+
+
+def _encrypt_key(plain: Optional[str]) -> Optional[str]:
+    if not plain:
+        return plain
+    try:
+        return _get_fernet().encrypt(plain.encode()).decode()
+    except Exception as e:
+        logger.error(f'Failed to encrypt veo_api_key: {e}')
+        return None
+
+
+def _decrypt_key(encrypted: Optional[str]) -> Optional[str]:
+    if not encrypted:
+        return encrypted
+    try:
+        return _get_fernet().decrypt(encrypted.encode()).decode()
+    except Exception as e:
+        logger.error(f'Failed to decrypt veo_api_key: {e}')
+        return None
 
 
 async def save_pending_gen(
@@ -26,7 +69,7 @@ async def save_pending_gen(
             ''', (
                 gen_id, gen_type, user_id, chat_id, source_message_id, message_thread_id,
                 prompt, model, provider, json.dumps(file_ids or []),
-                veo_operation_name, veo_api_key, model_label, time.time()
+                veo_operation_name, _encrypt_key(veo_api_key), model_label, time.time()
             ))
             await db.commit()
     except Exception as e:
@@ -56,6 +99,7 @@ async def get_all_pending_gens() -> List[Dict[str, Any]]:
                 for row in rows:
                     d = dict(zip(cols, row))
                     d['file_ids'] = json.loads(d.get('file_ids') or '[]')
+                    d['veo_api_key'] = _decrypt_key(d.get('veo_api_key'))
                     result.append(d)
                 return result
     except Exception as e:

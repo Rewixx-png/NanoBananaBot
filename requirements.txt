@@ -14,3 +14,4 @@ duckduckgo-search==8.1.1
 picwish==0.6.0
 torch==2.12.1+cpu
 waifu2x-ncnn-py==2.0.0
+cryptography>=41.0.0
