@@ -611,6 +611,7 @@ async def cmd_up(message: types.Message):
         await wait_msg.edit_text(f'❌ Не смог скачать фото: {e}')
         return
 
+    loop = asyncio.get_running_loop()
     last_update = [0.0]
 
     def _progress(current: int, total: int):
@@ -622,7 +623,7 @@ async def cmd_up(message: types.Message):
         bar = '█' * (pct // 10) + '░' * (10 - pct // 10)
         asyncio.run_coroutine_threadsafe(
             wait_msg.edit_text(f'⬆️ ESRGAN [{bar}] {pct}% — тайл {current}/{total}'),
-            asyncio.get_running_loop(),
+            loop,
         )
 
     try:
