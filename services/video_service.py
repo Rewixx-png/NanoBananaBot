@@ -207,10 +207,14 @@ async def fetch_veo_models() -> list:
 async def generate_video_with_omni(
     prompt: str,
     image_bytes: bytes = None,
+    video_bytes: bytes = None,
     aspect_ratio: str = '16:9',
     state_data: dict = None,
 ) -> tuple:
-    """Generate a video via Gemini Omni Flash (Interactions API)."""
+    """Generate or edit a video via Gemini Omni Flash (Interactions API).
+
+    Supports: text-to-video, image-to-video, video-to-video (edit up to 10s).
+    """
     from keys import load_keys
     keys = await load_keys()
     if not keys:
@@ -221,12 +225,17 @@ async def generate_video_with_omni(
         input_parts.append({
             'inlineData': {'mimeType': 'image/jpeg', 'data': base64.b64encode(image_bytes).decode()}
         })
+    if video_bytes:
+        input_parts.append({
+            'inlineData': {'mimeType': 'video/mp4', 'data': base64.b64encode(video_bytes).decode()}
+        })
     input_parts.append({'text': prompt or 'A beautiful cinematic scene'})
+    task = 'video_to_video' if video_bytes else ('image_to_video' if image_bytes else 'text_to_video')
     payload = {
         'model': 'gemini-omni-flash-preview',
         'input': input_parts,
         'response_format': {'type': 'video', 'aspect_ratio': aspect_ratio},
-        'generation_config': {'video_config': {'task': 'text_to_video' if not image_bytes else 'image_to_video'}},
+        'generation_config': {'video_config': {'task': task}},
     }
     for idx, key in enumerate(keys):
         if state_data:
