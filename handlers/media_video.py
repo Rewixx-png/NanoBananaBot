@@ -108,6 +108,7 @@ async def handle_veo_model_select(callback: types.CallbackQuery):
     gen_id = f'veo_{request_id}'
     try:
         if model_id.startswith('omni'):
+            await save_pending_gen(gen_id=gen_id, gen_type='video', user_id=request_data['user_id'], chat_id=request_data['chat_id'], source_message_id=request_data['source_message_id'], message_thread_id=request_data['message_thread_id'], prompt=request_data['prompt'], model='gemini-omni-flash-preview', provider='omni', model_label=model_label)
             (video_bytes, error_msg) = await generate_video_with_omni(
                 request_data['prompt'],
                 image_bytes=request_data.get('image_bytes'),

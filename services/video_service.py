@@ -249,7 +249,8 @@ async def generate_video_with_omni(
                                         async with session.get(uri, timeout=aiohttp.ClientTimeout(total=60)) as dl:
                                             if dl.status == 200:
                                                 return (await dl.read(), None)
-                        return (None, f'Omni не вернул видео: {json.dumps(data, ensure_ascii=False)[:300]}')
+                        logging.error(f'Omni returned no video. Full response: {json.dumps(data, ensure_ascii=False)[:500]}')
+                        return (None, 'Omni не смог сгенерировать видео. Попробуй другой запрос.')
                     if resp.status in (429, 403):
                         from keys import remove_key
                         remove_key(key, resp.status)
