@@ -103,10 +103,11 @@ MODEL_TO_REAL: dict = {
 }
 
 VEO_MODELS: dict = {
+    'omni0': ('Omni Flash (диалог)', 'gemini-omni-flash-preview'),
     'veo1': ('Veo 3.1 Fast', 'veo-3.1-fast-generate-preview'),
     'veo2': ('Veo 3.1', 'veo-3.1-generate-preview'),
     'veo3': ('Veo 3.1 Lite', 'veo-3.1-lite-generate-preview'),
-    'veo0': ('Veo 2 (deprecated 30.06)', 'veo-2.0-generate-001'),
+    'veo0': ('Veo 2 (deprecated)', 'veo-2.0-generate-001'),
 }
 
 VIDEO_COOLDOWN = 60

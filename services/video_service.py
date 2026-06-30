@@ -202,3 +202,64 @@ async def fetch_veo_models() -> list:
         except Exception as e:
             logging.warning(f'fetch_veo_models: {e}')
     return []
+
+
+async def generate_video_with_omni(
+    prompt: str,
+    image_bytes: bytes = None,
+    aspect_ratio: str = '16:9',
+    state_data: dict = None,
+) -> tuple:
+    """Generate a video via Gemini Omni Flash (Interactions API)."""
+    from keys import load_keys
+    keys = await load_keys()
+    if not keys:
+        return (None, 'Нет Gemini ключей.')
+    url = 'https://generativelanguage.googleapis.com/v1beta/interactions'
+    input_parts = []
+    if image_bytes:
+        input_parts.append({
+            'inlineData': {'mimeType': 'image/jpeg', 'data': base64.b64encode(image_bytes).decode()}
+        })
+    input_parts.append({'text': prompt or 'A beautiful cinematic scene'})
+    payload = {
+        'model': 'gemini-omni-flash-preview',
+        'input': input_parts,
+        'response_format': {'type': 'video', 'aspect_ratio': aspect_ratio},
+        'generation_config': {'video_config': {'task': 'text_to_video' if not image_bytes else 'image_to_video'}},
+    }
+    for idx, key in enumerate(keys):
+        if state_data:
+            state_data['status'] = f'Omni Flash {idx+1}/{len(keys)}'
+        headers = {'Content-Type': 'application/json', 'x-goog-api-key': key}
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for step in data.get('steps', []):
+                            if step.get('type') == 'model_output':
+                                content = step.get('content', {})
+                                if content.get('type') == 'video':
+                                    b64 = content.get('data', '')
+                                    if b64:
+                                        return (base64.b64decode(b64), None)
+                                    uri = content.get('uri', '')
+                                    if uri:
+                                        async with session.get(uri, timeout=aiohttp.ClientTimeout(total=60)) as dl:
+                                            if dl.status == 200:
+                                                return (await dl.read(), None)
+                        return (None, f'Omni не вернул видео: {json.dumps(data, ensure_ascii=False)[:300]}')
+                    if resp.status in (429, 403):
+                        from keys import remove_key
+                        remove_key(key, resp.status)
+                        continue
+                    err = await resp.text()
+                    logging.warning(f'Omni Flash {resp.status}: {err[:200]}')
+                    if resp.status == 404:
+                        return (None, 'Omni Flash недоступен (404) — модель в preview или не включена для этого ключа.')
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                return (None, f'Omni Flash error: {type(e).__name__}: {e}')
+    return (None, 'Все ключи исчерпаны или Omni Flash недоступен.')
