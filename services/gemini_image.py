@@ -11,6 +11,17 @@ from keys import load_keys, remove_key, strip_code_fences
 logger = logging.getLogger(__name__)
 
 
+def _http_explain(code: int) -> str:
+    return {
+        429: '(слишком много запросов)',
+        403: '(доступ запрещён)',
+        500: '(ошибка сервера)',
+        502: '(шлюз недоступен)',
+        503: '(сервер перегружен)',
+        504: '(таймаут шлюза)',
+    }.get(code, '')
+
+
 def _ensure_ai_imports():
     """Late-import shared cache and helpers from ai_services."""
     g = globals()
@@ -231,7 +242,7 @@ async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes]=N
                     elif resp.status in [429, 403]:
                         resp_text = await resp.text()
                         logging.warning(f'Ошибка ключа (фото) {key[:10]}... Код: {resp.status}. Текст: {resp_text}')
-                        key_errors.append(f'{resp.status}: {resp_text[:120]}')
+                        key_errors.append(f'{resp.status} {_http_explain(resp.status)}')
                         remove_key(key, resp.status)
                         continue
                     elif resp.status == 400:
@@ -241,7 +252,7 @@ async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes]=N
                     elif resp.status in [500, 502, 503, 504]:
                         resp_text = await resp.text()
                         logging.warning(f'Gemini временно недоступен (фото) {key[:10]}... Код: {resp.status}. Пробую следующий ключ.')
-                        key_errors.append(f'{resp.status}: {resp_text[:120]}')
+                        key_errors.append(f'{resp.status} {_http_explain(resp.status)}')
                         continue
                     else:
                         resp_text = await resp.text()
