@@ -68,7 +68,11 @@ logger = logging.getLogger(__name__)
 media_router = Router()
 
 PROVIDER_MODELS: dict = {
-    'gemini': [('Flash 3.1 Image', 'g31flash'), ('Flash 2.0 Image', 'g20flash')],
+    'gemini': [
+        ('Flash 3.1 Image', 'g31flash'),
+        ('Flash Lite Image (быстро)', 'g31flashlite'),
+        ('Flash 2.0 Image (legacy)', 'g20flash'),
+    ],
     'gpt': [('GPT-Image-2', 'gpt2'), ('DALL-E 3', 'dalle3')],
     'flux': [('FLUX Schnell (быстро)', 'schnell'), ('FLUX Dev (качество)', 'fluxdev'), ('FLUX Klein 4B', 'klein')],
     'nsfw': [
@@ -83,6 +87,7 @@ PROVIDER_MODELS: dict = {
 
 MODEL_TO_REAL: dict = {
     'g31flash': ('gemini', 'gemini-3.1-flash-image-preview'),
+    'g31flashlite': ('gemini', 'gemini-3.1-flash-lite-image-preview'),
     'g20flash': ('gemini', 'gemini-2.0-flash-preview-image-generation'),
     'gpt2': ('gpt', 'gpt-image-2'),
     'dalle3': ('gpt', 'dall-e-3'),
@@ -98,15 +103,18 @@ MODEL_TO_REAL: dict = {
 }
 
 VEO_MODELS: dict = {
-    'veo0': ('Veo 2', 'veo-2.0-generate-001'),
     'veo1': ('Veo 3.1 Fast', 'veo-3.1-fast-generate-preview'),
     'veo2': ('Veo 3.1', 'veo-3.1-generate-preview'),
     'veo3': ('Veo 3.1 Lite', 'veo-3.1-lite-generate-preview'),
+    'veo0': ('Veo 2 (deprecated 30.06)', 'veo-2.0-generate-001'),
 }
 
 VIDEO_COOLDOWN = 60
 
-TTS_MODELS: dict = {'tts0': ('Gemini Flash TTS Preview', 'gemini-3.1-flash-tts-preview')}
+TTS_MODELS: dict = {
+    'tts0': ('Gemini 3.5 Flash TTS', 'gemini-3.5-flash-tts'),
+    'tts1': ('Gemini 3.1 Flash TTS', 'gemini-3.1-flash-tts-preview'),
+}
 
 _TTS_LANGS = [('🇷🇺 RU', 'ru-RU'), ('🇬🇧 EN', 'en-US'), ('🇯🇵 JA', 'ja-JP')]
 _TTS_TEMPS = [0.1, 0.5, 1.0, 1.5, 2.0]
