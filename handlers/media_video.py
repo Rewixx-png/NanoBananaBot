@@ -15,6 +15,7 @@ from database import save_pending_gen, delete_pending_gen
 from ai_services import (
     start_veo_generation,
     poll_veo_operation,
+    generate_video_with_omni,
     explain_generation_error,
 )
 from utils import check_membership, make_safe_caption
@@ -106,12 +107,19 @@ async def handle_veo_model_select(callback: types.CallbackQuery):
     await callback.bot.send_chat_action(chat_id=request_data['chat_id'], action='upload_video', message_thread_id=message_thread_id)
     gen_id = f'veo_{request_id}'
     try:
-        (op_name, api_key, start_err) = await start_veo_generation(request_data['prompt'], model=real_model, image_bytes=request_data.get('image_bytes'), state_data=state_data)
-        if op_name:
-            await save_pending_gen(gen_id=gen_id, gen_type='video', user_id=request_data['user_id'], chat_id=request_data['chat_id'], source_message_id=request_data['source_message_id'], message_thread_id=request_data['message_thread_id'], prompt=request_data['prompt'], model=real_model, provider='veo', veo_operation_name=op_name, veo_api_key=api_key, model_label=model_label)
-            (video_bytes, error_msg) = await poll_veo_operation(op_name, api_key, state_data=state_data)
+        if model_id.startswith('omni'):
+            (video_bytes, error_msg) = await generate_video_with_omni(
+                request_data['prompt'],
+                image_bytes=request_data.get('image_bytes'),
+                state_data=state_data,
+            )
         else:
-            (video_bytes, error_msg) = (None, start_err)
+            (op_name, api_key, start_err) = await start_veo_generation(request_data['prompt'], model=real_model, image_bytes=request_data.get('image_bytes'), state_data=state_data)
+            if op_name:
+                await save_pending_gen(gen_id=gen_id, gen_type='video', user_id=request_data['user_id'], chat_id=request_data['chat_id'], source_message_id=request_data['source_message_id'], message_thread_id=request_data['message_thread_id'], prompt=request_data['prompt'], model=real_model, provider='veo', veo_operation_name=op_name, veo_api_key=api_key, model_label=model_label)
+                (video_bytes, error_msg) = await poll_veo_operation(op_name, api_key, state_data=state_data)
+            else:
+                (video_bytes, error_msg) = (None, start_err)
     except Exception as e:
         logger.exception(f"Критическая ошибка во время генерации Veo: {e}")
         (video_bytes, error_msg) = (None, f"Внутренняя ошибка сервера: {type(e).__name__}: {e}")
