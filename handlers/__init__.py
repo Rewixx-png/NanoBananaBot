@@ -3,6 +3,8 @@ from .admin import admin_router
 from .media_gen import media_router, refresh_models
 from .core import core_router
 from .chat import chat_router
+import handlers.media_video  # registers /video handler on media_router
+import handlers.media_tts    # registers /tts handler on media_router
 
 router = Router()
 
