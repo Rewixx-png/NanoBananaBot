@@ -5,7 +5,7 @@ import logging
 import aiohttp
 from typing import Tuple, Optional, Dict, Any
 
-from config import SYSTEM_PROMPT
+from config import SYSTEM_PROMPT, GEMINI_IMAGE_TIMEOUT
 from keys import load_keys, remove_key, strip_code_fences
 
 logger = logging.getLogger(__name__)
