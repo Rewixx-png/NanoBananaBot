@@ -7,6 +7,12 @@ from keys import load_keys
 logger = logging.getLogger(__name__)
 
 async def explain_generation_error(prompt: str, error_msg: str, image_bytes: bytes=None) -> str:
+    # Fast-path: don't waste a Gemini call explaining obvious rate-limit errors
+    if error_msg and any(kw in error_msg.lower() for kw in (
+        'все api ключи исчерпали лимит', 'все ключи проебаны', 'нет ключей',
+        'rate limit', 'quota exceeded', '429', 'resource has been exhausted',
+    )):
+        return 'Ключи перегружены — слишком много запросов. Подожди минуту и попробуй снова.'
     keys = await load_keys()
     if not keys:
         return ''
