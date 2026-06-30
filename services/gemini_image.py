@@ -194,6 +194,7 @@ async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes]=N
     if not keys:
         return (None, 'Нет доступных API ключей.')
     all_images = images_bytes if images_bytes else [image_bytes] if image_bytes else []
+    key_errors = []
     for idx, key in enumerate(keys.copy()):
         if state_data:
             state_data['status'] = f'Пробую ключ {idx+1}/{len(keys)} (Gemini)'
@@ -230,6 +231,7 @@ async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes]=N
                     elif resp.status in [429, 403]:
                         resp_text = await resp.text()
                         logging.warning(f'Ошибка ключа (фото) {key[:10]}... Код: {resp.status}. Текст: {resp_text}')
+                        key_errors.append(f'{resp.status}: {resp_text[:120]}')
                         remove_key(key, resp.status)
                         continue
                     elif resp.status == 400:
@@ -239,14 +241,17 @@ async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes]=N
                     elif resp.status in [500, 502, 503, 504]:
                         resp_text = await resp.text()
                         logging.warning(f'Gemini временно недоступен (фото) {key[:10]}... Код: {resp.status}. Пробую следующий ключ.')
+                        key_errors.append(f'{resp.status}: {resp_text[:120]}')
                         continue
                     else:
                         resp_text = await resp.text()
                         return (None, f'Неизвестная ошибка API: {resp.status} - {resp_text}')
             except Exception as e:
                 logging.error(f'Сетевая ошибка: {e}')
+                key_errors.append(f'{type(e).__name__}: {e}')
                 continue
-    return (None, 'Все API ключи исчерпали лимит или недействительны.')
+    details = '\n'.join(key_errors[:5]) if key_errors else 'нет деталей'
+    return (None, f'Все {len(keys)} ключей исчерпаны.\n\nОшибки по ключам:\n{details}')
 
 
 async def fetch_gemini_image_models() -> list:
