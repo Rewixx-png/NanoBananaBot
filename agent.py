@@ -2646,9 +2646,9 @@ async def run_agent(
                     return "Запрос заблокирован фильтром. Попробуй перефразировать.", None
 
             if not candidate:
-                # All keys may be in 429 cooldown — wait for cooldown to expire (65s)
-                await _st("⏳ Все ключи в кулдауне, жду 70 сек...")
-                await asyncio.sleep(70)
+                # All keys may be in 429 cooldown — short wait then retry once
+                await _st("⏳ Ключи перегружены, жду 15 сек...")
+                await asyncio.sleep(15)
                 candidate = await _gemini_call(keys, contents, is_owner=is_owner)
                 if not candidate:
                     return "Gemini не ответил — все ключи временно перегружены. Попробуй через минуту.", None
