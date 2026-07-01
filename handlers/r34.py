@@ -1,6 +1,7 @@
 """Handler for /r34 command — fetches art via agent's image search."""
 import asyncio
 import logging
+import re
 from aiogram import types
 from aiogram.filters import Command
 
@@ -32,6 +33,7 @@ async def cmd_r34(message: types.Message):
         count = max(1, min(int(parts[1]), 8))
     else:
         tag = text.strip()
+    tag = re.sub(r'[^a-zA-Z0-9_\- ]', '', tag)[:80]  # sanitize against prompt injection
 
     prompt = (
         f'Ты — поисковик артов. Найди {count} картинок по тегу «{tag}». '
