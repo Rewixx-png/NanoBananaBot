@@ -31,9 +31,8 @@ async def _firecrawl_search(query: str) -> List[str]:
     url = 'https://api.firecrawl.dev/v2/search'
     payload = {
         'query': query,
-        'limit': 10,
-        'sources': ['web'],
-        'scrapeOptions': {'formats': ['markdown']},
+        'limit': 8,
+        'sources': [{'type': 'web'}],
     }
     async with aiohttp.ClientSession() as session:
         try:
@@ -44,11 +43,10 @@ async def _firecrawl_search(query: str) -> List[str]:
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    urls = []
-                    for r in data.get('data', []):
-                        link = r.get('url', '')
-                        if link:
-                            urls.append(link)
+                    raw = data.get('data', [])
+                    if isinstance(raw, dict):
+                        raw = raw.get('results', []) or raw.get('web', []) or []
+                    urls = [r['url'] for r in raw if isinstance(r, dict) and r.get('url')]
                     return urls
         except Exception as e:
             logger.warning(f'Firecrawl search failed: {e}')
@@ -73,11 +71,12 @@ async def _scrape_page_for_images(session: aiohttp.ClientSession, url: str) -> L
                 return []
             data = await resp.json()
             md = data.get('data', {}).get('markdown', '')
-            # Extract image URLs from markdown
-            import re
-            imgs = re.findall(r'!\[[^\]]*\]\((https?://[^\)]+\.(?:jpg|jpeg|png|webp|gif)[^\)]*)\)', md, re.IGNORECASE)
-            imgs += re.findall(r'(https?://[^\s\)]+\.(?:jpg|jpeg|png|webp|gif))', md, re.IGNORECASE)
-            return list(dict.fromkeys(imgs))[:10]
+            if isinstance(md, str):
+                import re
+                imgs = re.findall(r'!\[[^\]]*\]\((https?://[^\)]+\.(?:jpg|jpeg|png|webp|gif)[^\)]*)\)', md, re.IGNORECASE)
+                imgs += re.findall(r'(https?://[^\s\)]+\.(?:jpg|jpeg|png|webp|gif))', md, re.IGNORECASE)
+                return list(dict.fromkeys(imgs))[:10]
+            return []
     except Exception:
         return []
 
