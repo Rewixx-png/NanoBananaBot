@@ -1,12 +1,14 @@
-"""Handler for /r34 command — fetches art via agent's image search."""
+"""Handler for /r34 command — fetches art from 16 booru sources via DuckDuckGo."""
 import asyncio
 import logging
 import re
+import aiohttp
 from aiogram import types
 from aiogram.filters import Command
+from aiogram.types import BufferedInputFile
 
 from handlers.media_gen import media_router
-from agent import run_agent
+from services.r34_service import search_r34, download_image_bytes
 from handlers.common import safe_send
 
 logger = logging.getLogger(__name__)
@@ -33,42 +35,45 @@ async def cmd_r34(message: types.Message):
         count = max(1, min(int(parts[1]), 8))
     else:
         tag = text.strip()
-    tag = re.sub(r'[^a-zA-Z0-9_\- ]', '', tag)[:80]  # sanitize against prompt injection
+    tag = re.sub(r'[^a-zA-Z0-9_\- ]', '', tag)[:80]
 
-    prompt = (
-        f'Ты — поисковик артов. Найди {count} картинок по тегу «{tag}». '
-        f'Используй web_search с запросом: site:rule34.xxx OR site:gelbooru.com OR site:danbooru.donmai.us OR site:konachan.com OR site:yande.re OR site:e621.net {tag}. '
-        f'Потом через download_image скачай КАЖДУЮ картинку и отправь через send_photo. '
-        f'В подписи укажи источник. НЕ юзай reply пока все картинки не отправлены. '
-        f'Если не нашлось — скажи об этом в reply.'
-    )
-
-    username = message.from_user.username or message.from_user.first_name or 'anon'
-    wait_msg = await safe_send(message.reply, f'🔞 Ищу {count} артов «{tag}» через 30+ источников...')
-
-    async def _st(status: str):
-        try:
-            await wait_msg.edit_text(f'🔞 {status}')
-        except Exception:
-            pass
-
-    async def _send(media: dict):
-        pass  # agent handles sending itself via send_photo tool
+    wait_msg = await safe_send(message.reply, f'🔞 Ищу {count} артов «{tag}» на 16 booru-источниках...')
 
     try:
-        result, _ = await asyncio.wait_for(
-            run_agent(prompt, message.chat.id, username, _st, _send, is_owner=False),
-            timeout=120,
-        )
+        results = await asyncio.wait_for(search_r34(tag, count), timeout=25)
     except asyncio.TimeoutError:
-        await wait_msg.edit_text(f'⏰ Поиск «{tag}» занял больше 2 минут. Попробуй ещё раз.')
+        await wait_msg.edit_text(f'⏰ Поиск «{tag}» занял больше 25 секунд. Попробуй ещё раз.')
         return
-    except Exception as e:
-        logger.exception(f'/r34 agent failed: {e}')
-        await wait_msg.edit_text('❌ Ошибка поиска. Попробуй ещё раз позже.')
+
+    if not results:
+        await wait_msg.edit_text(f'🔞 Ничего не нашёл по тегу «{tag}». Может, другой тег?')
         return
+
+    await wait_msg.edit_text(f'🔞 Нашёл {len(results)}/{count} артов «{tag}», скачиваю...')
+
+    async with aiohttp.ClientSession() as session:
+        sent = 0
+        for source, url in results:
+            img_bytes = await download_image_bytes(session, url)
+            if not img_bytes:
+                continue
+            try:
+                ext = url.rsplit('.', 1)[-1].split('?')[0][:4] or 'jpg'
+                filename = f'r34_{tag}_{sent+1}.{ext}'
+                caption = f'🔞 {tag} #{sent+1} — {source}' if sent == 0 else f'🔞 #{sent+1} — {source}'
+                await safe_send(
+                    message.reply_document,
+                    document=BufferedInputFile(img_bytes, filename=filename),
+                    caption=caption[:1024],
+                )
+                sent += 1
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.warning(f'Failed to send r34 image: {e}')
 
     try:
         await wait_msg.delete()
     except Exception:
         pass
+    if sent == 0:
+        await safe_send(message.reply, f'🔞 Нашлись ссылки, но не смог скачать ни одной картинки «{tag}».')
