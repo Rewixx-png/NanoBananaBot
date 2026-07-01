@@ -40,9 +40,9 @@ async def cmd_r34(message: types.Message):
     wait_msg = await safe_send(message.reply, f'🔞 Ищу {count} артов «{tag}» на 16 booru-источниках...')
 
     try:
-        results = await asyncio.wait_for(search_r34(tag, count), timeout=25)
+        results = await asyncio.wait_for(search_r34(tag, count), timeout=45)
     except asyncio.TimeoutError:
-        await wait_msg.edit_text(f'⏰ Поиск «{tag}» занял больше 25 секунд. Попробуй ещё раз.')
+        await wait_msg.edit_text(f'⏰ Поиск «{tag}» занял больше 45 секунд. Попробуй ещё раз.')
         return
 
     if not results:
