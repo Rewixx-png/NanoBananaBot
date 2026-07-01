@@ -34,7 +34,7 @@ async def _firecrawl_search(query: str) -> List[str]:
     url = 'https://api.firecrawl.dev/v2/search'
     payload = {
         'query': query,
-        'limit': 8,
+        'limit': 15,
         'sources': [{'type': 'web'}],
     }
     async with aiohttp.ClientSession() as session:
@@ -99,7 +99,7 @@ async def _scrape_page_for_images(session: aiohttp.ClientSession, url: str) -> L
                     if re.search(r'/[a-f0-9]{32}/', u):
                         good.append(u)
                 imgs = good
-                return list(dict.fromkeys(imgs))[:10]
+                return list(dict.fromkeys(imgs))[:15]
             return []
     except Exception:
         return []
@@ -127,7 +127,7 @@ async def search_r34(tag: str, count: int = 4) -> List[tuple]:
     # Phase 2: Scrape found pages for direct image URLs
     random.shuffle(all_page_urls)
     async with aiohttp.ClientSession() as session:
-        tasks = [_scrape_page_for_images(session, url) for url in all_page_urls[:8]]
+        tasks = [_scrape_page_for_images(session, url) for url in all_page_urls[:12]]
         results = await asyncio.gather(*tasks)
 
     all_images = []
