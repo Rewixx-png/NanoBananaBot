@@ -52,13 +52,13 @@ async def cmd_r34(message: types.Message):
     await wait_msg.edit_text(f'🔞 Нашёл {len(results)}/{count} артов «{tag}», скачиваю...')
 
     async with aiohttp.ClientSession() as session:
-        media = []
+        media_files = []
         sources = []
         for source, url in results:
             img_bytes = await download_image_bytes(session, url)
             if not img_bytes:
                 continue
-            media.append(InputMediaPhoto(media=BufferedInputFile(img_bytes, filename=f'r34_{tag}.jpg')))
+            media_files.append(BufferedInputFile(img_bytes, filename=f'r34_{tag}.jpg'))
             sources.append(source)
 
     try:
@@ -66,13 +66,16 @@ async def cmd_r34(message: types.Message):
     except Exception:
         pass
 
-    if media:
+    if media_files:
         caption = f'🔞 {tag} — {", ".join(dict.fromkeys(sources))}'[:1024]
+        album = []
+        for i, f in enumerate(media_files):
+            if i == 0:
+                album.append(InputMediaPhoto(media=f, caption=caption))
+            else:
+                album.append(InputMediaPhoto(media=f))
         try:
-            await message.reply_media_group(
-                media=[InputMediaPhoto(media=m.media, caption=caption if i == 0 else None)
-                       for i, m in enumerate(media)]
-            )
+            await message.reply_media_group(media=album)
         except Exception as e:
             logger.warning(f'Failed to send r34 album: {e}')
     else:
