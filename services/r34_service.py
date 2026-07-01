@@ -6,6 +6,8 @@ import aiohttp
 from typing import List, Optional
 from urllib.parse import quote
 
+from services.security_utils import is_safe_url
+
 logger = logging.getLogger(__name__)
 
 _HEADERS = {
@@ -132,6 +134,8 @@ async def search_r34(tag: str, count: int = 4) -> List[tuple]:
 async def download_image_bytes(session: aiohttp.ClientSession, url: str,
                                max_size: int = 10 * 1024 * 1024) -> Optional[bytes]:
     """Download an image, returning bytes if under max_size."""
+    if not is_safe_url(url):
+        return None
     try:
         async with session.get(url, headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as resp:
             if resp.status == 200:
