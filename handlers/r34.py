@@ -68,18 +68,12 @@ async def cmd_r34(message: types.Message):
 
     if media:
         caption = f'🔞 {tag} — {", ".join(dict.fromkeys(sources))}'[:1024]
-        media[0].caption = caption
         try:
-            await message.reply_media_group(media=media)
+            await message.reply_media_group(
+                media=[InputMediaPhoto(media=m.media, caption=caption if i == 0 else None)
+                       for i, m in enumerate(media)]
+            )
         except Exception as e:
             logger.warning(f'Failed to send r34 album: {e}')
-            # Fallback: send individually
-            for i, m in enumerate(media):
-                m.caption = None
-                try:
-                    await message.reply_photo(photo=m.media)
-                    await asyncio.sleep(0.2)
-                except Exception:
-                    pass
     else:
         await safe_send(message.reply, f'🔞 Нашлись ссылки, но не смог скачать ни одной картинки «{tag}».')
