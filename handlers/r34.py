@@ -65,7 +65,7 @@ async def cmd_r34(message: types.Message):
         return
     except Exception as e:
         logger.exception(f'/r34 agent failed: {e}')
-        await wait_msg.edit_text(f'❌ Ошибка поиска: {e}')
+        await wait_msg.edit_text('❌ Ошибка поиска. Попробуй ещё раз позже.')
         return
 
     try:
