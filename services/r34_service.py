@@ -86,6 +86,7 @@ async def _scrape_page_for_images(session: aiohttp.ClientSession, url: str) -> L
                         '/packs/', '/static/', '/assets/', '/avatar', '/icon',
                         '/favicon', 'logo', '180x180', '225x225', '150x150',
                         'star-child', 'thumbnail_', '/thumbs/', 'lofter',
+                        '/preview/', 'jlist',
                     )):
                         continue
                     if any(s in ul for s in (
@@ -162,7 +163,7 @@ async def download_image_bytes(session: aiohttp.ClientSession, url: str,
     if any(s in ul for s in (
         '/packs/', '/static/', '/assets/', '/avatar', '/icon', '/favicon',
         '/thumbnails/', '/thumbs/', 'logo', 'sample_', 'thumbnail_',
-        '180x180', '225x225', '150x150', 'lofter',
+        '180x180', '225x225', '150x150', 'lofter', '/preview/', 'jlist',
     )):
         return None
     # Must look like a real image URL
