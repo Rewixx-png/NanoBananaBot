@@ -1,8 +1,7 @@
-"""R34 / booru art search — searches DuckDuckGo images targeting booru sites."""
+"""R34 / booru art search — uses Firecrawl to find images across booru sites."""
 import asyncio
 import logging
 import random
-import re
 import aiohttp
 from typing import List, Optional
 from urllib.parse import quote
@@ -13,7 +12,6 @@ _HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0',
 }
 
-# Booru domains to search across
 _BOORU_DOMAINS = (
     'rule34.xxx', 'gelbooru.com', 'danbooru.donmai.us',
     'konachan.com', 'yande.re', 'e621.net', 'safebooru.org',
@@ -22,61 +20,103 @@ _BOORU_DOMAINS = (
     'derpibooru.org', 'anime-pictures.net',
 )
 
-_IMG_RE = re.compile(r'"image":"(https?://[^"]+\.(?:jpg|jpeg|png|webp|gif))"', re.IGNORECASE)
-_URL_RE = re.compile(r'"url":"(https?://[^"]+)"', re.IGNORECASE)
-_THUMB_RE = re.compile(r'"thumbnail":"(https?://[^"]+)"', re.IGNORECASE)
+
+async def _firecrawl_search(query: str) -> List[str]:
+    """Search via Firecrawl API and return image URLs."""
+    from keys import load_firecrawl_keys
+    keys = await load_firecrawl_keys()
+    if not keys:
+        return []
+    key = keys[0]
+    url = 'https://api.firecrawl.dev/v2/search'
+    payload = {
+        'query': query,
+        'limit': 10,
+        'sources': ['web'],
+        'scrapeOptions': {'formats': ['markdown']},
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(
+                url, json=payload,
+                headers={'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    urls = []
+                    for r in data.get('data', []):
+                        link = r.get('url', '')
+                        if link:
+                            urls.append(link)
+                    return urls
+        except Exception as e:
+            logger.warning(f'Firecrawl search failed: {e}')
+    return []
 
 
-async def _search_source(session: aiohttp.ClientSession, tag: str,
-                         domain: str) -> List[tuple]:
-    """Search DuckDuckGo for images from a specific booru domain."""
-    query = f'site:{domain} {tag}'
-    url = f'https://lite.duckduckgo.com/lite/?q={quote(query)}'
+async def _scrape_page_for_images(session: aiohttp.ClientSession, url: str) -> List[str]:
+    """Scrape a booru page for direct image URLs using Firecrawl scrape."""
+    from keys import load_firecrawl_keys
+    keys = await load_firecrawl_keys()
+    if not keys:
+        return []
+    key = keys[0]
     try:
-        async with session.get(url, headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.post(
+            'https://api.firecrawl.dev/v2/scrape',
+            json={'url': url, 'formats': ['markdown']},
+            headers={'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
             if resp.status != 200:
                 return []
-            text = await resp.text()
-            # Extract external URLs from DDG lite results
-            hrefs = re.findall(r'class="result-link"[^>]*href="([^"]+)"', text)
-            # Filter to image URLs
-            image_urls = [h for h in hrefs if re.search(r'\.(?:jpg|jpeg|png|webp|gif)(?:\?|$)', h, re.IGNORECASE)
-                          or any(d in h for d in ('/images/', '/samples/', '/img/', '/data/', 'files.'))]
-            # If no direct image URLs, try the booru site pages
-            if not image_urls:
-                booru_urls = [h for h in hrefs if any(d in h for d in _BOORU_DOMAINS)]
-                if booru_urls:
-                    for booru_url in booru_urls[:3]:
-                        try:
-                            async with session.get(booru_url, headers=_HEADERS,
-                                                   timeout=aiohttp.ClientTimeout(total=8)) as bresp:
-                                if bresp.status == 200:
-                                    btext = await bresp.text()
-                                    imgs = re.findall(r'(?:file_url|data-file-url)="(https?://[^"]+\.(?:jpg|jpeg|png|webp))"', btext)
-                                    imgs += re.findall(r'"file_url":"(https?://[^"]+\.(?:jpg|jpeg|png|webp))"', btext)
-                                    image_urls.extend(imgs)
-                        except Exception:
-                            continue
-            return [(domain.split('.')[0].capitalize(), u) for u in list(dict.fromkeys(image_urls))[:5]]
+            data = await resp.json()
+            md = data.get('data', {}).get('markdown', '')
+            # Extract image URLs from markdown
+            import re
+            imgs = re.findall(r'!\[[^\]]*\]\((https?://[^\)]+\.(?:jpg|jpeg|png|webp|gif)[^\)]*)\)', md, re.IGNORECASE)
+            imgs += re.findall(r'(https?://[^\s\)]+\.(?:jpg|jpeg|png|webp|gif))', md, re.IGNORECASE)
+            return list(dict.fromkeys(imgs))[:10]
     except Exception:
         return []
 
 
 async def search_r34(tag: str, count: int = 4) -> List[tuple]:
-    """Search booru sites for tagged images via DuckDuckGo.
+    """Search booru sites for tagged images via Firecrawl.
 
     Returns list of (source_name, image_url) tuples, shuffled.
     """
     count = max(1, min(count, 8))
-    domains = random.sample(_BOORU_DOMAINS, min(10, len(_BOORU_DOMAINS)))
+    # Pick random domains to search
+    domains = random.sample(_BOORU_DOMAINS, min(5, len(_BOORU_DOMAINS)))
+    queries = [f'site:{d} {tag}' for d in domains]
 
+    # Phase 1: Firecrawl search to find booru page URLs
+    all_page_urls = []
+    for query in queries:
+        urls = await _firecrawl_search(query)
+        all_page_urls.extend(urls)
+
+    if not all_page_urls:
+        return []
+
+    # Phase 2: Scrape found pages for direct image URLs
+    random.shuffle(all_page_urls)
     async with aiohttp.ClientSession() as session:
-        tasks = [_search_source(session, tag, domain) for domain in domains]
+        tasks = [_scrape_page_for_images(session, url) for url in all_page_urls[:5]]
         results = await asyncio.gather(*tasks)
 
     all_images = []
-    for img_list in results:
-        all_images.extend(img_list)
+    for img_urls in results:
+        # Guess source from URL domain
+        for url in img_urls:
+            src = 'booru'
+            for d in _BOORU_DOMAINS:
+                if d in url:
+                    src = d.split('.')[0].capitalize()
+                    break
+            all_images.append((src, url))
 
     random.shuffle(all_images)
     result = []
