@@ -5,7 +5,7 @@ import re
 import aiohttp
 from aiogram import types
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, InputMediaPhoto
 
 from handlers.media_gen import media_router
 from services.r34_service import search_r34, download_image_bytes
@@ -52,28 +52,34 @@ async def cmd_r34(message: types.Message):
     await wait_msg.edit_text(f'🔞 Нашёл {len(results)}/{count} артов «{tag}», скачиваю...')
 
     async with aiohttp.ClientSession() as session:
-        sent = 0
+        media = []
+        sources = []
         for source, url in results:
             img_bytes = await download_image_bytes(session, url)
             if not img_bytes:
                 continue
-            try:
-                ext = url.rsplit('.', 1)[-1].split('?')[0][:4] or 'jpg'
-                filename = f'r34_{tag}_{sent+1}.{ext}'
-                caption = f'🔞 {tag} #{sent+1} — {source}' if sent == 0 else f'🔞 #{sent+1} — {source}'
-                await safe_send(
-                    message.reply_document,
-                    document=BufferedInputFile(img_bytes, filename=filename),
-                    caption=caption[:1024],
-                )
-                sent += 1
-                await asyncio.sleep(0.3)
-            except Exception as e:
-                logger.warning(f'Failed to send r34 image: {e}')
+            media.append(InputMediaPhoto(media=BufferedInputFile(img_bytes, filename=f'r34_{tag}.jpg')))
+            sources.append(source)
 
     try:
         await wait_msg.delete()
     except Exception:
         pass
-    if sent == 0:
+
+    if media:
+        caption = f'🔞 {tag} — {", ".join(dict.fromkeys(sources))}'[:1024]
+        media[0].caption = caption
+        try:
+            await message.reply_media_group(media=media)
+        except Exception as e:
+            logger.warning(f'Failed to send r34 album: {e}')
+            # Fallback: send individually
+            for i, m in enumerate(media):
+                m.caption = None
+                try:
+                    await message.reply_photo(photo=m.media)
+                    await asyncio.sleep(0.2)
+                except Exception:
+                    pass
+    else:
         await safe_send(message.reply, f'🔞 Нашлись ссылки, но не смог скачать ни одной картинки «{tag}».')
