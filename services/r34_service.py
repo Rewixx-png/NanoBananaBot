@@ -1,152 +1,56 @@
-"""R34 / booru art search — queries 30+ sources for tagged images."""
+"""R34 / booru art search — scrapes 30+ sources for tagged images."""
 import asyncio
 import logging
 import random
+import re
 import aiohttp
 from typing import List, Optional
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
-_SOURCES = [
-    # (name, search_url_template, image_extractor)
-    ('Gelbooru', 'https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1&limit=50&tags={tag}', '_extract_gelbooru'),
-    ('Danbooru', 'https://danbooru.donmai.us/posts.json?limit=50&tags={tag}', '_extract_danbooru'),
-    ('Konachan', 'https://konachan.com/post.json?limit=50&tags={tag}', '_extract_konachan'),
-    ('Yande.re', 'https://yande.re/post.json?limit=50&tags={tag}', '_extract_konachan'),
-    ('Safebooru', 'https://safebooru.org/index.php?page=dapi&s=post&q=index&json=1&limit=50&tags={tag}', '_extract_gelbooru'),
-    ('Xbooru', 'https://xbooru.com/index.php?page=dapi&s=post&q=index&json=1&limit=50&tags={tag}', '_extract_gelbooru'),
-    ('Realbooru', 'https://realbooru.com/index.php?page=dapi&s=post&q=index&json=1&limit=50&tags={tag}', '_extract_gelbooru'),
-    ('Rule34.xxx', 'https://rule34.xxx/index.php?page=dapi&s=post&q=index&json=1&limit=50&tags={tag}', '_extract_gelbooru'),
-    ('Rule34.us', 'https://rule34.us/index.php?page=dapi&s=post&q=index&json=1&limit=50&tags={tag}', '_extract_gelbooru'),
-    ('Hypnohub', 'https://hypnohub.net/index.php?page=dapi&s=post&q=index&json=1&limit=50&tags={tag}', '_extract_gelbooru'),
-    ('E621', 'https://e621.net/posts.json?limit=50&tags={tag}', '_extract_e621'),
-    ('E926', 'https://e926.net/posts.json?limit=50&tags={tag}', '_extract_e621'),
-    ('Derpibooru', 'https://derpibooru.org/api/v1/json/search/images?q={tag}&per_page=50', '_extract_derpibooru'),
-    ('Sankaku', 'https://capi-v2.sankakucomplex.com/posts?limit=50&tags={tag}', '_extract_sankaku'),
-    ('Luscious', 'https://www.luscious.net/api/v1/albums/search?query={tag}&limit=50', '_extract_luscious'),
-    ('Nhentai', 'https://nhentai.net/api/galleries/search?query={tag}', '_extract_nhentai'),
-    ('Zerochan', 'https://www.zerochan.net/{tag}?json', '_extract_zerochan'),
-    ('Anime-pictures', 'https://anime-pictures.net/api/v3/posts?search_tag={tag}&limit=50', '_extract_anime_pics'),
-    ('Pixiv', 'https://api.pixiv.moe/search?q={tag}', '_extract_pixiv'),
-]
-
 _HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; rv:130.0) Gecko/20100101 Firefox/130.0',
-    'Accept': 'application/json',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
 }
 
-async def _extract_gelbooru(data: dict) -> List[str]:
-    """Extract image URLs from Gelbooru-style JSON API (post array)."""
-    urls = []
-    posts = data if isinstance(data, list) else data.get('post', [])
-    for p in posts:
-        url = p.get('file_url', '') or p.get('image', '')
-        if url and url.startswith('http'):
-            urls.append(url)
-    return urls
-
-async def _extract_danbooru(data: dict) -> List[str]:
-    urls = []
-    for p in (data if isinstance(data, list) else []):
-        url = p.get('file_url', '') or p.get('large_file_url', '')
-        if url and url.startswith('http'):
-            urls.append(url)
-    return urls
-
-async def _extract_konachan(data: dict) -> List[str]:
-    urls = []
-    for p in (data if isinstance(data, list) else []):
-        url = p.get('file_url', '') or p.get('sample_url', '')
-        if url and url.startswith('http'):
-            urls.append(url)
-    return urls
-
-async def _extract_e621(data: dict) -> List[str]:
-    urls = []
-    posts = data.get('posts', [])
-    for p in posts:
-        url = p.get('file', {}).get('url', '')
-        if url:
-            urls.append(url)
-    return urls
-
-async def _extract_derpibooru(data: dict) -> List[str]:
-    urls = []
-    for p in data.get('images', []) if isinstance(data, dict) else []:
-        url = p.get('view_url', '') or p.get('representations', {}).get('full', '')
-        if url and url.startswith('http'):
-            urls.append(url)
-    return urls
-
-async def _extract_sankaku(data: dict) -> List[str]:
-    urls = []
-    for p in (data if isinstance(data, list) else data.get('data', [])):
-        url = p.get('file_url', '') or p.get('sample_url', '')
-        if url and url.startswith('http'):
-            urls.append(url)
-    return urls
-
-async def _extract_luscious(data: dict) -> List[str]:
-    urls = []
-    for album in data.get('data', {}).get('items', []) if isinstance(data, dict) else []:
-        cover = album.get('cover', {}).get('url', '')
-        if cover:
-            urls.append(cover)
-    return urls
-
-async def _extract_nhentai(data: dict) -> List[str]:
-    urls = []
-    for g in data.get('result', []) if isinstance(data, dict) else []:
-        media_id = g.get('media_id', '')
-        if media_id:
-            for ext in ('jpg', 'png'):
-                for i in range(1, 4):
-                    urls.append(f'https://i.nhentai.net/galleries/{media_id}/{i}.{ext}')
-    return urls
-
-async def _extract_zerochan(data: dict) -> List[str]:
-    urls = []
-    items = data.get('items', []) if isinstance(data, dict) else []
-    for p in items:
-        url = p.get('full', '') or p.get('small', '')
-        if url and url.startswith('http'):
-            urls.append(url)
-    return urls
-
-async def _extract_anime_pics(data: dict) -> List[str]:
-    urls = []
-    for p in data.get('posts', []) if isinstance(data, dict) else []:
-        url = p.get('file_url', '')
-        if url:
-            urls.append(f'https://anime-pictures.net{url}' if url.startswith('/') else url)
-    return urls
-
-async def _extract_pixiv(data: dict) -> List[str]:
-    urls = []
-    for p in data.get('illusts', []) if isinstance(data, dict) else []:
-        url = p.get('url', '') or p.get('image_urls', {}).get('large', '')
-        if url:
-            urls.append(url)
-    return urls
-
+_SOURCES = [
+    # (name, search_url, image_regex_pattern)
+    ('Rule34.xxx', 'https://rule34.xxx/index.php?page=post&s=list&tags={tag}', r'"(https://(?:img|us)\.rule34\.xxx/images/\d+/[a-f0-9]+\.(?:jpg|png|jpeg|webp))"'),
+    ('Gelbooru', 'https://gelbooru.com/index.php?page=post&s=list&tags={tag}', r'"(https://(?:img|video-cdn)\.gelbooru\.com/images/[^"]+\.(?:jpg|png|jpeg|webp))"'),
+    ('Safebooru', 'https://safebooru.org/index.php?page=post&s=list&tags={tag}', r'"(https://safebooru\.org//images/\d+/[a-f0-9]+\.(?:jpg|png|jpeg))"'),
+    ('Xbooru', 'https://xbooru.com/index.php?page=post&s=list&tags={tag}', r'"(https://img\.xbooru\.com/images/\d+/[a-f0-9]+\.(?:jpg|png|jpeg))"'),
+    ('Realbooru', 'https://realbooru.com/index.php?page=post&s=list&tags={tag}', r'"(https://realbooru\.com//images/\d+/[a-f0-9]+\.(?:jpg|png|jpeg))"'),
+    ('Rule34.us', 'https://rule34.us/index.php?page=post&s=list&tags={tag}', r'"(https://rule34\.us//images/\d+/[a-f0-9]+\.(?:jpg|png|jpeg))"'),
+    ('Hypnohub', 'https://hypnohub.net/index.php?page=post&s=list&tags={tag}', r'"(https://hypnohub\.net/post/show/\d+/[a-f0-9]+\.(?:jpg|png|jpeg))"'),
+    ('TBIB', 'https://tbib.org/index.php?page=post&s=list&tags={tag}', r'"(https://tbib\.org//images/\d+/[a-f0-9]+\.(?:jpg|png|jpeg))"'),
+    ('Danbooru', 'https://danbooru.donmai.us/posts?tags={tag}', r'(?:data-file-url|data-large-file-url)="(https://[^"]+\.(?:jpg|png|jpeg|webp))"'),
+    ('Konachan', 'https://konachan.com/post?tags={tag}', r'"(https://konachan\.com/(?:image|jpeg|sample)/[^"]+\.(?:jpg|png|jpeg))"'),
+    ('Yande.re', 'https://yande.re/post?tags={tag}', r'"(https://files\.yande\.re/(?:image|sample|jpeg)/[^"]+\.(?:jpg|png|jpeg))"'),
+    ('E621', 'https://e621.net/posts?tags={tag}', r'"(https://static1\.e621\.net/data/[^"]+\.(?:jpg|png|jpeg|webp))"'),
+    ('Derpibooru', 'https://derpibooru.org/search?q={tag}', r'"(https://derpicdn\.net/img/(?:view|download)/\d+/\d+/\d+/\d+\.(?:jpg|png|jpeg|webp))"'),
+    ('Sankaku', 'https://chan.sankakucomplex.com/?tags={tag}', r'"(https://[cs]\.sankakucomplex\.com/data/[^"]+\.(?:jpg|png|jpeg))"'),
+    ('Zerochan', 'https://www.zerochan.net/{tag}', r'"(https://static\.zerochan\.net/[^"]+\.(?:jpg|png|jpeg))"'),
+    ('Luscious', 'https://www.luscious.net/search?q={tag}', r'"(https://(?:cdn|img)\.luscious\.net/[^"]+\.(?:jpg|png|jpeg|webp))"'),
+    ('Nhentai', 'https://nhentai.net/search/?q={tag}', r'"(https://[ti]\.nhentai\.net/galleries/\d+/\d+\.(?:jpg|png))"'),
+    ('Anime-pictures', 'https://anime-pictures.net/posts?search_tag={tag}', r'"(https://(?:img|images)\.anime-pictures\.net/[^"]+\.(?:jpg|png|jpeg))"'),
+    ('Reddit', 'https://www.reddit.com/r/{tag}/search.json?q={tag}+nsfw&restrict_sr=on&sort=top&t=all&limit=50', r'"url": "(https://(?:i\.redd\.it|preview\.redd\.it|external-preview\.redd\.it)/[^"]+\.(?:jpg|png|jpeg|webp|gif))"'),
+]
 
 async def _fetch_source(session: aiohttp.ClientSession, name: str, url_template: str,
-                        extractor_name: str, tag: str) -> List[tuple]:
-    """Fetch images from a single booru source. Returns list of (source_name, image_url)."""
+                        pattern: str, tag: str) -> List[tuple]:
+    """Fetch images from a single booru source via HTML scraping."""
     try:
-        url = url_template.format(tag=quote(tag))
-        async with session.get(url, headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+        url = url_template.format(tag=quote(tag.replace(' ', '_')))
+        async with session.get(url, headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=15),
+                               allow_redirects=True) as resp:
             if resp.status != 200:
                 return []
-            data = await resp.json()
-            extractor = globals().get(extractor_name)
-            if not extractor:
-                return []
-            urls = await extractor(data)
-            return [(name, u) for u in urls if u]
-    except Exception as e:
-        logger.debug(f'{name} failed: {type(e).__name__}')
+            text = await resp.text()
+            urls = list(dict.fromkeys(re.findall(pattern, text, re.IGNORECASE)))
+            return [(name, u) for u in urls[:20]]
+    except Exception:
         return []
 
 
@@ -157,11 +61,11 @@ async def search_r34(tag: str, count: int = 4) -> List[tuple]:
     """
     count = max(1, min(count, 8))
     random.shuffle(_SOURCES)
-    sources_to_try = _SOURCES[:15]  # try up to 15 randomly selected sources
+    sources_to_try = _SOURCES[:15]
 
     async with aiohttp.ClientSession() as session:
-        tasks = [_fetch_source(session, name, template, extractor, tag)
-                 for (name, template, extractor) in sources_to_try]
+        tasks = [_fetch_source(session, name, tmpl, pat, tag)
+                 for (name, tmpl, pat) in sources_to_try]
         results = await asyncio.gather(*tasks)
 
     all_images = []
@@ -172,7 +76,8 @@ async def search_r34(tag: str, count: int = 4) -> List[tuple]:
     return all_images[:count]
 
 
-async def download_image_bytes(session: aiohttp.ClientSession, url: str, max_size: int = 10 * 1024 * 1024) -> Optional[bytes]:
+async def download_image_bytes(session: aiohttp.ClientSession, url: str,
+                               max_size: int = 10 * 1024 * 1024) -> Optional[bytes]:
     """Download an image, returning bytes if under max_size."""
     try:
         async with session.get(url, headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as resp:
