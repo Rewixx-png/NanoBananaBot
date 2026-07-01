@@ -15,11 +15,12 @@ _HEADERS = {
 }
 
 _BOORU_DOMAINS = (
-    'rule34.xxx', 'gelbooru.com', 'danbooru.donmai.us',
-    'konachan.com', 'yande.re', 'e621.net', 'safebooru.org',
-    'xbooru.com', 'realbooru.com', 'rule34.us', 'hypnohub.net',
-    'tbib.org', 'sankakucomplex.com', 'zerochan.net',
-    'derpibooru.org', 'anime-pictures.net',
+    'gelbooru.com',           # #1 — огромная база, теги, NSFW
+    'rule34.xxx',             # #2 — главный R34, всё по тегам
+    'danbooru.donmai.us',     # #3 — качественные теги, чистые арты
+    'konachan.com',           # #4 — высокое разрешение, обои, NSFW
+    'yande.re',               # #5 — высокое разрешение, сканы
+    'e621.net',               # #6 — фурри/антропо, огромная база
 )
 
 
@@ -89,8 +90,8 @@ async def search_r34(tag: str, count: int = 4) -> List[tuple]:
     Returns list of (source_name, image_url) tuples, shuffled.
     """
     count = max(1, min(count, 8))
-    # Pick random domains to search
-    domains = random.sample(_BOORU_DOMAINS, min(5, len(_BOORU_DOMAINS)))
+    # Search ALL domains (only 6, all high-quality NSFW)
+    domains = list(_BOORU_DOMAINS)
     queries = [f'site:{d} {tag}' for d in domains]
 
     # Phase 1: Firecrawl search to find booru page URLs
@@ -105,7 +106,7 @@ async def search_r34(tag: str, count: int = 4) -> List[tuple]:
     # Phase 2: Scrape found pages for direct image URLs
     random.shuffle(all_page_urls)
     async with aiohttp.ClientSession() as session:
-        tasks = [_scrape_page_for_images(session, url) for url in all_page_urls[:5]]
+        tasks = [_scrape_page_for_images(session, url) for url in all_page_urls[:8]]
         results = await asyncio.gather(*tasks)
 
     all_images = []
@@ -133,14 +134,20 @@ async def search_r34(tag: str, count: int = 4) -> List[tuple]:
 
 async def download_image_bytes(session: aiohttp.ClientSession, url: str,
                                max_size: int = 10 * 1024 * 1024) -> Optional[bytes]:
-    """Download an image, returning bytes if under max_size."""
+    """Download an image, returning bytes if under max_size and above min_size."""
     if not is_safe_url(url):
+        return None
+    # Skip thumbnails and samples
+    if '/thumbnails/' in url or '/sample_' in url or 'thumbnail_' in url:
         return None
     try:
         async with session.get(url, headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as resp:
             if resp.status == 200:
+                ct = resp.headers.get('Content-Type', '')
+                if 'image' not in ct and not url.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                    return None
                 data = await resp.read()
-                if len(data) <= max_size:
+                if 5000 <= len(data) <= max_size:  # skip tiny/broken images
                     return data
     except Exception:
         pass
