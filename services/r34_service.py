@@ -78,6 +78,11 @@ async def _scrape_page_for_images(session: aiohttp.ClientSession, url: str) -> L
                 import re
                 imgs = re.findall(r'!\[[^\]]*\]\((https?://[^\)]+\.(?:jpg|jpeg|png|webp|gif)[^\)]*)\)', md, re.IGNORECASE)
                 imgs += re.findall(r'(https?://[^\s\)]+\.(?:jpg|jpeg|png|webp|gif))', md, re.IGNORECASE)
+                # Filter out site assets, icons, thumbnails
+                imgs = [u for u in imgs if not any(s in u.lower() for s in (
+                    '/assets/', '/avatar', '/icon', '180x180', '225x225', '150x150',
+                    'star-child', 'favicon', 'thumbnail_', '/thumbs/',
+                ))]
                 return list(dict.fromkeys(imgs))[:10]
             return []
     except Exception:
@@ -137,8 +142,12 @@ async def download_image_bytes(session: aiohttp.ClientSession, url: str,
     """Download an image, returning bytes if under max_size and above min_size."""
     if not is_safe_url(url):
         return None
-    # Skip thumbnails and samples
-    if '/thumbnails/' in url or '/sample_' in url or 'thumbnail_' in url:
+    # Skip thumbnails, samples, assets, avatars
+    url_lower = url.lower()
+    if any(s in url_lower for s in (
+        '/thumbnails/', '/thumbs/', '/assets/', '/avatar', '/icon', '/favicon',
+        'sample_', 'thumbnail_', '180x180', '225x225', '150x150',
+    )):
         return None
     try:
         async with session.get(url, headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as resp:
