@@ -2161,9 +2161,10 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
 
     # ── Quick Gemini BLOCK_NONE fallback ──────────────────────────────────
     try:
-        live_keys = await _nk_get_live()
+        from keys import load_keys as _load_gemini_keys
+        live_keys = await _load_gemini_keys(model_filter='pro-preview') or await _nk_get_live()
         if live_keys:
-            for model_name in ("gemini-3.5-flash",):
+            for model_name in ("gemini-3.1-pro-preview", "gemini-3.5-flash"):
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
                 payload = {
                     "systemInstruction": {"parts": [{"text": _build_system(is_owner)}]},

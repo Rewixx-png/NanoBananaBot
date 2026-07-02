@@ -126,9 +126,19 @@ def save_api_config(config):
             except Exception:
                 pass
 
-async def load_keys():
+async def load_keys(model_filter: str = None):
+    """Load live Gemini keys, optionally filtered by model access from info field."""
     try:
         async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
+            if model_filter:
+                async with db.execute(
+                    "SELECT key FROM keys WHERE service='Gemini' AND is_live=1 AND info LIKE ?",
+                    (f'%{model_filter}%',)
+                ) as cur:
+                    rows = await cur.fetchall()
+                    keys = [row[0] for row in rows if not _is_dead(row[0])]
+                    if keys:
+                        return keys
             async with db.execute("SELECT key FROM keys WHERE service='Gemini' AND is_live=1") as cur:
                 rows = await cur.fetchall()
                 keys = [row[0] for row in rows if not _is_dead(row[0])]

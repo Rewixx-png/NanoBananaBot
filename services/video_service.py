@@ -216,9 +216,12 @@ async def generate_video_with_omni(
     Supports: text-to-video, image-to-video, video-to-video (edit up to 10s).
     """
     from keys import load_keys
-    keys = await load_keys()
+    # Omni Flash needs paid-tier keys — filter by pro-preview access
+    keys = await load_keys(model_filter='pro-preview')
     if not keys:
-        return (None, 'Нет Gemini ключей.')
+        keys = await load_keys()  # fallback to all keys
+    if not keys:
+        return (None, 'Нет Gemini ключей с доступом к Omni Flash (нужен платный тариф).')
     url = 'https://generativelanguage.googleapis.com/v1beta/interactions'
     # Build input array with type field per Omni API spec
     omni_input = []
