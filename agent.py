@@ -1990,76 +1990,32 @@ def _build_system(is_owner: bool = False) -> str:
 
 async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> dict:
     """Try Groq GPT-OSS-120B first, fall back to Gemini if Groq fails."""
-    # ── Try Groq first ─────────────────────────────────────────────────
-    try:
-        from services.groq_service import generate_text_with_groq
-        import time as _t
-        t0 = _t.monotonic()
+    # ── Try Groq first (only for simple queries without tools) ──────────
+    is_first_turn = len(contents) <= 2  # only system + user message
+    needs_tools = any(kw in str(contents).lower() for kw in (
+        'найди', 'поищи', 'загугли', 'search', 'скинь', 'отправь', 'zip',
+        'скачай', 'напиши код', 'создай', 'сгенерируй проект', 'web_search',
+    ))
+    if is_first_turn and not needs_tools:
+        try:
+            from services.groq_service import generate_text_with_groq
+            import time as _t
+            t0 = _t.monotonic()
+            system = _build_system(is_owner)
+            user_text = " ".join(
+                p.get("text", "") for p in contents[-1].get("parts", []) if "text" in p
+            ) if contents else ""
+            if user_text:
+                result = await generate_text_with_groq(user_text, system_prompt=system, max_tokens=1500)
+                if result and len(result.split()) > 5:
+                    dt = _t.monotonic() - t0
+                    logger.info(f"agent: Groq answered in {dt:.1f}s")
+                    return {"content": {"parts": [{"text": result}], "role": "model"}}
+        except Exception:
+            pass
 
-        # Convert Gemini contents format → OpenAI messages
-        messages = [{"role": "system", "content": _build_system(is_owner)}]
-        for c in contents:
-            role = c.get("role", "user")
-            if role == "model":
-                role = "assistant"
-            parts = c.get("parts", [])
-            text_parts = [p.get("text", "") for p in parts if "text" in p]
-            fn_calls = [p.get("functionCall") for p in parts if "functionCall" in p]
-            fn_resps = [p.get("functionResponse") for p in parts if "functionResponse" in p]
+    # ── Gemini with tools (for complex tasks or if Groq failed) ─────────
 
-            if fn_calls:
-                for fc in fn_calls:
-                    messages.append({
-                        "role": "assistant",
-                        "tool_calls": [{
-                            "id": f"call_{fc.get('name','')}",
-                            "type": "function",
-                            "function": {"name": fc["name"], "arguments": json.dumps(fc.get("args", {}))}
-                        }]
-                    })
-            elif fn_resps:
-                for fr in fn_resps:
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": f"call_{fr.get('name','')}",
-                        "content": fr.get("response", {}).get("result", "")
-                    })
-            elif text_parts:
-                messages.append({"role": role, "content": " ".join(text_parts)})
-
-        # Convert Gemini tools → OpenAI tools format
-        openai_tools = []
-        for t in _TOOLS:
-            fd = t.get("functionDeclarations", t)
-            if isinstance(fd, list):
-                for f in fd:
-                    openai_tools.append({"type": "function", "function": f})
-            elif isinstance(fd, dict):
-                openai_tools.append({"type": "function", "function": fd})
-
-        result = await generate_text_with_groq(
-            messages[0]["content"] if messages else "",
-            system_prompt=messages[0]["content"] if messages else "",
-            max_tokens=2048,
-        )
-
-        # If it's a simple text response (no tool calls needed), return as Gemini-format text
-        if result:
-            dt = _t.monotonic() - t0
-            logger.info(f"agent: Groq answered in {dt:.1f}s")
-            # Check if it looks like a tool call (Groq might have tried tools)
-            if '{"name"' in result or '"function"' in result.lower():
-                try:
-                    parsed = json.loads(result) if result.strip().startswith('{') else None
-                except Exception:
-                    parsed = None
-            # Return as Gemini-format text response
-            return {"content": {"parts": [{"text": result}], "role": "model"}}
-
-    except Exception as e:
-        logger.warning(f"agent: Groq call failed, trying Gemini: {type(e).__name__}")
-
-    # ── Fall back to Gemini ────────────────────────────────────────────
     safety = [
         {"category": "HARM_CATEGORY_HARASSMENT",       "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
@@ -2690,19 +2646,6 @@ async def run_agent(
 
     try:
         # ── Groq fast path: try to answer without tools first ──────────────
-        try:
-            from services.groq_service import generate_text_with_groq
-            groq_prompt = task
-            if initial_files:
-                groq_prompt += f'\n\n[Файлы в workspace: {", ".join(initial_files.keys())}]'
-            system = _build_system(is_owner)
-            groq_result = await generate_text_with_groq(groq_prompt, system_prompt=system, max_tokens=1500)
-            if groq_result and 'WEB_SEARCH' not in groq_result.upper() and 'call:' not in groq_result.lower() and len(groq_result.split()) > 5:
-                logger.info(f'agent: Groq answered directly ({len(groq_result)} chars), skipping ReAct loop')
-                return groq_result, None
-        except Exception:
-            pass
-
         for step in range(MAX_STEPS):
             await _st(_fmt_status(last_action, step))
 
