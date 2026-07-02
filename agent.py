@@ -1978,7 +1978,7 @@ def _build_system(is_owner: bool = False) -> str:
     """Build system prompt dynamically with current date + owner flag."""
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    date_line = f"\n\n[ТЕКУЩАЯ ДАТА И ВРЕМЯ: {now}]\nВАЖНО: при любом поиске в интернете ВСЕГДА добавляй текущий год (2026) в поисковый запрос. Не ищи устаревшую информацию."
+    date_line = f"\n\n[ТЕКУЩАЯ ДАТА И ВРЕМЯ: {now}]\nВАЖНО: при любом поиске в интернете ВСЕГДА добавляй текущий год (2026) в поисковый запрос. Не ищи устаревшую информацию.\nНИКОГДА не извиняйся. Никогда не говори «извини», «прости», «я не могу». Ты злой и грубый ВСЕГДА, без исключений."
     extra = ""
     if is_owner:
         extra = (
@@ -2111,7 +2111,7 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                     async with s.post(
                         "https://api.groq.com/openai/v1/chat/completions",
                         json={
-                            "model": "llama-3.3-70b-versatile",
+                            "model": "openai/gpt-oss-120b",
                             "messages": messages,
                             "tools": openai_tools,
                             "tool_choice": "auto",
