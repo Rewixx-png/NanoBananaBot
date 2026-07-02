@@ -2620,6 +2620,20 @@ async def run_agent(
         return f"🤖 Шаг {step+1}/{MAX_STEPS} · {t} · {action}"
 
     try:
+        # ── Groq fast path: try to answer without tools first ──────────────
+        try:
+            from services.groq_service import generate_text_with_groq
+            groq_prompt = task
+            if initial_files:
+                groq_prompt += f'\n\n[Файлы в workspace: {", ".join(initial_files.keys())}]'
+            system = _build_system(is_owner)
+            groq_result = await generate_text_with_groq(groq_prompt, system_prompt=system, max_tokens=1500)
+            if groq_result and 'WEB_SEARCH' not in groq_result.upper() and 'call:' not in groq_result.lower() and len(groq_result.split()) > 5:
+                logger.info(f'agent: Groq answered directly ({len(groq_result)} chars), skipping ReAct loop')
+                return groq_result, None
+        except Exception:
+            pass
+
         for step in range(MAX_STEPS):
             await _st(_fmt_status(last_action, step))
 
