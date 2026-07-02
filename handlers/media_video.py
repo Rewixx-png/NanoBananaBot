@@ -45,16 +45,22 @@ async def cmd_video(message: types.Message):
     if message.caption:
         prompt = message.caption.replace('/video', '').strip()
     if not prompt and (not message.photo):
-        await message.reply('Напиши промпт после команды, например:\n/video закат над морем\n\nИли прикрепи фото с подписью /video анимируй это — Veo оживит картинку.')
+        await message.reply('Напиши промпт после команды, например:\n/video закат над морем\n\nИли прикрепи фото/видео с подписью /video анимируй это.\nOmni Flash поддерживает редактирование видео!')
         return
     image_bytes = None
+    video_bytes = None
     if message.photo:
         photo = message.photo[-1]
         file_info = await message.bot.get_file(photo.file_id)
         downloaded = await message.bot.download_file(file_info.file_path)
         image_bytes = downloaded.read()
+    if message.video:
+        vid = message.video
+        file_info = await message.bot.get_file(vid.file_id)
+        downloaded = await message.bot.download_file(file_info.file_path)
+        video_bytes = downloaded.read()
     request_id = uuid.uuid4().hex[:10]
-    pending_video_requests[request_id] = {'user_id': message.from_user.id, 'chat_id': message.chat.id, 'source_message_id': message.message_id, 'message_thread_id': message.message_thread_id if message.chat.is_forum else None, 'prompt': prompt, 'image_bytes': image_bytes}
+    pending_video_requests[request_id] = {'user_id': message.from_user.id, 'chat_id': message.chat.id, 'source_message_id': message.message_id, 'message_thread_id': message.message_thread_id if message.chat.is_forum else None, 'prompt': prompt, 'image_bytes': image_bytes, 'video_bytes': video_bytes}
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     rows = [[InlineKeyboardButton(text=label, callback_data=f'veosel:{request_id}:{mid}')] for (mid, (label, _)) in VEO_MODELS.items()]
     keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -112,6 +118,7 @@ async def handle_veo_model_select(callback: types.CallbackQuery):
             (video_bytes, error_msg) = await generate_video_with_omni(
                 request_data['prompt'],
                 image_bytes=request_data.get('image_bytes'),
+                video_bytes=request_data.get('video_bytes'),
                 state_data=state_data,
             )
         else:
