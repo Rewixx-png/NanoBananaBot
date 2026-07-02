@@ -220,23 +220,29 @@ async def generate_video_with_omni(
     if not keys:
         return (None, 'Нет Gemini ключей.')
     url = 'https://generativelanguage.googleapis.com/v1beta/interactions'
-    turn_parts = []
+    # Build input array with type field per Omni API spec
+    omni_input = []
     if image_bytes:
-        turn_parts.append({
-            'inlineData': {'mimeType': 'image/jpeg', 'data': base64.b64encode(image_bytes).decode()}
+        omni_input.append({
+            'type': 'image', 'data': base64.b64encode(image_bytes).decode(), 'mime_type': 'image/jpeg'
         })
     if video_bytes:
-        turn_parts.append({
-            'inlineData': {'mimeType': 'video/mp4', 'data': base64.b64encode(video_bytes).decode()}
+        omni_input.append({
+            'type': 'video', 'data': base64.b64encode(video_bytes).decode(), 'mime_type': 'video/mp4'
         })
-    turn_parts.append({'text': prompt or 'A beautiful cinematic scene'})
+    if omni_input:
+        omni_input.append({'type': 'text', 'text': prompt or 'A beautiful cinematic scene'})
+    else:
+        # Text-only: input can be a plain string
+        omni_input = prompt or 'A beautiful cinematic scene'
     task = 'video_to_video' if video_bytes else ('image_to_video' if image_bytes else 'text_to_video')
     payload = {
         'model': 'gemini-omni-flash-preview',
-        'input': {'role': 'user', 'parts': turn_parts},
-        'response_format': {'type': 'video', 'aspect_ratio': aspect_ratio},
+        'input': omni_input,
         'generation_config': {'video_config': {'task': task}},
     }
+    if not isinstance(omni_input, str):
+        payload['response_format'] = {'type': 'video', 'aspect_ratio': aspect_ratio}
     key_errors = []
     for idx, key in enumerate(keys):
         if state_data:
