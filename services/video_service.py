@@ -280,18 +280,15 @@ async def generate_video_with_omni(
                         continue
                     err = await resp.text()
                     logging.warning(f'Omni Flash key {idx} HTTP {resp.status}: {err[:200]}')
-                    key_errors.append(f'{resp.status}: {err[:150]}')
                     if resp.status == 404:
-                        break  # модель не найдена — бесполезно пробовать другие ключи
-                    if resp.status in (429, 403):
+                        return (None, f'Модель Omni Flash не найдена (404). Возможно, API ключ не имеет доступа.')
+                    # 429 = quota/rate-limit → try next key. Everything else → stop immediately.
+                    if resp.status == 429:
                         from keys import remove_key
                         remove_key(key, resp.status)
-                        key_errors.append(f'{resp.status}: {err[:120]}')
-                        # Quick fail: if 3 keys all have "quota", model is paid-only
-                        quota_count = sum(1 for e in key_errors if 'quota' in e.lower())
-                        if quota_count >= 3:
-                            break
                         continue
+                    # Any other error (400, 403, etc.) — don't retry, show real error
+                    return (None, f'Omni Flash ошибка API ({resp.status}):\n{err[:500]}')
             except asyncio.TimeoutError:
                 key_errors.append('TimeoutError')
                 continue
