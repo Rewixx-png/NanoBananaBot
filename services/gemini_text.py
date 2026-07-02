@@ -88,9 +88,6 @@ def _is_explicit_web_lookup(prompt: str) -> bool:
 
 async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='', web_query: str='', status_cb=None, allow_web: bool=True, is_owner: bool=False) -> str:
     _ensure_ai_imports()
-    keys = await load_keys()
-    if not keys:
-        return 'Блять, ключи закончились, иди нахуй.'
     from state import chat_context_buffer
     history = await get_history(chat_id)
     prefixed_prompt = f'[{username}]: {prompt}' if username else prompt
@@ -106,6 +103,30 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
 
     web_context = ''
     explicit_web_lookup = _is_explicit_web_lookup(_wq)
+
+    # Groq fast path — for simple chat without web search, use GPT-OSS-120B
+    if not explicit_web_lookup and not _needs_web_lookup(_wq):
+        try:
+            from services.groq_service import generate_text_with_groq
+            system = _build_text_system_prompt(allow_web_directive=allow_web, is_owner=is_owner)
+            # Inject recent context
+            ctx_lines = chat_context_buffer.get(chat_id, [])[-8:]
+            ctx_text = '\n'.join(ctx_lines) if ctx_lines else ''
+            groq_prompt = f'[История чата — последние сообщения]:\n{ctx_text}\n\n[Пользователь]: {prefixed_prompt}' if ctx_text else prefixed_prompt
+            result = await generate_text_with_groq(groq_prompt, system_prompt=system, temperature=0.8)
+            if result:
+                history.append({'role': 'user', 'text': prefixed_prompt})
+                history.append({'role': 'model', 'text': result})
+                if len(history) > MAX_HISTORY_MESSAGES:
+                    history = history[-MAX_HISTORY_MESSAGES:]
+                await save_history(chat_id, history)
+                return result
+        except Exception:
+            pass
+
+    keys = await load_keys()
+    if not keys:
+        return 'Блять, ключи закончились, иди нахуй.'
     if allow_web and _needs_web_lookup(_wq):
         clean_q = await _extract_search_query(_wq)
         await _status(f'🔍 Ищу в инете: «{clean_q[:80]}»...')
