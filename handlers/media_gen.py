@@ -73,7 +73,7 @@ PROVIDER_MODELS: dict = {
         ('Flash Lite Image (быстро)', 'g31flashlite'),
         ('Flash 2.0 Image (legacy)', 'g20flash'),
     ],
-    'gpt': [('GPT-Image-2', 'gpt2'), ('DALL-E 3', 'dalle3')],
+    'gpt': [],  # populated dynamically by refresh_models() via OpenAI API
     'flux': [('FLUX Schnell (быстро)', 'schnell'), ('FLUX Dev (качество)', 'fluxdev'), ('FLUX Klein 4B', 'klein')],
     'nsfw': [
         ('Recraft V3 (Дизайн)', 'recraft3'),
@@ -89,8 +89,6 @@ MODEL_TO_REAL: dict = {
     'g31flash': ('gemini', 'gemini-3.1-flash-image-preview'),
     'g31flashlite': ('gemini', 'gemini-3.1-flash-lite-image-preview'),
     'g20flash': ('gemini', 'gemini-2.0-flash-preview-image-generation'),
-    'gpt2': ('gpt', 'gpt-image-2'),
-    'dalle3': ('gpt', 'dall-e-3'),
     'schnell': ('flux', 'black-forest-labs/flux.1-schnell'),
     'fluxdev': ('flux', 'black-forest-labs/flux.1-dev'),
     'klein': ('flux', 'black-forest-labs/flux_2-klein-4b'),
