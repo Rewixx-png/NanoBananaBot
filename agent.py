@@ -2046,7 +2046,7 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                             "max_tokens": 2048,
                         },
                         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                        timeout=aiohttp.ClientTimeout(total=30),
+                        timeout=aiohttp.ClientTimeout(total=60),
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
@@ -2072,9 +2072,11 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                                 logger.info(f"agent: Groq text [{dt:.1f}s]")
                                 return {"content": {"parts": [{"text": text}], "role": "model"}}
                         else:
+                            body = await resp.text()
+                            logger.warning(f"agent: Groq key {idx} HTTP {resp.status}: {body[:150]}")
                             continue
             except Exception as e:
-                logger.warning(f"agent: Groq key {idx} failed: {type(e).__name__}")
+                logger.warning(f"agent: Groq key {idx} failed: {type(e).__name__}: {e}")
 
     # ── All Groq keys exhausted ────────────────────────────────────────
     logger.warning("agent: all Groq keys exhausted")
