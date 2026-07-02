@@ -237,6 +237,7 @@ async def generate_video_with_omni(
         'response_format': {'type': 'video', 'aspect_ratio': aspect_ratio},
         'generation_config': {'video_config': {'task': task}},
     }
+    key_errors = []
     for idx, key in enumerate(keys):
         if state_data:
             state_data['status'] = f'Omni Flash {idx+1}/{len(keys)}'
@@ -259,17 +260,22 @@ async def generate_video_with_omni(
                                             if dl.status == 200:
                                                 return (await dl.read(), None)
                         logging.error(f'Omni returned no video. Full response: {json.dumps(data, ensure_ascii=False)[:500]}')
-                        return (None, 'Omni не смог сгенерировать видео. Попробуй другой запрос.')
+                        key_errors.append(f'200 но без видео')
+                        continue
+                    err = await resp.text()
+                    logging.warning(f'Omni Flash key {idx} HTTP {resp.status}: {err[:200]}')
+                    key_errors.append(f'{resp.status}: {err[:150]}')
+                    if resp.status == 404:
+                        break  # модель не найдена — бесполезно пробовать другие ключи
                     if resp.status in (429, 403):
                         from keys import remove_key
                         remove_key(key, resp.status)
                         continue
-                    err = await resp.text()
-                    logging.warning(f'Omni Flash {resp.status}: {err[:200]}')
-                    if resp.status == 404:
-                        return (None, 'Omni Flash недоступен (404) — модель в preview или не включена для этого ключа.')
             except asyncio.TimeoutError:
+                key_errors.append('TimeoutError')
                 continue
             except Exception as e:
-                return (None, f'Omni Flash error: {type(e).__name__}: {e}')
-    return (None, 'Все ключи исчерпаны или Omni Flash недоступен.')
+                key_errors.append(f'{type(e).__name__}: {e}')
+                continue
+    details = '\n'.join(key_errors[:5]) if key_errors else 'нет деталей'
+    return (None, f'Omni Flash не ответил.\n\nОшибки по ключам:\n{details}')
