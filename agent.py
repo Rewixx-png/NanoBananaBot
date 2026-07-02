@@ -2187,8 +2187,13 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                                     data = await resp.json()
                                     candidates = data.get("candidates", [])
                                     if candidates:
-                                        logger.info("agent: Gemini fallback answered")
-                                        return candidates[0]
+                                        c = candidates[0]
+                                        parts = c.get("content", {}).get("parts", [])
+                                        text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
+                                        if text:
+                                            logger.info(f"agent: Gemini fallback answered ({len(text)} chars)")
+                                            return {"content": {"parts": [{"text": text}], "role": "model"}}
+                                        logger.warning(f"agent: Gemini fallback empty text, finishReason={c.get('finishReason')}")
                     except Exception:
                         continue
     except Exception:
