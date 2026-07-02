@@ -2049,9 +2049,9 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
     ]
 
     # ── Sanitize for Groq tokenizer ─────────────────────────────────────
-    # Strip non-ASCII chars that cause HarmonyError
+    # Remove control chars and null bytes that cause HarmonyError
     def _sanitize(s: str) -> str:
-        return s.encode("ascii", errors="replace").decode("ascii")[:3000]
+        return "".join(c for c in s[:3000] if c.isprintable() or c in "\n\r\t")
 
     for m in messages:
         if m.get("content") and isinstance(m["content"], str):
