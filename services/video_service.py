@@ -286,8 +286,19 @@ async def generate_video_with_omni(
                                         async with session.get(uri, timeout=aiohttp.ClientTimeout(total=60)) as dl:
                                             if dl.status == 200:
                                                 return (await dl.read(), None)
-                        logging.error(f'Omni returned no video. Full response: {json.dumps(data, ensure_ascii=False)[:500]}')
-                        key_errors.append(f'200: нет видео в ответе')
+                        # Check for output_video convenience field
+                        output_video = data.get('output_video') if isinstance(data, dict) else None
+                        if output_video and isinstance(output_video, dict):
+                            b64 = output_video.get('data', '')
+                            if b64:
+                                return (base64.b64decode(b64), None)
+                            uri = output_video.get('uri', '')
+                            if uri:
+                                async with session.get(uri, timeout=aiohttp.ClientTimeout(total=60)) as dl:
+                                    if dl.status == 200:
+                                        return (await dl.read(), None)
+                        logging.error(f'Omni returned no video. steps count: {len(steps)}. First step keys: {list(steps[0].keys()) if steps else "empty"}')
+                        key_errors.append(f'200: ответ получен но видео не найдено (steps={len(steps)})')
                         continue
                     err = await resp.text()
                     logging.warning(f'Omni Flash key {idx} HTTP {resp.status}: {err[:200]}')
