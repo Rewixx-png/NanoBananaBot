@@ -272,13 +272,12 @@ async def generate_video_with_omni(
                 async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        if isinstance(data, list):
-                            key_errors.append('200: response is list (unexpected format)')
-                            continue
-                        for step in data.get('steps', []):
-                            if step.get('type') == 'model_output':
+                        # Omni returns a list of steps, not a dict with 'steps' key
+                        steps = data if isinstance(data, list) else data.get('steps', [])
+                        for step in steps:
+                            if isinstance(step, dict) and step.get('type') == 'model_output':
                                 content = step.get('content', {})
-                                if content.get('type') == 'video':
+                                if isinstance(content, dict) and content.get('type') == 'video':
                                     b64 = content.get('data', '')
                                     if b64:
                                         return (base64.b64decode(b64), None)
@@ -288,7 +287,7 @@ async def generate_video_with_omni(
                                             if dl.status == 200:
                                                 return (await dl.read(), None)
                         logging.error(f'Omni returned no video. Full response: {json.dumps(data, ensure_ascii=False)[:500]}')
-                        key_errors.append(f'200 но без видео')
+                        key_errors.append(f'200: нет видео в ответе')
                         continue
                     err = await resp.text()
                     logging.warning(f'Omni Flash key {idx} HTTP {resp.status}: {err[:200]}')
