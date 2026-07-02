@@ -301,6 +301,14 @@ async def generate_video_with_omni(
                                 return (base64.b64decode(b64), None)
                         # Log what we got for debugging
                         step_types = [s.get('type','?') for s in steps if isinstance(s, dict)]
+                        for step in steps:
+                            if step.get('type') == 'model_output':
+                                ct = step.get('content', {})
+                                logging.error(f'Omni model_output content keys: {list(ct.keys()) if isinstance(ct, dict) else type(ct).__name__}')
+                                if isinstance(ct, dict) and ct.get('type') == 'video':
+                                    d = ct.get('data', '')
+                                    u = ct.get('uri', '')
+                                    logging.error(f'Omni video content: has_data={bool(d)}, has_uri={bool(u)}, data_len={len(d) if d else 0}')
                         logging.error(f'Omni: {len(steps)} steps, types={step_types}, has_output_video={bool(output_video)}')
                         key_errors.append(f'200: видео не найдено (steps={len(steps)}, types={step_types})')
                         continue
