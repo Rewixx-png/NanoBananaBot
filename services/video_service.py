@@ -215,12 +215,26 @@ async def generate_video_with_omni(
 
     Supports: text-to-video, image-to-video, video-to-video (edit up to 10s).
     """
-    from keys import load_keys
-    # Omni Flash needs paid-tier keys — filter by pro-preview access
-    keys = await load_keys(model_filter='pro-preview')
-    if not keys:
-        keys = await load_keys()  # fallback to all keys
-    if not keys:
+    import aiosqlite
+    from keys.manager import REWTEST_DB
+    # Load keys with their referrer info from Keyhunter
+    keys_with_ref = []
+    try:
+        async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
+            async with db.execute(
+                "SELECT key, info FROM keys WHERE service='Gemini' AND is_live=1 AND info LIKE '%pro-preview%'"
+            ) as cur:
+                rows = await cur.fetchall()
+                import re as _re
+                for key, info in rows:
+                    ref = ''
+                    m = _re.search(r'referrer:\s*(https?://[^\s|]+)', info or '')
+                    if m:
+                        ref = m.group(1).strip()
+                    keys_with_ref.append((key, ref))
+    except Exception:
+        pass
+    if not keys_with_ref:
         return (None, 'Нет Gemini ключей с доступом к Omni Flash (нужен платный тариф).')
     url = 'https://generativelanguage.googleapis.com/v1beta/interactions'
     # Build input array with type field per Omni API spec
@@ -247,14 +261,12 @@ async def generate_video_with_omni(
     if not isinstance(omni_input, str):
         payload['response_format'] = {'type': 'video', 'aspect_ratio': aspect_ratio}
     key_errors = []
-    for idx, key in enumerate(keys):
+    for idx, (key, referrer) in enumerate(keys_with_ref):
         if state_data:
-            state_data['status'] = f'Omni Flash {idx+1}/{len(keys)}'
-        headers = {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': key,
-            'Referer': 'https://nanohatani.local',
-        }
+            state_data['status'] = f'Omni Flash {idx+1}/{len(keys_with_ref)}'
+        headers = {'Content-Type': 'application/json', 'x-goog-api-key': key}
+        if referrer:
+            headers['Referer'] = referrer
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
