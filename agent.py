@@ -2145,6 +2145,11 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                             # Text response
                             text = msg.get("content", "").strip()
                             if text:
+                                refusal = ("sorry", "cannot", "can't", "i'm unable", "i am unable",
+                                           "не могу", "извини", "не буду", "нельзя", "запрещено")
+                                if any(kw in text.lower() for kw in refusal):
+                                    logger.info(f"agent: Groq refused, trying Gemini fallback")
+                                    break  # break out of key loop → fall through to Gemini
                                 logger.info(f"agent: Groq text [{dt:.1f}s]")
                                 return {"content": {"parts": [{"text": text}], "role": "model"}}
                         else:
@@ -2154,18 +2159,16 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
             except Exception as e:
                 logger.warning(f"agent: Groq key {idx} failed: {type(e).__name__}: {e}")
 
-    # ── All Groq keys exhausted ────────────────────────────────────────
-    logger.warning("agent: all Groq keys exhausted")
-    # Quick Gemini fallback without tools (for simple text replies when Groq fails)
+    # ── Quick Gemini BLOCK_NONE fallback ──────────────────────────────────
     try:
         live_keys = await _nk_get_live()
         if live_keys:
-            for model_name in ("gemini-3.1-pro-preview", "gemini-3.1-flash-preview"):
+            for model_name in ("gemini-3.5-flash",):
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
                 payload = {
                     "systemInstruction": {"parts": [{"text": _build_system(is_owner)}]},
                     "contents": contents[-1:] if len(contents) > 1 else contents,
-                    "generationConfig": {"temperature": 1.0},
+                    "generationConfig": {"temperature": 1.0, "thinkingConfig": {"thinkingLevel": "minimal"}},
                     "safetySettings": [
                         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
