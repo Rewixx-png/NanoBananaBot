@@ -2023,22 +2023,29 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
         elif text:
             messages.append({"role": role, "content": text})
 
-    # ── Convert Gemini _TOOLS → OpenAI tools (trim to top 15, strip params) ─
-    # Keep only the most-used tools to reduce request size
-    _ESSENTIAL_TOOLS = {
-        "think", "reply", "web_search", "scrape_url", "generate_image",
-        "search_and_send_image", "download_image", "search_and_send_video",
-        "download_video", "run_python", "run_shell", "generate_project",
-        "write_file", "read_file", "send_workspace_file",
+    # ── Build ultra-minimal OpenAI tools ────────────────────────────────
+    _TOOL_MAP = {
+        "think": "Think before acting (1-2 sentences)",
+        "reply": "Send final text reply to user. Use HTML formatting.",
+        "web_search": "Search internet via Firecrawl. Returns page URLs.",
+        "scrape_url": "Read a web page content via Firecrawl.",
+        "generate_image": "Generate an image via Gemini/GPT/Flux.",
+        "search_and_send_image": "Search and download images from web.",
+        "download_image": "Download an image from a URL.",
+        "search_and_send_video": "Search and download videos from web.",
+        "download_video": "Download a video from URL via yt-dlp.",
+        "run_python": "Execute Python code in Docker sandbox.",
+        "run_shell": "Execute shell command in Docker sandbox.",
+        "generate_project": "Generate multi-file project as ZIP.",
+        "write_file": "Write a file to agent workspace.",
+        "read_file": "Read a file from agent workspace.",
+        "send_workspace_file": "Send workspace file to user.",
     }
-    openai_tools = []
-    for fd in _TOOLS:
-        name = fd.get("name", fd.get("function", {}).get("name", ""))
-        if name not in _ESSENTIAL_TOOLS:
-            continue
-        f = {"name": name, "description": fd.get("description", "")[:200],
-             "parameters": fd.get("parameters", {"type": "object", "properties": {}})}
-        openai_tools.append({"type": "function", "function": f})
+    openai_tools = [
+        {"type": "function", "function": {"name": k, "description": v,
+         "parameters": {"type": "object", "properties": {"args": {"type": "object"}}}}}
+        for k, v in _TOOL_MAP.items()
+    ]
 
     # ── Try Groq with tools ────────────────────────────────────────────
     # Keep only last 15 messages to avoid 413 Request Too Large
