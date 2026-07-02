@@ -2023,29 +2023,64 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
         elif text:
             messages.append({"role": role, "content": text})
 
-    # ── Build ultra-minimal OpenAI tools ────────────────────────────────
-    _TOOL_MAP = {
-        "think": "Think before acting (1-2 sentences)",
-        "reply": "Send final text reply to user. Use HTML formatting.",
-        "web_search": "Search internet via Firecrawl. Returns page URLs.",
-        "web_scrape": "Read a web page content. Alias for scrape_url.",
-        "scrape_url": "Read a web page content via Firecrawl.",
-        "generate_image": "Generate an image via Gemini/GPT/Flux.",
-        "search_and_send_image": "Search and download images from web.",
-        "download_image": "Download an image from a URL.",
-        "search_and_send_video": "Search and download videos from web.",
-        "download_video": "Download a video from URL via yt-dlp.",
-        "run_python": "Execute Python code in Docker sandbox.",
-        "run_shell": "Execute shell command in Docker sandbox.",
-        "generate_project": "Generate multi-file project as ZIP.",
-        "write_file": "Write a file to agent workspace.",
-        "read_file": "Read a file from agent workspace.",
-        "send_workspace_file": "Send workspace file to user.",
-    }
+    # ── Build OpenAI tools with proper parameter schemas ─────────────────
     openai_tools = [
-        {"type": "function", "function": {"name": k, "description": v,
-         "parameters": {"type": "object", "properties": {"args": {"type": "object"}}}}}
-        for k, v in _TOOL_MAP.items()
+        {"type": "function", "function": {
+            "name": "think", "description": "Plan next action (1-2 sentences)",
+            "parameters": {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]}
+        }},
+        {"type": "function", "function": {
+            "name": "reply", "description": "Send final reply to user with HTML formatting",
+            "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+        }},
+        {"type": "function", "function": {
+            "name": "web_search", "description": "Search internet via Firecrawl",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+        }},
+        {"type": "function", "function": {
+            "name": "scrape_url", "description": "Read a web page via Firecrawl",
+            "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+        }},
+        {"type": "function", "function": {
+            "name": "web_scrape", "description": "Alias for scrape_url",
+            "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+        }},
+        {"type": "function", "function": {
+            "name": "generate_image", "description": "Generate image via AI (Gemini/GPT/Flux)",
+            "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}, "provider": {"type": "string"}}, "required": ["prompt"]}
+        }},
+        {"type": "function", "function": {
+            "name": "search_and_send_image", "description": "Search and download images from web",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "count": {"type": "integer"}}, "required": ["query"]}
+        }},
+        {"type": "function", "function": {
+            "name": "download_image", "description": "Download image from URL",
+            "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+        }},
+        {"type": "function", "function": {
+            "name": "run_python", "description": "Run Python code in Docker sandbox",
+            "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}
+        }},
+        {"type": "function", "function": {
+            "name": "run_shell", "description": "Run shell command in Docker sandbox",
+            "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+        }},
+        {"type": "function", "function": {
+            "name": "generate_project", "description": "Generate multi-file project as ZIP",
+            "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}}, "required": ["prompt"]}
+        }},
+        {"type": "function", "function": {
+            "name": "write_file", "description": "Write file to agent workspace",
+            "parameters": {"type": "object", "properties": {"filename": {"type": "string"}, "content": {"type": "string"}}, "required": ["filename", "content"]}
+        }},
+        {"type": "function", "function": {
+            "name": "read_file", "description": "Read file from agent workspace",
+            "parameters": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}
+        }},
+        {"type": "function", "function": {
+            "name": "send_workspace_file", "description": "Send workspace file to user",
+            "parameters": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}
+        }},
     ]
 
     # ── Sanitize for Groq tokenizer ─────────────────────────────────────
