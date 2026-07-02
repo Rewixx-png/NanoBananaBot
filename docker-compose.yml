@@ -23,8 +23,7 @@ services:
     container_name: nano_hatani_bot
     restart: unless-stopped
     depends_on:
-      telegram-bot-api:
-        condition: service_healthy
+      - telegram-bot-api
     env_file:
       - .env
     network_mode: host
