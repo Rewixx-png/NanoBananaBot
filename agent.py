@@ -1989,33 +1989,94 @@ def _build_system(is_owner: bool = False) -> str:
 
 
 async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> dict:
-    """Try Groq GPT-OSS-120B first, fall back to Gemini if Groq fails."""
-    # ── Try Groq first (only for simple queries without tools) ──────────
-    is_first_turn = len(contents) <= 2  # only system + user message
-    needs_tools = any(kw in str(contents).lower() for kw in (
-        'найди', 'поищи', 'загугли', 'search', 'скинь', 'отправь', 'zip',
-        'скачай', 'напиши код', 'создай', 'сгенерируй проект', 'web_search',
-    ))
-    if is_first_turn and not needs_tools:
-        try:
-            from services.groq_service import generate_text_with_groq
-            import time as _t
+    """Call Groq GPT-OSS-120B with tools. Fall back to Gemini if Groq fails."""
+    import time as _t
+    from services.groq_service import _get_keys as _groq_keys
+
+    # ── Build OpenAI-format messages from Gemini contents ──────────────
+    messages = [{"role": "system", "content": _build_system(is_owner)}]
+    for c in contents:
+        role = c.get("role", "user")
+        if role == "model":
+            role = "assistant"
+        parts = c.get("parts", [])
+        text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
+        fn_calls = [p["functionCall"] for p in parts if "functionCall" in p]
+        fn_resps = [p["functionResponse"] for p in parts if "functionResponse" in p]
+
+        if fn_calls:
+            tc = []
+            for fc in fn_calls:
+                tc.append({
+                    "id": f"call_{fc['name']}",
+                    "type": "function",
+                    "function": {"name": fc["name"], "arguments": json.dumps(fc.get("args", {}))}
+                })
+            messages.append({"role": "assistant", "tool_calls": tc})
+        elif fn_resps:
+            for fr in fn_resps:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": f"call_{fr['name']}",
+                    "content": str(fr.get("response", {}).get("result", ""))[:4000]
+                })
+        elif text:
+            messages.append({"role": role, "content": text})
+
+    # ── Convert Gemini _TOOLS → OpenAI tools format ────────────────────
+    openai_tools = []
+    for fd in _TOOLS:
+        openai_tools.append({"type": "function", "function": fd})
+
+    # ── Try Groq with tools ────────────────────────────────────────────
+    groq_keys = await _groq_keys()
+    if groq_keys:
+        for idx, key in enumerate(groq_keys[:5]):
             t0 = _t.monotonic()
-            system = _build_system(is_owner)
-            user_text = " ".join(
-                p.get("text", "") for p in contents[-1].get("parts", []) if "text" in p
-            ) if contents else ""
-            if user_text:
-                result = await generate_text_with_groq(user_text, system_prompt=system, max_tokens=1500)
-                if result and len(result.split()) > 5:
-                    dt = _t.monotonic() - t0
-                    logger.info(f"agent: Groq answered in {dt:.1f}s")
-                    return {"content": {"parts": [{"text": result}], "role": "model"}}
-        except Exception:
-            pass
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        json={
+                            "model": "openai/gpt-oss-120b",
+                            "messages": messages,
+                            "tools": openai_tools,
+                            "tool_choice": "auto",
+                            "temperature": 0.7,
+                            "max_tokens": 2048,
+                        },
+                        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            choice = data["choices"][0]
+                            msg = choice.get("message", {})
+                            dt = _t.monotonic() - t0
+                            # Has tool calls → convert to Gemini format
+                            if msg.get("tool_calls"):
+                                parts = []
+                                for tc in msg["tool_calls"]:
+                                    try:
+                                        args = json.loads(tc["function"]["arguments"])
+                                    except Exception:
+                                        args = {}
+                                    parts.append({
+                                        "functionCall": {"name": tc["function"]["name"], "args": args}
+                                    })
+                                logger.info(f"agent: Groq tool calls [{dt:.1f}s]: {[tc['function']['name'] for tc in msg['tool_calls']]}")
+                                return {"content": {"parts": parts, "role": "model"}}
+                            # Text response
+                            text = msg.get("content", "").strip()
+                            if text:
+                                logger.info(f"agent: Groq text [{dt:.1f}s]")
+                                return {"content": {"parts": [{"text": text}], "role": "model"}}
+                        else:
+                            continue
+            except Exception as e:
+                logger.warning(f"agent: Groq key {idx} failed: {type(e).__name__}")
 
-    # ── Gemini with tools (for complex tasks or if Groq failed) ─────────
-
+    # ── Fall back to Gemini ────────────────────────────────────────────
     safety = [
         {"category": "HARM_CATEGORY_HARASSMENT",       "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
@@ -2024,7 +2085,6 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT",
          "threshold": "BLOCK_NONE" if is_owner else "BLOCK_ONLY_HIGH"},
     ]
-    # Use gemini-3.1-pro-preview as fallback (keep the smart one)
     for model_name in ("gemini-3.1-pro-preview", "gemini-3.1-flash-preview"):
         payload = {
             "systemInstruction": {"parts": [{"text": _build_system(is_owner)}]},
