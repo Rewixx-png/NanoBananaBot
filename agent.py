@@ -2076,7 +2076,7 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                     async with s.post(
                         "https://api.groq.com/openai/v1/chat/completions",
                         json={
-                            "model": "openai/gpt-oss-120b",
+                            "model": "llama-3.3-70b-versatile",
                             "messages": messages,
                             "tools": openai_tools,
                             "tool_choice": "auto",
