@@ -2166,9 +2166,12 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
         if live_keys:
             for model_name in ("gemini-3.1-pro-preview", "gemini-3.5-flash"):
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                # Only send the last user message (not Groq tool-call history)
+                last_user = [c for c in contents if c.get("role") == "user"]
+                clean_contents = last_user[-1:] if last_user else contents[-1:]
                 payload = {
                     "systemInstruction": {"parts": [{"text": _build_system(is_owner)}]},
-                    "contents": contents[-1:] if len(contents) > 1 else contents,
+                    "contents": clean_contents,
                     "generationConfig": {"temperature": 1.0, "thinkingConfig": {"thinkingLevel": "minimal"}},
                     "safetySettings": [
                         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
