@@ -2023,13 +2023,21 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
         elif text:
             messages.append({"role": role, "content": text})
 
-    # ── Convert Gemini _TOOLS → OpenAI tools format ────────────────────
-    # Limit tool descriptions to 300 chars to reduce request size
+    # ── Convert Gemini _TOOLS → OpenAI tools (trim to top 15, strip params) ─
+    # Keep only the most-used tools to reduce request size
+    _ESSENTIAL_TOOLS = {
+        "think", "reply", "web_search", "scrape_url", "generate_image",
+        "search_and_send_image", "download_image", "search_and_send_video",
+        "download_video", "run_python", "run_shell", "generate_project",
+        "write_file", "read_file", "send_workspace_file",
+    }
     openai_tools = []
     for fd in _TOOLS:
-        f = dict(fd)
-        if "description" in f and len(f["description"]) > 300:
-            f["description"] = f["description"][:300]
+        name = fd.get("name", fd.get("function", {}).get("name", ""))
+        if name not in _ESSENTIAL_TOOLS:
+            continue
+        f = {"name": name, "description": fd.get("description", "")[:200],
+             "parameters": fd.get("parameters", {"type": "object", "properties": {}})}
         openai_tools.append({"type": "function", "function": f})
 
     # ── Try Groq with tools ────────────────────────────────────────────
