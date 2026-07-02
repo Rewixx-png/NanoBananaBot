@@ -2115,7 +2115,7 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                             "messages": messages,
                             "tools": openai_tools,
                             "tool_choice": "auto",
-                            "temperature": 0.7,
+                            "temperature": 1.5,
                             "max_tokens": 2048,
                         },
                         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
@@ -2165,7 +2165,7 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                 payload = {
                     "systemInstruction": {"parts": [{"text": _build_system(is_owner)}]},
                     "contents": contents[-1:] if len(contents) > 1 else contents,
-                    "generationConfig": {"temperature": 0.9},
+                    "generationConfig": {"temperature": 1.5},
                     "safetySettings": [
                         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
