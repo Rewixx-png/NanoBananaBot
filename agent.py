@@ -1978,7 +1978,7 @@ def _build_system(is_owner: bool = False) -> str:
     """Build system prompt dynamically with current date + owner flag."""
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    date_line = f"\n\n[ТЕКУЩАЯ ДАТА И ВРЕМЯ: {now}]"
+    date_line = f"\n\n[ТЕКУЩАЯ ДАТА И ВРЕМЯ: {now}]\nВАЖНО: при любом поиске в интернете ВСЕГДА добавляй текущий год (2026) в поисковый запрос. Не ищи устаревшую информацию."
     extra = ""
     if is_owner:
         extra = (
