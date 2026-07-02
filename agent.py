@@ -2024,14 +2024,27 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
             messages.append({"role": role, "content": text})
 
     # ── Convert Gemini _TOOLS → OpenAI tools format ────────────────────
+    # Limit tool descriptions to 300 chars to reduce request size
     openai_tools = []
     for fd in _TOOLS:
-        openai_tools.append({"type": "function", "function": fd})
+        f = dict(fd)
+        if "description" in f and len(f["description"]) > 300:
+            f["description"] = f["description"][:300]
+        openai_tools.append({"type": "function", "function": f})
 
     # ── Try Groq with tools ────────────────────────────────────────────
+    # Keep only last 15 messages to avoid 413 Request Too Large
+    if len(messages) > 16:
+        messages = [messages[0]] + messages[-15:]
+
+    # Truncate long message content
+    for m in messages[1:]:
+        if m.get("content") and len(m.get("content", "")) > 3000:
+            m["content"] = m["content"][:3000] + "..."
+
     groq_keys = await _groq_keys()
     if groq_keys:
-        for idx, key in enumerate(groq_keys[:10]):
+        for idx, key in enumerate(groq_keys[:15]):
             t0 = _t.monotonic()
             try:
                 async with aiohttp.ClientSession() as s:
