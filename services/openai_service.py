@@ -196,21 +196,8 @@ async def fetch_openai_image_models() -> list:
         except Exception as e:
             logging.warning(f'fetch_openai_image_models key {key[:12]}: {e}')
             continue
-    or_keys = await load_openrouter_keys()
-    if or_keys:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get('https://openrouter.ai/api/v1/models', headers={'Authorization': f'Bearer {or_keys[0]}'}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        for m in sorted(data.get('data', []), key=lambda x: x.get('created', 0), reverse=True):
-                            mid = m.get('id', '')
-                            if mid.startswith('openai/') and 'image' in mid.lower() and mid not in seen:
-                                result.append((_pretty_model_name(mid.split('/')[-1]), mid))
-                                seen.add(mid)
-        except Exception as e:
-            logging.warning(f'fetch_openai_image_models (OpenRouter): {e}')
+    # No OpenRouter fallback — GPT=models from OpenAI API only
     if not result:
-        result = [('GPT-Image-2', 'gpt-image-2'), ('DALL-E 3', 'dall-e-3')]
+        result = []  # No OpenAI keys available — GPT provider will be empty
     _models_cache[cache_key] = {'ts': now, 'data': result}
     return result
