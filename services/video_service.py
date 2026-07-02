@@ -276,6 +276,11 @@ async def generate_video_with_omni(
                     if resp.status in (429, 403):
                         from keys import remove_key
                         remove_key(key, resp.status)
+                        key_errors.append(f'{resp.status}: {err[:120]}')
+                        # Quick fail: if 3 keys all have "quota", model is paid-only
+                        quota_count = sum(1 for e in key_errors if 'quota' in e.lower())
+                        if quota_count >= 3:
+                            break
                         continue
             except asyncio.TimeoutError:
                 key_errors.append('TimeoutError')
