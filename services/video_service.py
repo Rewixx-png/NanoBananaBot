@@ -272,33 +272,39 @@ async def generate_video_with_omni(
                 async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        # Omni returns a list of steps, not a dict with 'steps' key
-                        steps = data if isinstance(data, list) else data.get('steps', [])
-                        for step in steps:
-                            if isinstance(step, dict) and step.get('type') == 'model_output':
-                                content = step.get('content', {})
-                                if isinstance(content, dict) and content.get('type') == 'video':
-                                    b64 = content.get('data', '')
-                                    if b64:
-                                        return (base64.b64decode(b64), None)
-                                    uri = content.get('uri', '')
-                                    if uri:
-                                        async with session.get(uri, timeout=aiohttp.ClientTimeout(total=60)) as dl:
-                                            if dl.status == 200:
-                                                return (await dl.read(), None)
-                        # Check for output_video convenience field
-                        output_video = data.get('output_video') if isinstance(data, dict) else None
-                        if output_video and isinstance(output_video, dict):
-                            b64 = output_video.get('data', '')
-                            if b64:
-                                return (base64.b64decode(b64), None)
-                            uri = output_video.get('uri', '')
-                            if uri:
-                                async with session.get(uri, timeout=aiohttp.ClientTimeout(total=60)) as dl:
-                                    if dl.status == 200:
-                                        return (await dl.read(), None)
-                        logging.error(f'Omni returned no video. steps count: {len(steps)}. First step keys: {list(steps[0].keys()) if steps else "empty"}')
-                        key_errors.append(f'200: ответ получен но видео не найдено (steps={len(steps)})')
+                        interaction_id = data.get('id', '') if isinstance(data, dict) else ''
+                        if not interaction_id:
+                            key_errors.append('200: нет id взаимодействия')
+                            continue
+                        # Poll for completion, then fetch video from steps
+                        for _ in range(20):
+                            await asyncio.sleep(3)
+                            async with session.get(
+                                f'https://generativelanguage.googleapis.com/v1beta/{interaction_id}',
+                                headers=headers, timeout=aiohttp.ClientTimeout(total=30)
+                            ) as poll_resp:
+                                if poll_resp.status != 200:
+                                    continue
+                                poll_data = await poll_resp.json()
+                                if poll_data.get('status') != 'completed':
+                                    continue
+                                steps = poll_data.get('steps', [])
+                                for step in steps:
+                                    if step.get('type') == 'model_output':
+                                        content = step.get('content', {})
+                                        if content.get('type') == 'video':
+                                            b64 = content.get('data', '')
+                                            if b64:
+                                                return (base64.b64decode(b64), None)
+                                            uri = content.get('uri', '')
+                                            if uri:
+                                                async with session.get(uri, timeout=aiohttp.ClientTimeout(total=60)) as dl:
+                                                    if dl.status == 200:
+                                                        return (await dl.read(), None)
+                                key_errors.append(f'200: completed но видео не найдено в {len(steps)} steps')
+                                break
+                        else:
+                            key_errors.append('200: не дождался completed за 60с')
                         continue
                     err = await resp.text()
                     logging.warning(f'Omni Flash key {idx} HTTP {resp.status}: {err[:200]}')
