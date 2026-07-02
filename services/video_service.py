@@ -249,11 +249,22 @@ async def generate_video_with_omni(
         omni_input.append({
             'type': 'video', 'data': base64.b64encode(video_bytes).decode(), 'mime_type': 'video/mp4'
         })
+    # Translate Russian prompts to English (Google safety filter is stricter on Russian)
+    final_prompt = prompt or 'A beautiful cinematic scene'
+    if prompt and any('Ѐ' <= c <= 'ӿ' for c in prompt):
+        try:
+            from services.nvidia import translate_to_english
+            translated = await translate_to_english(prompt)
+            if translated and translated != prompt:
+                final_prompt = translated
+                logging.info(f'Omni: translated prompt to English: {final_prompt[:80]}...')
+        except Exception:
+            pass
     if omni_input:
-        omni_input.append({'type': 'text', 'text': prompt or 'A beautiful cinematic scene'})
+        omni_input.append({'type': 'text', 'text': final_prompt})
     else:
         # Text-only: input can be a plain string
-        omni_input = prompt or 'A beautiful cinematic scene'
+        omni_input = final_prompt
     task = 'edit' if video_bytes else ('image_to_video' if image_bytes else 'text_to_video')
     payload = {
         'model': 'gemini-omni-flash-preview',
