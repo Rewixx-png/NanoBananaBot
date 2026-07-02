@@ -250,12 +250,19 @@ async def generate_video_with_omni(
     for idx, key in enumerate(keys):
         if state_data:
             state_data['status'] = f'Omni Flash {idx+1}/{len(keys)}'
-        headers = {'Content-Type': 'application/json', 'x-goog-api-key': key}
+        headers = {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': key,
+            'Referer': 'https://nanohatani.local',
+        }
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
+                        if isinstance(data, list):
+                            key_errors.append('200: response is list (unexpected format)')
+                            continue
                         for step in data.get('steps', []):
                             if step.get('type') == 'model_output':
                                 content = step.get('content', {})
