@@ -220,20 +220,20 @@ async def generate_video_with_omni(
     if not keys:
         return (None, 'Нет Gemini ключей.')
     url = 'https://generativelanguage.googleapis.com/v1beta/interactions'
-    input_parts = []
+    turn_parts = []
     if image_bytes:
-        input_parts.append({
+        turn_parts.append({
             'inlineData': {'mimeType': 'image/jpeg', 'data': base64.b64encode(image_bytes).decode()}
         })
     if video_bytes:
-        input_parts.append({
+        turn_parts.append({
             'inlineData': {'mimeType': 'video/mp4', 'data': base64.b64encode(video_bytes).decode()}
         })
-    input_parts.append({'text': prompt or 'A beautiful cinematic scene'})
+    turn_parts.append({'text': prompt or 'A beautiful cinematic scene'})
     task = 'video_to_video' if video_bytes else ('image_to_video' if image_bytes else 'text_to_video')
     payload = {
         'model': 'gemini-omni-flash-preview',
-        'input': input_parts,
+        'input': {'role': 'user', 'parts': turn_parts},
         'response_format': {'type': 'video', 'aspect_ratio': aspect_ratio},
         'generation_config': {'video_config': {'task': task}},
     }
