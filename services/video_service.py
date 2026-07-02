@@ -6,11 +6,13 @@ import os
 import shutil
 import subprocess
 import tempfile
+import aiosqlite
 import aiohttp
 from typing import Tuple, Optional
 
 from config import SYSTEM_PROMPT, GEMINI_VIDEO_TIMEOUT, MAX_VIDEO_FRAMES, VIDEO_FPS, VIDEO_FRAME_SIZE
 from keys import load_keys, remove_key
+from services.security_utils import is_safe_url
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +287,9 @@ async def generate_video_with_omni(
                                     return (base64.b64decode(b64), None)
                                 uri = content.get('uri', '')
                                 if uri:
+                                    if not is_safe_url(uri):
+                                        logging.warning(f'Omni: unsafe video URI blocked: {uri[:100]}')
+                                        continue
                                     async with session.get(uri, timeout=aiohttp.ClientTimeout(total=60)) as dl:
                                         if dl.status == 200:
                                             return (await dl.read(), None)
