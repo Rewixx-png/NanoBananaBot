@@ -2090,6 +2090,9 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                                         args = json.loads(tc["function"]["arguments"])
                                     except Exception:
                                         args = {}
+                                    # Unwrap Groq's extra "args" wrapper if present
+                                    if isinstance(args, dict) and "args" in args and len(args) == 1:
+                                        args = args["args"]
                                     parts.append({
                                         "functionCall": {"name": tc["function"]["name"], "args": args}
                                     })
