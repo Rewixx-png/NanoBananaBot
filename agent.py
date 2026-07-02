@@ -2028,6 +2028,7 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
         "think": "Think before acting (1-2 sentences)",
         "reply": "Send final text reply to user. Use HTML formatting.",
         "web_search": "Search internet via Firecrawl. Returns page URLs.",
+        "web_scrape": "Read a web page content. Alias for scrape_url.",
         "scrape_url": "Read a web page content via Firecrawl.",
         "generate_image": "Generate an image via Gemini/GPT/Flux.",
         "search_and_send_image": "Search and download images from web.",
@@ -2134,6 +2135,9 @@ async def _execute_tool(
     is_owner: bool = False,
     chat_id: int = 0,
 ) -> Tuple[str, Optional[dict]]:
+    # Tool aliases (Groq model may use different names)
+    if name == "web_scrape":
+        name = "scrape_url"
 
     async def _st(t):
         try: await status_cb(t)
