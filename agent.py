@@ -2116,7 +2116,7 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                             "tools": openai_tools,
                             "tool_choice": "auto",
                             "temperature": 1.0,
-                            "max_tokens": 2048,
+                            "max_tokens": 8192,
                         },
                         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
                         timeout=aiohttp.ClientTimeout(total=60),
