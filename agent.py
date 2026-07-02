@@ -2156,6 +2156,39 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
 
     # ── All Groq keys exhausted ────────────────────────────────────────
     logger.warning("agent: all Groq keys exhausted")
+    # Quick Gemini fallback without tools (for simple text replies when Groq fails)
+    try:
+        live_keys = await _nk_get_live()
+        if live_keys:
+            for model_name in ("gemini-3.1-pro-preview", "gemini-3.1-flash-preview"):
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                payload = {
+                    "systemInstruction": {"parts": [{"text": _build_system(is_owner)}]},
+                    "contents": contents[-1:] if len(contents) > 1 else contents,
+                    "generationConfig": {"temperature": 0.9},
+                    "safetySettings": [
+                        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                    ],
+                }
+                for key in live_keys[:3]:
+                    try:
+                        async with aiohttp.ClientSession() as s:
+                            async with s.post(url, json=payload,
+                                    headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                                    timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                                if resp.status == 200:
+                                    data = await resp.json()
+                                    candidates = data.get("candidates", [])
+                                    if candidates:
+                                        logger.info("agent: Gemini fallback answered")
+                                        return candidates[0]
+                    except Exception:
+                        continue
+    except Exception:
+        pass
     return {}
 
 
@@ -2774,7 +2807,7 @@ async def run_agent(
                 logger.warning("agent: Groq returned empty, retrying once...")
                 candidate = await _gemini_call(keys, contents, is_owner=is_owner)
                 if not candidate:
-                    return "Groq не ответил — попробуй ещё раз.", None
+                    return "Все модели перегружены — попробуй через минуту.", None
 
             parts = candidate.get("content", {}).get("parts", [])
             if not parts:
