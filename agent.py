@@ -2048,15 +2048,24 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
         for k, v in _TOOL_MAP.items()
     ]
 
-    # ── Try Groq with tools ────────────────────────────────────────────
-    # Keep only last 15 messages to avoid 413 Request Too Large
+    # ── Sanitize for Groq tokenizer ─────────────────────────────────────
+    # Strip non-ASCII chars that cause HarmonyError
+    def _sanitize(s: str) -> str:
+        return s.encode("ascii", errors="replace").decode("ascii")[:3000]
+
+    for m in messages:
+        if m.get("content") and isinstance(m["content"], str):
+            m["content"] = _sanitize(m["content"])
+        if "tool_calls" in m:
+            for tc in m.get("tool_calls", []):
+                if "arguments" in tc.get("function", {}):
+                    tc["function"]["arguments"] = _sanitize(tc["function"]["arguments"])
+        if m.get("role") == "tool":
+            m["content"] = _sanitize(str(m.get("content", "")))
+
+    # Keep only last 15 messages
     if len(messages) > 16:
         messages = [messages[0]] + messages[-15:]
-
-    # Truncate long message content
-    for m in messages[1:]:
-        if m.get("content") and len(m.get("content", "")) > 3000:
-            m["content"] = m["content"][:3000] + "..."
 
     groq_keys = await _groq_keys()
     if groq_keys:
