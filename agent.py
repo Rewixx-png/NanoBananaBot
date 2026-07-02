@@ -1989,7 +1989,77 @@ def _build_system(is_owner: bool = False) -> str:
 
 
 async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> dict:
-    # Owner gets BLOCK_NONE for style (profanity); non-owners keep DANGEROUS_CONTENT filtered
+    """Try Groq GPT-OSS-120B first, fall back to Gemini if Groq fails."""
+    # ── Try Groq first ─────────────────────────────────────────────────
+    try:
+        from services.groq_service import generate_text_with_groq
+        import time as _t
+        t0 = _t.monotonic()
+
+        # Convert Gemini contents format → OpenAI messages
+        messages = [{"role": "system", "content": _build_system(is_owner)}]
+        for c in contents:
+            role = c.get("role", "user")
+            if role == "model":
+                role = "assistant"
+            parts = c.get("parts", [])
+            text_parts = [p.get("text", "") for p in parts if "text" in p]
+            fn_calls = [p.get("functionCall") for p in parts if "functionCall" in p]
+            fn_resps = [p.get("functionResponse") for p in parts if "functionResponse" in p]
+
+            if fn_calls:
+                for fc in fn_calls:
+                    messages.append({
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": f"call_{fc.get('name','')}",
+                            "type": "function",
+                            "function": {"name": fc["name"], "arguments": json.dumps(fc.get("args", {}))}
+                        }]
+                    })
+            elif fn_resps:
+                for fr in fn_resps:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": f"call_{fr.get('name','')}",
+                        "content": fr.get("response", {}).get("result", "")
+                    })
+            elif text_parts:
+                messages.append({"role": role, "content": " ".join(text_parts)})
+
+        # Convert Gemini tools → OpenAI tools format
+        openai_tools = []
+        for t in _TOOLS:
+            fd = t.get("functionDeclarations", t)
+            if isinstance(fd, list):
+                for f in fd:
+                    openai_tools.append({"type": "function", "function": f})
+            elif isinstance(fd, dict):
+                openai_tools.append({"type": "function", "function": fd})
+
+        result = await generate_text_with_groq(
+            messages[0]["content"] if messages else "",
+            system_prompt=messages[0]["content"] if messages else "",
+            max_tokens=2048,
+        )
+
+        # If it's a simple text response (no tool calls needed), return as Gemini-format text
+        if result:
+            dt = _t.monotonic() - t0
+            logger.info(f"agent: Groq answered in {dt:.1f}s")
+            # Check if it looks like a tool call (Groq might have tried tools)
+            if '{"name"' in result or '"function"' in result.lower():
+                try:
+                    parsed = json.loads(result) if result.strip().startswith('{') else None
+                except Exception:
+                    parsed = None
+            # Return as Gemini-format text response
+            return {"content": {"parts": [{"text": result}], "role": "model"}}
+
+    except Exception as e:
+        logger.warning(f"agent: Groq call failed, trying Gemini: {type(e).__name__}")
+
+    # ── Fall back to Gemini ────────────────────────────────────────────
     safety = [
         {"category": "HARM_CATEGORY_HARASSMENT",       "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
@@ -1998,43 +2068,42 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT",
          "threshold": "BLOCK_NONE" if is_owner else "BLOCK_ONLY_HIGH"},
     ]
-    payload = {
-        "systemInstruction": {"parts": [{"text": _build_system(is_owner)}]},
-        "contents": contents,
-        "tools": [{"functionDeclarations": _TOOLS}],
-        "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
-        "generationConfig": {"temperature": 0.7, "thinkingConfig": {"thinkingLevel": "high"}},
-        "safetySettings": safety,
-    }
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
-    live_keys = await _nk_get_live()
-    if not live_keys:
-        return {}
-    for key in live_keys:
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(
-                    url, json=payload,
-                    headers={"Content-Type": "application/json", "x-goog-api-key": key},
-                    timeout=aiohttp.ClientTimeout(total=_LLM_TIMEOUT),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        candidates = data.get("candidates", [])
-                        if candidates:
-                            return candidates[0]
-                        reason = data.get("promptFeedback", {}).get("blockReason", "UNKNOWN")
-                        logger.warning(f"agent gemini: empty candidates, blockReason={reason}")
-                        if reason == "PROHIBITED_CONTENT":
-                            return {"_blocked": "PROHIBITED_CONTENT"}
-                        continue
-                    if resp.status in (429, 403):
-                        await _nk_cooldown(key, resp.status)
-                        continue
-                    body = await resp.text()
-                    logger.warning(f"agent gemini: HTTP {resp.status}: {body[:300]}")
-        except Exception as e:
-            logger.warning(f"agent gemini exception: {type(e).__name__}: {e}")
+    # Use gemini-3.1-pro-preview as fallback (keep the smart one)
+    for model_name in ("gemini-3.1-pro-preview", "gemini-3.1-flash-preview"):
+        payload = {
+            "systemInstruction": {"parts": [{"text": _build_system(is_owner)}]},
+            "contents": contents,
+            "tools": [{"functionDeclarations": _TOOLS}],
+            "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
+            "generationConfig": {"temperature": 0.7, "thinkingConfig": {"thinkingLevel": "high"}},
+            "safetySettings": safety,
+        }
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+        live_keys = await _nk_get_live()
+        if not live_keys:
+            continue
+        for key in live_keys:
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.post(
+                        url, json=payload,
+                        headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                        timeout=aiohttp.ClientTimeout(total=_LLM_TIMEOUT),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            candidates = data.get("candidates", [])
+                            if candidates:
+                                return candidates[0]
+                            reason = data.get("promptFeedback", {}).get("blockReason", "UNKNOWN")
+                            if reason == "PROHIBITED_CONTENT":
+                                return {"_blocked": "PROHIBITED_CONTENT"}
+                            continue
+                        if resp.status in (429, 403):
+                            await _nk_cooldown(key, resp.status)
+                            continue
+            except Exception as e:
+                logger.warning(f"agent gemini {model_name}: {type(e).__name__}")
     return {}
 
 
