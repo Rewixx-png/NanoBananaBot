@@ -126,6 +126,9 @@ _RANDOM_MEDIA_MIN_INTERVAL = 30
 _random_media_last_ts_by_chat: dict[int, float] = {}
 
 _RANDOM_GIF_PATHS = [
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), 'media', 'random_gifs', 'kirieshki_1.mp4'),
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), 'media', 'random_gifs', 'kirieshki_2.mp4'),
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), 'media', 'random_gifs', 'kirieshki_3.mp4'),
     os.path.join(os.path.dirname(os.path.dirname(__file__)), 'media', 'random_gifs', 'kirieshki_4.mp4'),
 ]
 
