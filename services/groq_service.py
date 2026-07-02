@@ -7,7 +7,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _GROQ_BASE = "https://api.groq.com/openai/v1"
-_GROQ_MODEL = "openai/gpt-oss-120b"
+_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # Key cache
 _keys_cache: list[str] = []
