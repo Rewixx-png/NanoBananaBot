@@ -197,7 +197,11 @@ async def fetch_openai_image_models() -> list:
             logging.warning(f'fetch_openai_image_models key {key[:12]}: {e}')
             continue
     # No OpenRouter fallback — GPT=models from OpenAI API only
-    if not result:
-        result = []  # No OpenAI keys available — GPT provider will be empty
+    # Merge API results with known defaults (deduplicate by model ID)
+    defaults = [('GPT-Image-2', 'gpt-image-2'), ('DALL-E 3', 'dall-e-3')]
+    seen_ids = {mid for (_, mid) in result}
+    for label, mid in defaults:
+        if mid not in seen_ids:
+            result.append((label, mid))
     _models_cache[cache_key] = {'ts': now, 'data': result}
     return result
