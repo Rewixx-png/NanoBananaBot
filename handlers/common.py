@@ -115,13 +115,13 @@ _KIRIESHKI_CHAT_ID = -1002830734467
 _KIRIESHKI_STICKER_SET = 'kirieshkikirieshki'
 _KIRIESHKI_STICKER_CHANCE = 0.10
 _PERMA_STICKER_SET = 'SHCHperma9740'
-_PERMA_STICKER_CHANCE = 0.10
+_PERMA_STICKER_CHANCE = 0.05
 _KIRIESHKI_STICKER_CACHE_TTL = 86400
 _kirieshki_sticker_file_ids: list[str] = []
 _kirieshki_sticker_cache_ts = 0.0
 _perma_sticker_file_ids: list[str] = []
 _perma_sticker_cache_ts = 0.0
-_RANDOM_GIF_CHANCE = 0.10
+_RANDOM_GIF_CHANCE = 0.05
 _RANDOM_MEDIA_MIN_INTERVAL = 30
 _random_media_last_ts_by_chat: dict[int, float] = {}
 
