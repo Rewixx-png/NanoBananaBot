@@ -274,25 +274,26 @@ async def generate_video_with_omni(
                 async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=180)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        # Omni returns interaction synchronously with video in steps
                         steps = data if isinstance(data, list) else data.get('steps', [])
                         for step in steps:
                             if not isinstance(step, dict):
                                 continue
-                            # Check for video in model_output step
-                            content = step.get('content', {})
-                            if isinstance(content, dict) and content.get('type') == 'video':
-                                b64 = content.get('data', '')
-                                if b64:
-                                    return (base64.b64decode(b64), None)
-                                uri = content.get('uri', '')
-                                if uri:
-                                    if not is_safe_url(uri):
-                                        logging.warning(f'Omni: unsafe video URI blocked: {uri[:100]}')
-                                        continue
-                                    async with session.get(uri, timeout=aiohttp.ClientTimeout(total=60)) as dl:
-                                        if dl.status == 200:
-                                            return (await dl.read(), None)
+                            # Content can be list or dict
+                            contents = step.get('content', [])
+                            if isinstance(contents, dict):
+                                contents = [contents]
+                            for ct in contents:
+                                if isinstance(ct, dict) and ct.get('type') == 'video':
+                                    b64 = ct.get('data', '')
+                                    if b64:
+                                        return (base64.b64decode(b64), None)
+                                    uri = ct.get('uri', '')
+                                    if uri:
+                                        if not is_safe_url(uri):
+                                            continue
+                                        async with session.get(uri, timeout=aiohttp.ClientTimeout(total=60)) as dl:
+                                            if dl.status == 200:
+                                                return (await dl.read(), None)
                         # Check for output_video field
                         output_video = data.get('output_video') if isinstance(data, dict) else None
                         if output_video and isinstance(output_video, dict):
