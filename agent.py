@@ -2818,12 +2818,11 @@ async def run_agent(
 
             if not fn_calls:
                 text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
-                # Strip hallucinated tool-call-as-text patterns
-                text = re.sub(r'\bcall:default_api:\w+\{[^}]*\}\s*', '', text).strip()
-                # If model wrote call:...reply{text: "..."} as text, extract the message
-                m = re.search(r'call:default_api:reply\{text:\s*"([^"]*)"', text)
-                if m and len(m.group(1)) > len(text) * 0.5:
-                    text = m.group(1)
+                # Strip hallucinated tool-call-as-text patterns (both Gemini and Groq formats)
+                text = re.sub(r'\b(?:call:default_api:)?\w+\(\w+="([^"]*)"\)', r'\1', text)
+                text = re.sub(r'<\w+\.?\w+="([^"]*)"\s*/?>', r'\1', text)
+                text = re.sub(r'<reply[^>]*>|</reply>', '', text)
+                text = text.strip()
                 return text or "Done.", None
 
             tool_responses: list = []
