@@ -254,7 +254,7 @@ async def generate_video_with_omni(
     else:
         # Text-only: input can be a plain string
         omni_input = prompt or 'A beautiful cinematic scene'
-    task = 'video_to_video' if video_bytes else ('image_to_video' if image_bytes else 'text_to_video')
+    task = 'edit' if video_bytes else ('image_to_video' if image_bytes else 'text_to_video')
     payload = {
         'model': 'gemini-omni-flash-preview',
         'input': omni_input,
