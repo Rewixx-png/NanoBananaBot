@@ -1,18 +1,31 @@
 """Groq API provider — OpenAI-compatible endpoint, no safety filters."""
 import logging
+import time
 import aiohttp
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 _GROQ_BASE = "https://api.groq.com/openai/v1"
-_GROQ_MODEL = "openai/gpt-oss-120b"  # 120B — smartest model on Groq
+_GROQ_MODEL = "openai/gpt-oss-120b"
+
+# Key cache
+_keys_cache: list[str] = []
+_keys_ts: float = 0.0
+_last_good_key: str = ""
 
 
-async def _load_groq_keys() -> list[str]:
-    """Load all live Groq keys from Keyhunter DB."""
+async def _get_keys() -> list[str]:
+    """Load keys from Keyhunter, cached for 60 seconds."""
+    global _keys_cache, _keys_ts
+    now = time.time()
+    if _keys_cache and now - _keys_ts < 60:
+        return _keys_cache
     from keys.manager import load_groq_keys
-    return await load_groq_keys()
+    _keys_cache = await load_groq_keys()
+    _keys_ts = now
+    logger.info(f"Groq: loaded {len(_keys_cache)} keys")
+    return _keys_cache
 
 
 async def generate_text_with_groq(
@@ -21,15 +34,23 @@ async def generate_text_with_groq(
     temperature: float = 0.7,
     max_tokens: int = 2048,
 ) -> Optional[str]:
-    """Generate text via Groq — rotates through Keyhunter keys on failure."""
-    keys = await _load_groq_keys()
+    """Generate text via Groq — cached keys, last-good-key priority."""
+    global _last_good_key
+    keys = await _get_keys()
     if not keys:
         return None
 
+    # Try last-good-key first, then the rest
+    ordered = []
+    if _last_good_key and _last_good_key in keys:
+        ordered = [_last_good_key] + [k for k in keys if k != _last_good_key]
+    else:
+        ordered = keys
+
     url = f"{_GROQ_BASE}/chat/completions"
-    for idx, key in enumerate(keys[:10]):  # try up to 10 keys
+    for idx, key in enumerate(ordered[:8]):
         payload = {
-            "model": "openai/gpt-oss-120b",
+            "model": _GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
@@ -37,29 +58,19 @@ async def generate_text_with_groq(
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        headers = {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        }
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    url, json=payload, headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
+                    url, json=payload,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=20),
                 ) as resp:
                     if resp.status == 200:
+                        _last_good_key = key
                         data = await resp.json()
                         return data["choices"][0]["message"]["content"].strip()
-                    if resp.status in (429, 403):
-                        text = await resp.text()
-                        logger.warning(f"Groq key {idx} fail ({resp.status}): {text[:120]}")
+                    if resp.status in (429, 403, 400) or "restricted" in (await resp.text()).lower():
                         continue
-                    else:
-                        text = await resp.text()
-                        logger.warning(f"Groq API error {resp.status}: {text[:200]}")
-                        if resp.status == 400 and "restricted" in text.lower():
-                            continue
-        except Exception as e:
-            logger.error(f"Groq key {idx} exception: {type(e).__name__}")
+        except Exception:
             continue
     return None
