@@ -260,7 +260,7 @@ async def generate_video_with_omni(
         'input': omni_input,
         'generation_config': {'video_config': {'task': task}},
     }
-    if not isinstance(omni_input, str):
+    if not isinstance(omni_input, str) and task != 'edit':
         payload['response_format'] = {'type': 'video', 'aspect_ratio': aspect_ratio}
     key_errors = []
     for idx, (key, referrer) in enumerate(keys_with_ref):
