@@ -36,13 +36,26 @@ async def generate_music(
     model_key: str = "lyria-clip",
     output_format: str = "mp3",
 ) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
-    """Generate music via Lyria Interactions API. Falls back through all models."""
+    """Generate music via Lyria generateContent API. Falls back through all models."""
     if model_key not in MUSIC_MODELS:
         return None, None, f"Неизвестная модель: {model_key}"
 
     keys = await load_keys()
     if not keys:
         return None, None, "Нет доступных Gemini ключей."
+
+    # Known working Lyria keys (from 10-agent audit) — try these FIRST
+    _LYRIA_KEYS = {
+        "AIzaSyCd1OW_z92neSHau8lob5AQsakgyhjKDmU",
+        "AIzaSyBPViUpo_6NtCS3PW4vBNU46j2dsWI3iFQ",
+        "AIzaSyABg_ZK4o5bm24BxcY8xUcFqX7INcRbmRg",
+        "AIzaSyCLR8k2J7NWUoidwL_tuoO3XFdRfwRo7Zs",
+        "AIzaSyCq3TsuZ3U8--FMlCnR0Z9MlexkocabHsM",
+        "AIzaSyDUzqexMMQ0cd6JnuL9zVz8nzWWT638Q0A",
+    }
+    priority = [k for k in keys if k in _LYRIA_KEYS]
+    rest = [k for k in keys if k not in _LYRIA_KEYS]
+    keys = priority + rest
 
     # Fallback chain: selected model → other models
     model_chain = [model_key] + [k for k in MUSIC_MODEL_LIST if k != model_key]
@@ -56,8 +69,6 @@ async def generate_music(
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 1.0},
         }
-        if output_format == "wav" and mk == "lyria-pro":
-            payload["response_format"] = {"type": "audio"}
 
         for key in keys:
             try:
