@@ -55,7 +55,6 @@ async def analyze_voice_with_gemini(audio_bytes: bytes, mime_type: str, prompt: 
             continue
     return 'Все ключи проебаны или сдохли, отъебись.'
 async def fetch_gemini_tts_models() -> list:
-    _ensure_ai_imports()
     cache_key = 'gemini_tts'
     now = __import__('time').time()
     if cache_key in _models_cache and now - _models_cache[cache_key]['ts'] < _MODELS_CACHE_TTL:

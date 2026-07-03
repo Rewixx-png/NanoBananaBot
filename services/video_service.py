@@ -184,7 +184,6 @@ async def generate_video_with_veo(prompt: str, model: str='veo-2.0-generate-001'
         return (None, error)
     return await poll_veo_operation(op_name, api_key)
 async def fetch_veo_models() -> list:
-    _ensure_ai_imports()
     cache_key = 'veo'
     now = __import__('time').time()
     if cache_key in _models_cache and now - _models_cache[cache_key]['ts'] < _MODELS_CACHE_TTL:
