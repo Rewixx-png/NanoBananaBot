@@ -91,10 +91,10 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                                 dt = _t.monotonic() - t0
                                 if fc:
                                     logger.info(f"agent: Gemini tool calls [{dt:.1f}s]: {[f['name'] for f in fc]}")
-                                    return {"content": {"parts": parts, "role": "model"}}
+                                    return {"content": {"parts": parts, "role": "model"}, "_finish": c.get("finishReason", "")}
                                 if text:
                                     logger.info(f"agent: Gemini text [{dt:.1f}s] ({len(text)} chars)")
-                                    return {"content": {"parts": [{"text": text}], "role": "model"}}
+                                    return {"content": {"parts": [{"text": text}], "role": "model"}, "_finish": c.get("finishReason", "")}
                                 last_error = f"{model_name}: empty response ({c.get('finishReason', '?')})"
                                 logger.warning(f"agent: {last_error}")
                         elif resp.status in (429, 403):
@@ -528,7 +528,7 @@ async def run_agent(
 
             parts = candidate.get("content", {}).get("parts", [])
             if not parts:
-                return "Agent returned empty response.", None
+                return f"Агент не смог ответить. Причина: {candidate.get('_finish', 'пустой ответ')}", None
 
             contents.append({"role": "model", "parts": parts})
             fn_calls = [p["functionCall"] for p in parts if "functionCall" in p]
