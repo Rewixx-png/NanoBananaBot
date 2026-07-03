@@ -98,6 +98,7 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                                 err_msg = f"{model_name}: empty response ({c.get('finishReason', '?')})"
                                 errors.append(err_msg); logger.warning(f"agent: {err_msg}")
                         elif resp.status in (429, 403):
+                            remove_key(key, resp.status)
                             errors.append(f"{model_name}: HTTP {resp.status} (rate limited)")
                             continue
                         else:
