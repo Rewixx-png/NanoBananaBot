@@ -36,97 +36,87 @@ async def generate_music(
     model_key: str = "lyria-clip",
     output_format: str = "mp3",
 ) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
-    """
-    Generate music via Lyria Interactions API.
-
-    Returns: (audio_bytes, lyrics_text, error_string)
-    - audio_bytes: raw MP3/WAV data or None on failure
-    - lyrics_text: generated lyrics or None
-    - error_string: error description or None on success
-    """
-    model_info = MUSIC_MODELS.get(model_key)
-    if not model_info:
+    """Generate music via Lyria Interactions API. Falls back through all models."""
+    if model_key not in MUSIC_MODELS:
         return None, None, f"Неизвестная модель: {model_key}"
 
-    model_id = model_info["id"]
     keys = await load_keys()
     if not keys:
         return None, None, "Нет доступных Gemini ключей."
 
-    payload = {
-        "model": model_id,
-        "input": prompt,
-    }
+    # Fallback chain: selected model → other models
+    model_chain = [model_key] + [k for k in MUSIC_MODEL_LIST if k != model_key]
+    errors = []
 
-    # WAV output for Pro model if requested
-    if output_format == "wav" and model_key == "lyria-pro":
-        payload["response_format"] = {"type": "audio"}
+    for mk in model_chain:
+        info = MUSIC_MODELS[mk]
+        model_id = info["id"]
 
-    last_error = None
-    for key in keys[:5]:
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(
-                    "https://generativelanguage.googleapis.com/v1beta/interactions",
-                    json=payload,
-                    headers={
-                        "Content-Type": "application/json",
-                        "x-goog-api-key": key,
-                    },
-                    timeout=aiohttp.ClientTimeout(total=120),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
+        payload = {
+            "model": model_id,
+            "input": prompt,
+        }
+        if output_format == "wav" and mk == "lyria-pro":
+            payload["response_format"] = {"type": "audio"}
 
-                        # Extract audio
-                        audio_b64 = None
-                        lyrics_parts = []
+        for key in keys[:5]:
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.post(
+                        "https://generativelanguage.googleapis.com/v1beta/interactions",
+                        json=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            "x-goog-api-key": key,
+                        },
+                        timeout=aiohttp.ClientTimeout(total=120),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            audio_b64 = None
+                            lyrics_parts = []
 
-                        steps = data.get("steps", [])
-                        for step in steps:
-                            if step.get("type") == "model_output":
-                                for block in step.get("content", []):
-                                    if block.get("type") == "audio":
-                                        audio_b64 = block.get("data", "")
-                                    elif block.get("type") == "text":
-                                        lyrics_parts.append(block.get("text", ""))
+                            steps = data.get("steps", [])
+                            for step in steps:
+                                if step.get("type") == "model_output":
+                                    for block in step.get("content", []):
+                                        if block.get("type") == "audio":
+                                            audio_b64 = block.get("data", "")
+                                        elif block.get("type") == "text":
+                                            lyrics_parts.append(block.get("text", ""))
 
-                        # Also try convenience properties
-                        if not audio_b64:
-                            out_audio = data.get("output_audio")
-                            if out_audio and isinstance(out_audio, dict):
-                                audio_b64 = out_audio.get("data", "")
+                            if not audio_b64:
+                                out_audio = data.get("output_audio")
+                                if out_audio and isinstance(out_audio, dict):
+                                    audio_b64 = out_audio.get("data", "")
 
-                        audio_bytes = base64.b64decode(audio_b64) if audio_b64 else None
-                        lyrics = "\n".join(lyrics_parts) or data.get("output_text") or None
+                            audio_bytes = base64.b64decode(audio_b64) if audio_b64 else None
+                            lyrics = "\n".join(lyrics_parts) or data.get("output_text") or None
 
-                        if audio_bytes:
-                            logger.info(
-                                f"music: generated {len(audio_bytes)//1024}KB"
-                                f"{' + lyrics' if lyrics else ''}"
-                            )
-                            return audio_bytes, lyrics, None
+                            if audio_bytes:
+                                logger.info(f"music: generated {len(audio_bytes)//1024}KB via {mk}")
+                                return audio_bytes, lyrics, None
 
-                        last_error = f"{model_id}: empty audio in response"
-                        logger.warning(f"music: {last_error}")
+                            errors.append(f"{mk}: empty audio")
+                            logger.warning(f"music: {mk}: empty audio in response")
 
-                    elif resp.status in (429, 403):
-                        last_error = f"{model_id}: HTTP {resp.status} (rate limited)"
-                        remove_key(key, resp.status)
-                        continue
-                    elif resp.status == 400:
-                        body = await resp.text()
-                        last_error = f"{model_id}: HTTP 400 — {body[:200]}"
-                        # Don't retry on 400 (bad request)
-                        break
-                    else:
-                        body = await resp.text()
-                        last_error = f"{model_id}: HTTP {resp.status} — {body[:150]}"
-                        logger.warning(f"music: {last_error}")
-        except asyncio.TimeoutError:
-            last_error = f"{model_id}: timeout (120s)"
-        except Exception as e:
-            last_error = f"{model_id}: {type(e).__name__}: {e}"
-            logger.warning(f"music: {last_error}")
+                        elif resp.status in (429, 403):
+                            errors.append(f"{mk}: HTTP {resp.status}")
+                            continue
+                        elif resp.status == 400:
+                            body = await resp.text()
+                            errors.append(f"{mk}: HTTP 400")
+                            break
+                        else:
+                            body = await resp.text()
+                            errors.append(f"{mk}: HTTP {resp.status}")
+                            logger.warning(f"music: {mk}: HTTP {resp.status}: {body[:100]}")
+            except asyncio.TimeoutError:
+                errors.append(f"{mk}: timeout")
+            except Exception as e:
+                errors.append(f"{mk}: {type(e).__name__}")
+                logger.warning(f"music: {mk}: {e}")
 
-    return None, None, last_error or f"{model_id}: все ключи исчерпаны"
+    first = errors[0] if errors else "все ключи исчерпаны"
+    rest = f" + ещё {len(errors)-1}" if len(errors) > 1 else ""
+    return None, None, f"{first}{rest}"
