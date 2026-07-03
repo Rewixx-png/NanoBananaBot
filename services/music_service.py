@@ -89,8 +89,9 @@ async def generate_music(
                                 else:
                                     errors.append(f"{mk}: empty candidates")
                                 continue
+                            c = candidates[0]
+                            parts = c.get("content", {}).get("parts", [])
                             audio_b64 = None
-                            lyrics_parts = []
                             for p in parts:
                                 if "inlineData" in p:
                                     audio_b64 = p["inlineData"].get("data", "")
