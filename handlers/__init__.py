@@ -7,6 +7,7 @@ from .chat import chat_router
 import handlers.media_video  # registers /video handler on media_router
 import handlers.media_tts    # registers /tts handler on media_router
 import handlers.r34          # registers /r34 handler on media_router
+from .music import music_router
 
 router = Router()
 
@@ -14,6 +15,7 @@ router.include_router(admin_router)
 router.include_router(media_router)
 router.include_router(core_router)
 router.include_router(commands_misc_router)
+router.include_router(music_router)
 router.include_router(chat_router)
 
 __all__ = ['router', 'refresh_models']
