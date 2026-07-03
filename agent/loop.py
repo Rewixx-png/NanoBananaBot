@@ -117,9 +117,19 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
             except Exception as e:
                 errors.append(f"{model_name}: {type(e).__name__}: {e}")
                 logger.warning(f"agent: {model_name}: {type(e).__name__}: {e}")
-    return {"_error": "; ".join(errors) if errors else "Gemini: no keys available"}
-
-
+        # If ALL errors are 429, wait 15s and retry once (keys recover from cooldown)
+        if errors and all("HTTP 429" in e for e in errors):
+            if not getattr(_gemini_call, '_retried', False):
+                _gemini_call._retried = True
+                await asyncio.sleep(15)
+                continue
+    _gemini_call._retried = False
+    # Concise error: first error only + count
+    if errors:
+        first = errors[0][:150]
+        rest = f" + ещё {len(errors)-1}" if len(errors) > 1 else ""
+        return {"_error": f"{first}{rest}"}
+    return {"_error": "Gemini: no keys available"}
 # ── Execute one tool ─────────────────────────────────────────────
 
 
