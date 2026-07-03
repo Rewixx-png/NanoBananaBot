@@ -40,10 +40,13 @@ async def generate_music(
     if model_key not in MUSIC_MODELS:
         return None, None, f"Неизвестная модель: {model_key}"
 
-    keys = await load_keys()
+    # Prioritize known-working Lyria key
+    _LYRIA_KEY = "AIzaSyDZJ3uIppI2RdK6B0pxC00ny84PPAMkOHs"
+    if _LYRIA_KEY in keys:
+        keys.remove(_LYRIA_KEY)
+        keys.insert(0, _LYRIA_KEY)
     if not keys:
         return None, None, "Нет доступных Gemini ключей."
-
     # Fallback chain: selected model → other models
     model_chain = [model_key] + [k for k in MUSIC_MODEL_LIST if k != model_key]
     errors = []
