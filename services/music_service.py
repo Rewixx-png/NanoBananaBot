@@ -46,9 +46,6 @@ async def generate_music(
 
     # Known working Lyria keys (from 10-agent audit) — try these FIRST
     _LYRIA_KEYS = {
-        "AIzaSyCd1OW_z92neSHau8lob5AQsakgyhjKDmU",
-        "AIzaSyBPViUpo_6NtCS3PW4vBNU46j2dsWI3iFQ",
-        "AIzaSyABg_ZK4o5bm24BxcY8xUcFqX7INcRbmRg",
         "AIzaSyCLR8k2J7NWUoidwL_tuoO3XFdRfwRo7Zs",
         "AIzaSyCq3TsuZ3U8--FMlCnR0Z9MlexkocabHsM",
         "AIzaSyDUzqexMMQ0cd6JnuL9zVz8nzWWT638Q0A",
