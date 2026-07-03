@@ -122,7 +122,8 @@ async def generate_music(
             except asyncio.TimeoutError:
                 errors.append(f"{mk}: timeout")
             except Exception as e:
-                errors.append(f"{mk}: {type(e).__name__}")
+                logger.exception(f"music: {mk} crash")
+                errors.append(f"{mk}: {type(e).__name__}: {e}")
     # Deduplicate and count errors
     unique = list(dict.fromkeys(errors))  # preserve order, remove dupes
     summary = unique[0] if unique else "неизвестная ошибка"
