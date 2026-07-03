@@ -130,7 +130,8 @@ async def cmd_all(message: types.Message):
     if message.chat.type == 'private':
         await message.reply('В личке некого созывать, дурик.')
         return
-    uid = message.from_user.id
+    if message.from_user.id != OWNER_USER_ID:
+        return
     try:
         admins = await message.bot.get_chat_administrators(message.chat.id)
         if message.chat.id not in chat_members_cache:
