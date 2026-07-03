@@ -13,7 +13,7 @@ from config import SYSTEM_PROMPT
 # ── Text-generation directives (embedded in system prompts) ───────────────
 _WEB_SEARCH_DIRECTIVE = 'WEB_SEARCH:'
 _KICK_DIRECTIVE = 'KICK_USER:'
-_TEXT_MODEL_FALLBACKS = ('gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-preview')
+_TEXT_MODEL_FALLBACKS = ('gemini-3.5-flash', 'gemini-3.1-flash-preview')
 
 # ── Model cache ───────────────────────────────────────────────────────────
 _models_cache: dict = {}
