@@ -73,7 +73,15 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ],
         }
-        for key in (keys or [])[:8]:
+        # Merge main keys with Nano pool for maximum coverage
+        all_keys = list(keys or [])
+        try:
+            nano_keys = await _nk_get_live()
+            if nano_keys:
+                all_keys.extend(nano_keys)
+        except Exception:
+            pass
+        for key in all_keys[:16]:
             t0 = _t.monotonic()
             try:
                 async with aiohttp.ClientSession() as s:
