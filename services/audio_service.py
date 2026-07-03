@@ -9,23 +9,12 @@ import aiohttp
 from typing import Tuple, Optional
 
 from keys import load_keys, remove_key
+from shared_types import _models_cache, _MODELS_CACHE_TTL, _pretty_model_name, _build_text_system_prompt
 
 logger = logging.getLogger(__name__)
 
-
-def _ensure_ai_imports():
-    """Late-import shared cache and helpers from ai_services (avoids circular imports)."""
-    g = globals()
-    if '_models_cache' not in g or g['_models_cache'] is None:
-        from ai_services import _models_cache as _mc, _MODELS_CACHE_TTL as _mttl, _pretty_model_name as _pmn
-        g['_models_cache'] = _mc
-        g['_MODELS_CACHE_TTL'] = _mttl
-        g['_pretty_model_name'] = _pmn
-
-
 # ── Audio service implementation ──────────────────────────────────────────
 async def analyze_voice_with_gemini(audio_bytes: bytes, mime_type: str, prompt: str) -> str:
-    from ai_services import _build_text_system_prompt
     keys = await load_keys()
     if not keys:
         return 'Блять, ключи закончились, иди нахуй.'

@@ -47,8 +47,8 @@ async def cmd_up(message: types.Message):
     async def _update_progress(text: str):
         try:
             await wait_msg.edit_text(text)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f'Ошибка обновления прогресса /up: {e}')
 
     def _progress(current: int, total: int):
         now = time.time()
@@ -79,8 +79,8 @@ async def cmd_up(message: types.Message):
 
     try:
         await wait_msg.delete()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f'Ошибка удаления wait_msg в /up: {e}')
     await message.reply_document(
         document=BufferedInputFile(upscaled, filename="upscaled.png"),
         caption="✨ Улучшенная версия 2x — без сжатия"
@@ -151,8 +151,8 @@ async def cmd_figma(message: types.Message):
                     '⏰ Плагин не ответил за 2 минуты.\n'
                     'Убедись что плагин NanoHatani Bridge запущен в Figma и файл открыт.'
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f'Ошибка отображения тайм-аута Figma: {e}')
             return
 
         from config import FIGMA_TOKEN
@@ -175,8 +175,8 @@ async def cmd_figma(message: types.Message):
 
         try:
             await thinking_msg.delete()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f'Ошибка удаления thinking_msg в figma: {e}')
 
         if png_bytes:
             doc = BufferedInputFile(png_bytes, filename=f'figma_{uuid.uuid4().hex[:6]}.png')
@@ -200,14 +200,14 @@ async def cmd_figma(message: types.Message):
     except asyncio.TimeoutError:
         try:
             await thinking_msg.edit_text('Тайм-аут, Gemini тупит. Попробуй ещё раз.')
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f'Ошибка отображения тайм-аута Figma (TimeoutError): {e}')
     except Exception as _figma_err:
         logger.exception(f'cmd_figma error: {_figma_err}')
         try:
             await thinking_msg.edit_text(f'Упало: {type(_figma_err).__name__}. Попробуй ещё раз.')
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f'Ошибка отображения ошибки Figma: {e}')
 
 
 @commands_misc_router.message(Command("dual"))

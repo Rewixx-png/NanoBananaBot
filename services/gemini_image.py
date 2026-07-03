@@ -7,6 +7,11 @@ from typing import Tuple, Optional, Dict, Any
 
 from config import SYSTEM_PROMPT, GEMINI_IMAGE_TIMEOUT
 from keys import load_keys, remove_key, strip_code_fences
+from shared_types import (
+    _WEB_SEARCH_DIRECTIVE, _KICK_DIRECTIVE, _TEXT_MODEL_FALLBACKS,
+    _models_cache, _MODELS_CACHE_TTL, _pretty_model_name,
+    _thinking_config, _guess_image_mime, _build_text_system_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,22 +25,6 @@ def _http_explain(code: int) -> str:
         503: '(сервер перегружен)',
         504: '(таймаут шлюза)',
     }.get(code, '')
-
-
-def _ensure_ai_imports():
-    """Late-import shared cache and helpers from ai_services."""
-    g = globals()
-    if '_models_cache' not in g or g['_models_cache'] is None:
-        from ai_services import (_models_cache as _mc, _MODELS_CACHE_TTL as _mttl,
-                                 _pretty_model_name as _pmn, _guess_image_mime as _gim,
-                                 _TEXT_MODEL_FALLBACKS as _tfm, _thinking_config as _tc)
-        g['_models_cache'] = _mc
-        g['_MODELS_CACHE_TTL'] = _mttl
-        g['_pretty_model_name'] = _pmn
-        g['_guess_image_mime'] = _gim
-        g['_TEXT_MODEL_FALLBACKS'] = _tfm
-        g['_thinking_config'] = _tc
-
 
 # ── Gemini image service ──────────────────────────────────────────────────
 

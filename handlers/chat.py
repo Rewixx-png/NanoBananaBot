@@ -136,8 +136,8 @@ async def handle_album_photo(message: types.Message):
         group = pending_media_groups[group_id]
         group['images'].append(downloaded.read())
         group.setdefault('file_ids', []).append(photo.file_id)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f'Ошибка группировки фото: {e}')
 @chat_router.message(F.voice | F.audio | F.video_note)
 async def handle_voice_audio(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
@@ -326,8 +326,8 @@ async def handle_text_messages(message: types.Message):
                 try:
                     import re as _re
                     await thinking_msg.edit_text(_re.sub(r'<[^>]+>', '', text))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f'Ошибка обновления статуса (plain): {e}')
 
         replied_draw = None
         if is_reply_to_bot and message.reply_to_message and message.reply_to_message.photo:
@@ -375,8 +375,8 @@ async def handle_text_messages(message: types.Message):
 
         try:
             await thinking_msg.delete()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f'Ошибка удаления thinking-сообщения: {e}')
 
         if agent_project:
             sent_code_doc = await _send_generated_project(message, agent_project, reply_kwargs)

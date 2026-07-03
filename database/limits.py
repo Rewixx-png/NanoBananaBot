@@ -11,7 +11,8 @@ async def get_all_chat_limits() -> dict:
             async with db.execute('SELECT chat_id, req_limit, days FROM chat_limits') as cur:
                 rows = await cur.fetchall()
                 return {r[0]: (r[1], r[2]) for r in rows}
-    except Exception:
+    except Exception as e:
+        logger.warning(f'Ошибка получения лимитов чатов: {e}')
         return {}
 
 
