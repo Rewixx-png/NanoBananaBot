@@ -48,164 +48,61 @@ from .media import (
 
 
 
-from .prompts import _TOOLS, _SYSTEM, _build_system, openai_tools
+from .prompts import _TOOLS, _SYSTEM, _build_system
 
 
 async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> dict:
-    """Call Groq GPT-OSS-120B with tools (no Gemini fallback)."""
+    """Call Gemini 3.5 Flash with tools — Groq removed."""
     import time as _t
-    from services.groq_service import _get_keys as _groq_keys
-
-    # ── Build OpenAI-format messages from Gemini contents ──────────────
-    messages = [{"role": "system", "content": _build_system(is_owner)}]
-    for c in contents:
-        role = c.get("role", "user")
-        if role == "model":
-            role = "assistant"
-        parts = c.get("parts", [])
-        text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
-        fn_calls = [p["functionCall"] for p in parts if "functionCall" in p]
-        fn_resps = [p["functionResponse"] for p in parts if "functionResponse" in p]
-
-        if fn_calls:
-            tc = []
-            for fc in fn_calls:
-                tc.append({
-                    "id": f"call_{fc['name']}",
-                    "type": "function",
-                    "function": {"name": fc["name"], "arguments": json.dumps(fc.get("args", {}))}
-                })
-            messages.append({"role": "assistant", "tool_calls": tc})
-        elif fn_resps:
-            for fr in fn_resps:
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": f"call_{fr['name']}",
-                    "content": str(fr.get("response", {}).get("result", ""))[:4000]
-                })
-        elif text:
-            messages.append({"role": role, "content": text})
-
-    # openai_tools imported from .prompts
-
-    # ── Sanitize for Groq tokenizer ─────────────────────────────────────
-    # Remove control chars and null bytes that cause HarmonyError
-    def _sanitize(s: str) -> str:
-        return "".join(c for c in s[:3000] if c.isprintable() or c in "\n\r\t")
-
-    for m in messages:
-        if m.get("content") and isinstance(m["content"], str):
-            m["content"] = _sanitize(m["content"])
-        if "tool_calls" in m:
-            for tc in m.get("tool_calls", []):
-                if "arguments" in tc.get("function", {}):
-                    tc["function"]["arguments"] = _sanitize(tc["function"]["arguments"])
-        if m.get("role") == "tool":
-            m["content"] = _sanitize(str(m.get("content", "")))
 
     # Keep only last 15 messages
-    if len(messages) > 16:
-        messages = [messages[0]] + messages[-15:]
+    if len(contents) > 16:
+        contents = [contents[0]] + contents[-15:]
 
-    groq_keys = await _groq_keys()
-    if groq_keys:
-        for idx, key in enumerate(groq_keys[:15]):
+    for model_name in ("gemini-3.5-flash", "gemini-3.1-pro-preview"):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+        payload = {
+            "systemInstruction": {"parts": [{"text": _build_system(is_owner)}]},
+            "contents": contents,
+            "tools": [{"functionDeclarations": _TOOLS}],
+            "generationConfig": {"temperature": 1.0, "thinkingConfig": {"thinkingLevel": "minimal"}},
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ],
+        }
+        for key in (keys or [])[:8]:
             t0 = _t.monotonic()
             try:
                 async with aiohttp.ClientSession() as s:
-                    async with s.post(
-                        "https://api.groq.com/openai/v1/chat/completions",
-                        json={
-                            "model": "openai/gpt-oss-120b",
-                            "messages": messages,
-                            "tools": openai_tools,
-                            "tool_choice": "auto",
-                            "temperature": 1.0,
-                            "max_tokens": 8192,
-                        },
-                        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                        timeout=aiohttp.ClientTimeout(total=60),
-                    ) as resp:
+                    async with s.post(url, json=payload,
+                            headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                            timeout=aiohttp.ClientTimeout(total=30)) as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            choice = data["choices"][0]
-                            msg = choice.get("message", {})
-                            dt = _t.monotonic() - t0
-                            # Has tool calls → convert to Gemini format
-                            if msg.get("tool_calls"):
-                                parts = []
-                                for tc in msg["tool_calls"]:
-                                    try:
-                                        args = json.loads(tc["function"]["arguments"])
-                                    except Exception:
-                                        args = {}
-                                    # Unwrap Groq's extra "args" wrapper if present
-                                    if isinstance(args, dict) and "args" in args and len(args) == 1:
-                                        args = args["args"]
-                                    parts.append({
-                                        "functionCall": {"name": tc["function"]["name"], "args": args}
-                                    })
-                                logger.info(f"agent: Groq tool calls [{dt:.1f}s]: {[tc['function']['name'] for tc in msg['tool_calls']]}")
-                                return {"content": {"parts": parts, "role": "model"}}
-                            # Text response
-                            text = msg.get("content", "").strip()
-                            if text:
-                                refusal = ("sorry", "cannot", "can't", "i'm unable", "i am unable",
-                                           "не могу", "извини", "не буду", "нельзя", "запрещено")
-                                if any(kw in text.lower() for kw in refusal):
-                                    logger.info(f"agent: Groq refused, trying Gemini fallback")
-                                    break  # break out of key loop → fall through to Gemini
-                                logger.info(f"agent: Groq text [{dt:.1f}s]")
-                                return {"content": {"parts": [{"text": text}], "role": "model"}}
+                            candidates = data.get("candidates", [])
+                            if candidates:
+                                c = candidates[0]
+                                parts = c.get("content", {}).get("parts", [])
+                                fc = [p.get("functionCall") for p in parts if "functionCall" in p]
+                                text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
+                                dt = _t.monotonic() - t0
+                                if fc:
+                                    logger.info(f"agent: Gemini tool calls [{dt:.1f}s]: {[f['name'] for f in fc]}")
+                                    return {"content": {"parts": parts, "role": "model"}}
+                                if text:
+                                    logger.info(f"agent: Gemini text [{dt:.1f}s] ({len(text)} chars)")
+                                    return {"content": {"parts": [{"text": text}], "role": "model"}}
+                                logger.warning(f"agent: Gemini empty response, finishReason={c.get('finishReason')}")
+                        elif resp.status in (429, 403):
+                            continue
                         else:
                             body = await resp.text()
-                            logger.warning(f"agent: Groq key {idx} HTTP {resp.status}: {body[:150]}")
-                            continue
+                            logger.warning(f"agent: Gemini key HTTP {resp.status}: {body[:120]}")
             except Exception as e:
-                logger.warning(f"agent: Groq key {idx} failed: {type(e).__name__}: {e}")
-
-    # ── Quick Gemini BLOCK_NONE fallback ──────────────────────────────────
-    try:
-        from keys import load_keys as _load_gemini_keys
-        live_keys = await _load_gemini_keys(model_filter='pro-preview') or await _nk_get_live()
-        if live_keys:
-            for model_name in ("gemini-3.1-pro-preview", "gemini-3.5-flash"):
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-                # Only send the last user message (not Groq tool-call history)
-                last_user = [c for c in contents if c.get("role") == "user"]
-                clean_contents = last_user[-1:] if last_user else contents[-1:]
-                payload = {
-                    "systemInstruction": {"parts": [{"text": _build_system(is_owner)}]},
-                    "contents": clean_contents,
-                    "generationConfig": {"temperature": 1.0, "thinkingConfig": {"thinkingLevel": "minimal"}},
-                    "safetySettings": [
-                        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-                    ],
-                }
-                for key in live_keys[:3]:
-                    try:
-                        async with aiohttp.ClientSession() as s:
-                            async with s.post(url, json=payload,
-                                    headers={"Content-Type": "application/json", "x-goog-api-key": key},
-                                    timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                                if resp.status == 200:
-                                    data = await resp.json()
-                                    candidates = data.get("candidates", [])
-                                    if candidates:
-                                        c = candidates[0]
-                                        parts = c.get("content", {}).get("parts", [])
-                                        text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
-                                        if text:
-                                            logger.info(f"agent: Gemini fallback answered ({len(text)} chars)")
-                                            return {"content": {"parts": [{"text": text}], "role": "model"}}
-                                        logger.warning(f"agent: Gemini fallback empty text, finishReason={c.get('finishReason')}")
-                    except Exception:
-                        continue
-    except Exception:
-        pass
+                logger.warning(f"agent: Gemini key failed: {type(e).__name__}: {e}")
     return {}
 
 
