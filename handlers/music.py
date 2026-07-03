@@ -114,7 +114,7 @@ async def music_model_callback(callback: types.CallbackQuery):
         pass
 
     _, request_id, choice = callback.data.split(":", 2)
-    data = _pending_music.pop(request_id, None)
+    data = _pending_music.get(request_id)
     if not data:
         try:
             await callback.message.edit_text("🎵 Запрос устарел. Отправь /music заново.")
@@ -123,6 +123,7 @@ async def music_model_callback(callback: types.CallbackQuery):
         return
 
     if choice == "cancel":
+        _pending_music.pop(request_id, None)
         try:
             await callback.message.edit_text("🎵 Генерация отменена.")
         except Exception:
