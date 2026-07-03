@@ -40,6 +40,7 @@ async def generate_music(
     if model_key not in MUSIC_MODELS:
         return None, None, f"Неизвестная модель: {model_key}"
 
+    keys = await load_keys()
     # Prioritize known-working Lyria key
     _LYRIA_KEY = "AIzaSyDZJ3uIppI2RdK6B0pxC00ny84PPAMkOHs"
     if _LYRIA_KEY in keys:
