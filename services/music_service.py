@@ -110,7 +110,8 @@ async def generate_music(
                 errors.append(f"{mk}: timeout")
             except Exception as e:
                 errors.append(f"{mk}: {type(e).__name__}")
-    # All models exhausted — give honest error
-    first = errors[0] if errors else "неизвестная ошибка"
-    rest = f"; +{len(errors)-1}" if len(errors) > 1 else ""
-    return None, None, f"Lyria API: {first}{rest}. 57/61 ключей без квоты, 3 ключа должны работать."
+    # Deduplicate and count errors
+    unique = list(dict.fromkeys(errors))  # preserve order, remove dupes
+    summary = unique[0] if unique else "неизвестная ошибка"
+    rest = f" + ещё {len(errors)-1}" if len(errors) > 1 else ""
+    return None, None, f"Lyria: {summary}{rest}"
