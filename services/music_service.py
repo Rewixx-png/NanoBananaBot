@@ -44,16 +44,6 @@ async def generate_music(
     if not keys:
         return None, None, "Нет доступных Gemini ключей."
 
-    # Known working Lyria keys (from 10-agent audit) — try these FIRST
-    _LYRIA_KEYS = {
-        "AIzaSyCLR8k2J7NWUoidwL_tuoO3XFdRfwRo7Zs",
-        "AIzaSyCq3TsuZ3U8--FMlCnR0Z9MlexkocabHsM",
-        "AIzaSyDUzqexMMQ0cd6JnuL9zVz8nzWWT638Q0A",
-    }
-    priority = [k for k in keys if k in _LYRIA_KEYS]
-    rest = [k for k in keys if k not in _LYRIA_KEYS]
-    keys = priority + rest
-
     # Fallback chain: selected model → other models
     model_chain = [model_key] + [k for k in MUSIC_MODEL_LIST if k != model_key]
     errors = []
