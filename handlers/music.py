@@ -53,14 +53,11 @@ async def cmd_music(message: types.Message):
     """Handle /music command — prompt user for lyrics/prompt, then select model."""
     _track_user(message)
 
-    # Cooldown
+    # Anti-doubletap: 3s between /music commands
     now = asyncio.get_event_loop().time()
     uid = message.from_user.id
-    if uid in _cooldowns and now - _cooldowns[uid] < _COOLDOWN:
-        remaining = int(_COOLDOWN - (now - _cooldowns[uid]))
-        await message.reply(f"🎵 Кулдаун {remaining}с, не части.")
-        return
-
+    if uid in _cooldowns and now - _cooldowns[uid] < 3:
+        return  # silently ignore double-tap
     _cooldowns[uid] = now
 
     # Parse prompt from command
@@ -138,10 +135,11 @@ async def music_model_callback(callback: types.CallbackQuery):
         except Exception:
             pass
         return
+    # Set full cooldown only when user actually clicks a model
+    _cooldowns[callback.from_user.id] = asyncio.get_event_loop().time()
 
     model_info = MUSIC_MODELS[choice]
     prompt = data["prompt"]
-
     # Update message with progress
     try:
         await callback.message.edit_text(
