@@ -13,12 +13,10 @@ logger = logging.getLogger(__name__)
 # Model IDs (via Interactions API)
 LYRIA_CLIP = "lyria-3-clip-preview"      # 30s clips, MP3
 LYRIA_PRO  = "lyria-3-pro-preview"        # Full songs, MP3/WAV
-LYRIA_RT   = "lyria-realtime-exp"         # Real-time streaming
 
 MUSIC_MODELS = {
     "lyria-clip":  {"id": LYRIA_CLIP, "label": "🎵 Lyria 3 Clip",   "desc": "30-секундные клипы, MP3"},
     "lyria-pro":   {"id": LYRIA_PRO,  "label": "🎼 Lyria 3 Pro",    "desc": "Полноценные песни до 2 мин, MP3/WAV"},
-    "lyria-rt":    {"id": LYRIA_RT,   "label": "🎹 Lyria RealTime", "desc": "Стриминг в реальном времени, hi-fi"},
 }
 
 MUSIC_MODEL_LIST = list(MUSIC_MODELS.keys())
@@ -41,9 +39,7 @@ async def generate_music(
         return None, None, f"Неизвестная модель: {model_key}"
 
     keys = await load_keys()
-    # Prioritize known-working Lyria keys (found by 611-key audit)
     _LYRIA_KEYS = [
-        "AIzaSyDZJ3uIppI2RdK6B0pxC00ny84PPAMkOHs",
         "AIzaSyCMxgpO5lwM5opNp0P0JX-kVujH28AQ7uo",
     ]
     for lk in _LYRIA_KEYS:
