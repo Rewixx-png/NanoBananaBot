@@ -85,7 +85,8 @@ async def _download_message_photo(bot, message: types.Message):
         file_info = await bot.get_file(message.photo[-1].file_id)
         downloaded = await bot.download_file(file_info.file_path)
         return downloaded.read()
-    except Exception:
+    except Exception as e:
+        logger.warning(f'Ошибка скачивания фото сообщения: {e}')
         return None
 MAX_TEXT_DOCUMENT_BYTES = 80_000
 MAX_ZIP_TEXT_BYTES = 200_000
@@ -152,6 +153,62 @@ _NSFW_RESCALE = [0.5, 0.7, 1.0]
 _TTS_LANGS = [('🇷🇺 RU', 'ru-RU'), ('🇬🇧 EN', 'en-US'), ('🇯🇵 JA', 'ja-JP')]
 _TTS_TEMPS = [0.1, 0.5, 1.0, 1.5, 2.0]
 TTS_VOICES = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Leda', 'Orus', 'Aoede', 'Callirrhoe', 'Autonoe', 'Enceladus', 'Iapetus', 'Umbriel', 'Algieba', 'Despina', 'Erinome', 'Algenib', 'Rasalgethi', 'Laomedeia', 'Achernar', 'Alnilam', 'Schedar', 'Gacrux', 'Pulcherrima', 'Achird', 'Zubenelgenubi', 'Vindemiatrix', 'Sadachbia', 'Sadaltager', 'Sulafat']
+
+# ── Keyboard layout definitions ──────────────────────────────────────────
+# Each layout tuple: (kind, wai_only?, payload)
+#   kind='actions':    payload = ((text, input_suffix), …)          → input buttons row
+#   kind='header':     payload = text                               → noop header row
+#   kind='options':    payload = (field, values)                    → option buttons row
+#   kind='chunked':    payload = (field, values, chunk_size)        → chunked option rows
+#   kind='special_wai': payload = None                              → prepend+seed row (WAI only)
+#   kind='preview':    payload = text                               → tts preview button
+#   kind='generate':   payload = text                               → generate button
+
+_NSFW_CFG_DEFAULTS: dict[str, Any] = {
+    'steps': 28, 'cfg': 7.0, 'size': '896x1152',
+    'batch': 1, 'scheduler': 'DPM++ 2M Karras',
+    'clip_skip': 2, 'pag_scale': 0, 'rescale': 1.0,
+    'prepend': True, 'seed': -1,
+}
+
+_NSFW_KEYBOARD_LAYOUT = (
+    ('actions',      False, (('✏️ Промпт', 'prompt'), ('🚫 Негативный', 'neg'))),
+    ('header',       False, '— Шаги —'),
+    ('options',      False, ('steps',     _NSFW_STEPS)),
+    ('header',       False, '— CFG Scale —'),
+    ('options',      False, ('cfg',       _NSFW_CFG)),
+    ('header',       False, '— Размер —'),
+    ('chunked',      False, ('size',      _NSFW_SIZES, 3)),
+    ('header',       True,  '— Количество изображений —'),
+    ('options',      True,  ('batch',     tuple(range(1, 5)))),
+    ('header',       True,  '— Планировщик (Sampler) —'),
+    ('chunked',      True,  ('scheduler', _NSFW_SCHEDULERS, 3)),
+    ('header',       True,  '— CLIP Skip —'),
+    ('options',      True,  ('clip_skip', _NSFW_CLIP_SKIP)),
+    ('header',       True,  '— PAG Scale (улучшение качества) —'),
+    ('options',      True,  ('pag_scale', _NSFW_PAG)),
+    ('header',       True,  '— Guidance Rescale —'),
+    ('options',      True,  ('rescale',   _NSFW_RESCALE)),
+    ('special_wai',  True,  None),
+    ('generate',     False, '🚀 Генерировать'),
+)
+
+_TTS_CFG_DEFAULTS: dict[str, Any] = {
+    'voice': 'Puck', 'temp': 1.0, 'lang': 'ru-RU',
+}
+
+_TTS_KEYBOARD_LAYOUT = (
+    ('actions',  False, (('✏️ Текст', 'prompt'), ('🎭 Сцена', 'scene'))),
+    ('actions',  False, (('🎭 Стиль', 'style'), ('🎭 Темп', 'pace'), ('🎭 Акцент', 'accent'))),
+    ('header',   False, '— Температура —'),
+    ('options',  False, ('temp',  _TTS_TEMPS)),
+    ('header',   False, '— Язык —'),
+    ('options',  False, ('lang',  _TTS_LANGS)),
+    ('header',   False, '— Голос —'),
+    ('chunked',  False, ('voice', TTS_VOICES, 3)),
+    ('preview',  False, '🔊 Прослушать голос'),
+    ('generate', False, '🚀 Генерировать'),
+)
 
 async def safe_send(coro_func, *args, **kwargs):
     for attempt in range(3):
@@ -428,8 +485,8 @@ async def run_progress_bar(bot, chat_id: int, message_id: int, model_label: str,
         text = f'⏳ Генерация...\n[{bar}]\nПрошло: {time_str}\nМодель: {model_label}{status_info}'
         try:
             await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f'Ошибка обновления прогресс-бара: {e}')
         await asyncio.sleep(random.uniform(3.5, 5.5))
         pos += 1
 
@@ -551,26 +608,56 @@ def _nsfw_cfg_text(request_id: str) -> str:
     return f'''⚙️ {label}\n\n📝 Промпт:\n"{prompt}"\n\n🚫 Негативный промпт:\n{neg_display}\n\nШаги: {cfg.get('steps', 28)}  |  CFG: {cfg.get('cfg', 7.0)}  |  Размер: {cfg.get('size', '896x1152')}{extra}'''
 
 def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    """Build NSFW config keyboard from layout data."""
     d = pending_nsfw_configs.get(request_id, {})
     cfg = d.get('cfg', {})
-    cur_steps = cfg.get('steps', 28)
-    cur_cfgv = cfg.get('cfg', 7.0)
-    cur_size = cfg.get('size', '896x1152')
-    cur_sched = cfg.get('scheduler', 'DPM++ 2M Karras')
-    cur_clip = cfg.get('clip_skip', 2)
-    cur_pag = cfg.get('pag_scale', 0)
-    cur_resc = cfg.get('rescale', 1.0)
-    cur_pre = cfg.get('prepend', True)
-    cur_seed = cfg.get('seed', -1)
     is_wai = 'flux' not in d.get('model', '')
 
-    def row(field, options, current):
-        return [InlineKeyboardButton(text=f"{('✅' if str(o) == str(current) else '')}{o}", callback_data=f'nsfwcfg:{request_id}:{field}:{o}') for o in options]
-    rows = [[InlineKeyboardButton(text='✏️ Промпт', callback_data=f'nsfwinput:{request_id}:prompt'), InlineKeyboardButton(text='🚫 Негативный', callback_data=f'nsfwinput:{request_id}:neg')], [InlineKeyboardButton(text='— Шаги —', callback_data='noop')], row('steps', _NSFW_STEPS, cur_steps), [InlineKeyboardButton(text='— CFG Scale —', callback_data='noop')], row('cfg', _NSFW_CFG, cur_cfgv), [InlineKeyboardButton(text='— Размер —', callback_data='noop')], [InlineKeyboardButton(text=f"{('✅' if s == cur_size else '')}{s}", callback_data=f'nsfwcfg:{request_id}:size:{s}') for s in _NSFW_SIZES[:3]], [InlineKeyboardButton(text=f"{('✅' if s == cur_size else '')}{s}", callback_data=f'nsfwcfg:{request_id}:size:{s}') for s in _NSFW_SIZES[3:]]]
-    if is_wai:
-        cur_batch = cfg.get('batch', 1)
-        rows += [[InlineKeyboardButton(text='— Количество изображений —', callback_data='noop')], [InlineKeyboardButton(text=f"{('✅' if i == cur_batch else '')}{i}", callback_data=f'nsfwcfg:{request_id}:batch:{i}') for i in range(1, 5)], [InlineKeyboardButton(text='— Планировщик (Sampler) —', callback_data='noop')], [InlineKeyboardButton(text=f"{('✅' if s == cur_sched else '')}{s}", callback_data=f'nsfwcfg:{request_id}:scheduler:{s}') for s in _NSFW_SCHEDULERS[:3]], [InlineKeyboardButton(text=f"{('✅' if s == cur_sched else '')}{s}", callback_data=f'nsfwcfg:{request_id}:scheduler:{s}') for s in _NSFW_SCHEDULERS[3:6]], [InlineKeyboardButton(text=f"{('✅' if s == cur_sched else '')}{s}", callback_data=f'nsfwcfg:{request_id}:scheduler:{s}') for s in _NSFW_SCHEDULERS[6:9]], [InlineKeyboardButton(text=f"{('✅' if s == cur_sched else '')}{s}", callback_data=f'nsfwcfg:{request_id}:scheduler:{s}') for s in _NSFW_SCHEDULERS[9:12]], [InlineKeyboardButton(text=f"{('✅' if s == cur_sched else '')}{s}", callback_data=f'nsfwcfg:{request_id}:scheduler:{s}') for s in _NSFW_SCHEDULERS[12:15]], [InlineKeyboardButton(text=f"{('✅' if s == cur_sched else '')}{s}", callback_data=f'nsfwcfg:{request_id}:scheduler:{s}') for s in _NSFW_SCHEDULERS[15:18]], [InlineKeyboardButton(text=f"{('✅' if s == cur_sched else '')}{s}", callback_data=f'nsfwcfg:{request_id}:scheduler:{s}') for s in _NSFW_SCHEDULERS[18:]], [InlineKeyboardButton(text='— CLIP Skip —', callback_data='noop')], row('clip_skip', _NSFW_CLIP_SKIP, cur_clip), [InlineKeyboardButton(text='— PAG Scale (улучшение качества) —', callback_data='noop')], row('pag_scale', _NSFW_PAG, cur_pag), [InlineKeyboardButton(text='— Guidance Rescale —', callback_data='noop')], row('rescale', _NSFW_RESCALE, cur_resc), [InlineKeyboardButton(text=f"{('✅' if cur_pre else '❌')} Препромпт качества", callback_data=f"nsfwcfg:{request_id}:prepend:{('0' if cur_pre else '1')}"), InlineKeyboardButton(text=f'🎲 Seed: {cur_seed}', callback_data=f'nsfwinput:{request_id}:seed')]]
-    rows.append([InlineKeyboardButton(text='🚀 Генерировать', callback_data=f'nsfwgen:{request_id}')])
+    def _norm_opt(v):
+        """Normalise an option value to (display, callback_value)."""
+        return v if isinstance(v, tuple) else (str(v), v)
+
+    def _checked(cb_val, current):
+        return '✅' if str(cb_val) == str(current) else ''
+
+    def _option_row(field, values, current):
+        return [InlineKeyboardButton(
+            text=f'{_checked(_norm_opt(v)[1], current)}{_norm_opt(v)[0]}',
+            callback_data=f'nsfwcfg:{request_id}:{field}:{_norm_opt(v)[1]}',
+        ) for v in values]
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for kind, wai_only, payload in _NSFW_KEYBOARD_LAYOUT:
+        if wai_only and not is_wai:
+            continue
+        if kind == 'actions':
+            rows.append([InlineKeyboardButton(text=t, callback_data=f'nsfwinput:{request_id}:{s}')
+                         for t, s in payload])
+        elif kind == 'header':
+            rows.append([InlineKeyboardButton(text=payload, callback_data='noop')])
+        elif kind == 'options':
+            field, values = payload
+            rows.append(_option_row(field, values, cfg.get(field, _NSFW_CFG_DEFAULTS[field])))
+        elif kind == 'chunked':
+            field, values, chunk = payload
+            cur = cfg.get(field, _NSFW_CFG_DEFAULTS[field])
+            for i in range(0, len(values), chunk):
+                rows.append(_option_row(field, values[i:i + chunk], cur))
+        elif kind == 'special_wai':
+            cur_pre = cfg.get('prepend', True)
+            cur_seed = cfg.get('seed', -1)
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"{'✅' if cur_pre else '❌'} Препромпт качества",
+                    callback_data=f"nsfwcfg:{request_id}:prepend:{'0' if cur_pre else '1'}",
+                ),
+                InlineKeyboardButton(
+                    text=f'🎲 Seed: {cur_seed}',
+                    callback_data=f'nsfwinput:{request_id}:seed',
+                ),
+            ])
+        elif kind == 'generate':
+            rows.append([InlineKeyboardButton(text=payload, callback_data=f'nsfwgen:{request_id}')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def _prompt_ai_keyboard(request_id: str) -> InlineKeyboardMarkup:
@@ -597,24 +684,40 @@ def _tts_cfg_text(request_id: str) -> str:
     return f'''🎙️ {label}\n\n📝 Текст:\n"{prompt}"\n\nГолос: {cfg.get('voice', 'Puck')}\nТемпература: {cfg.get('temp', 1.0)}\nЯзык: {cfg.get('lang', 'ru-RU')}{extra}'''
 
 def _tts_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    """Build TTS config keyboard from layout data."""
     d = pending_tts_configs.get(request_id, {})
     cfg = d.get('cfg', {})
-    cur_voice = cfg.get('voice', 'Puck')
-    cur_temp = cfg.get('temp', 1.0)
-    cur_lang = cfg.get('lang', 'ru-RU')
 
-    def make_voice_row(voices):
-        return [InlineKeyboardButton(text=f"{('✅' if v == cur_voice else '')}{v}", callback_data=f'ttscfg:{request_id}:voice:{v}') for v in voices]
-    rows = []
-    rows.append([InlineKeyboardButton(text='✏️ Текст', callback_data=f'ttsinput:{request_id}:prompt'), InlineKeyboardButton(text='🎭 Сцена', callback_data=f'ttsinput:{request_id}:scene')])
-    rows.append([InlineKeyboardButton(text='🎭 Стиль', callback_data=f'ttsinput:{request_id}:style'), InlineKeyboardButton(text='🎭 Темп', callback_data=f'ttsinput:{request_id}:pace'), InlineKeyboardButton(text='🎭 Акцент', callback_data=f'ttsinput:{request_id}:accent')])
-    rows.append([InlineKeyboardButton(text='— Температура —', callback_data='noop')])
-    rows.append([InlineKeyboardButton(text=f"{('✅' if str(t) == str(cur_temp) else '')}{t}", callback_data=f'ttscfg:{request_id}:temp:{t}') for t in _TTS_TEMPS])
-    rows.append([InlineKeyboardButton(text='— Язык —', callback_data='noop')])
-    rows.append([InlineKeyboardButton(text=f"{('✅' if l == cur_lang else '')}{name}", callback_data=f'ttscfg:{request_id}:lang:{l}') for (name, l) in _TTS_LANGS])
-    rows.append([InlineKeyboardButton(text='— Голос —', callback_data='noop')])
-    for i in range(0, len(TTS_VOICES), 3):
-        rows.append(make_voice_row(TTS_VOICES[i:i + 3]))
-    rows.append([InlineKeyboardButton(text='🔊 Прослушать голос', callback_data=f'ttsprev:{request_id}')])
-    rows.append([InlineKeyboardButton(text='🚀 Генерировать', callback_data=f'ttsgen:{request_id}')])
+    def _norm_opt(v):
+        """Normalise an option value to (display, callback_value)."""
+        return v if isinstance(v, tuple) else (str(v), v)
+
+    def _checked(cb_val, current):
+        return '✅' if str(cb_val) == str(current) else ''
+
+    def _option_row(field, values, current):
+        return [InlineKeyboardButton(
+            text=f'{_checked(_norm_opt(v)[1], current)}{_norm_opt(v)[0]}',
+            callback_data=f'ttscfg:{request_id}:{field}:{_norm_opt(v)[1]}',
+        ) for v in values]
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for kind, _wai, payload in _TTS_KEYBOARD_LAYOUT:
+        if kind == 'actions':
+            rows.append([InlineKeyboardButton(text=t, callback_data=f'ttsinput:{request_id}:{s}')
+                         for t, s in payload])
+        elif kind == 'header':
+            rows.append([InlineKeyboardButton(text=payload, callback_data='noop')])
+        elif kind == 'options':
+            field, values = payload
+            rows.append(_option_row(field, values, cfg.get(field, _TTS_CFG_DEFAULTS[field])))
+        elif kind == 'chunked':
+            field, values, chunk = payload
+            cur = cfg.get(field, _TTS_CFG_DEFAULTS[field])
+            for i in range(0, len(values), chunk):
+                rows.append(_option_row(field, values[i:i + chunk], cur))
+        elif kind == 'preview':
+            rows.append([InlineKeyboardButton(text=payload, callback_data=f'ttsprev:{request_id}')])
+        elif kind == 'generate':
+            rows.append([InlineKeyboardButton(text=payload, callback_data=f'ttsgen:{request_id}')])
     return InlineKeyboardMarkup(inline_keyboard=rows)

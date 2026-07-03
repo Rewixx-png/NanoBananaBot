@@ -1,4 +1,5 @@
 import time
+import logging
 import asyncio
 from datetime import date
 from aiogram import Router, F, types
@@ -157,8 +158,8 @@ async def handle_stats(callback: types.CallbackQuery):
     text = '\n\n'.join(lines)[:4000]
     try:
         await callback.message.edit_text(text, parse_mode='HTML', reply_markup=_stats_keyboard())
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning(f'Ошибка отображения статистики: {e}')
     await callback.answer()
 
 @admin_router.message(Command('prompts'))

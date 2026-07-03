@@ -6,22 +6,9 @@ import aiohttp
 from typing import Tuple, List
 
 from keys import load_keys, load_firecrawl_keys, remove_key
+from shared_types import _TEXT_MODEL_FALLBACKS, _thinking_config
 
 logger = logging.getLogger(__name__)
-
-# ── Late-import helpers for ai_services dependencies ──────────────────────
-
-_TEXT_MODEL_FALLBACKS = None
-_thinking_config = None
-
-
-def _ensure_llm_config():
-    """Late-import _TEXT_MODEL_FALLBACKS and _thinking_config from ai_services to avoid circular imports."""
-    global _TEXT_MODEL_FALLBACKS, _thinking_config
-    if _TEXT_MODEL_FALLBACKS is None:
-        from ai_services import _TEXT_MODEL_FALLBACKS as _tfm, _thinking_config as _tc
-        _TEXT_MODEL_FALLBACKS = _tfm
-        _thinking_config = _tc
 
 
 # ── Web search implementation ─────────────────────────────────────────────
@@ -179,7 +166,6 @@ def _protect_search_targets(query: str, source: str) -> str:
 
 
 async def _extract_search_query(user_message: str) -> str:
-    _ensure_llm_config()
     keys = await load_keys()
     if not keys:
         return _clean_web_query(user_message)
@@ -240,7 +226,6 @@ def _parse_query_plan(raw: str) -> list[str]:
 
 
 async def _plan_firecrawl_queries(user_request: str, seed_query: str) -> list[str]:
-    _ensure_llm_config()
     source = user_request.strip() or seed_query.strip()
     fallback = _dedupe_texts(_web_query_variants(source) + _web_query_variants(seed_query))[:18]
     keys = await load_keys()
@@ -353,7 +338,6 @@ def _extract_links_from_markdown(md: str) -> list[str]:
 
 
 async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str='') -> Tuple[str, bool]:
-    _ensure_llm_config()
     keys = await load_firecrawl_keys()
     if not keys:
         return ('', False)
@@ -626,7 +610,6 @@ def _fallback_web_answer(query: str, web_context: str) -> str:
 
 
 async def synthesize_web_answer(prompt: str, web_context: str) -> str:
-    _ensure_llm_config()
     keys = await load_keys()
     if not keys:
         return _fallback_web_answer(prompt, web_context)

@@ -13,25 +13,24 @@ from typing import Tuple, Optional
 from config import SYSTEM_PROMPT, GEMINI_VIDEO_TIMEOUT, MAX_VIDEO_FRAMES, VIDEO_FPS, VIDEO_FRAME_SIZE
 from keys import load_keys, remove_key
 from services.security_utils import is_safe_url
+from shared_types import _models_cache, _MODELS_CACHE_TTL, _pretty_model_name
 
 logger = logging.getLogger(__name__)
-
-
-def _ensure_ai_imports():
-    """Late-import shared cache and helpers from ai_services (avoids circular imports)."""
-    global _models_cache, _MODELS_CACHE_TTL, _pretty_model_name
-    if '_models_cache' not in globals() or globals()['_models_cache'] is None:
-        from ai_services import _models_cache as _mc, _MODELS_CACHE_TTL as _mttl, _pretty_model_name as _pmn
-        globals()['_models_cache'] = _mc
-        globals()['_MODELS_CACHE_TTL'] = _mttl
-        globals()['_pretty_model_name'] = _pmn
 async def generate_video_with_gemini(prompt: str, video_path: str) -> str:
     keys = await load_keys()
     if not keys:
         return 'Блять, ключи закончились, иди нахуй.'
     temp_dir = tempfile.mkdtemp()
     cmd = ['ffmpeg', '-i', video_path, '-vf', f'fps={VIDEO_FPS},scale={VIDEO_FRAME_SIZE}:-1', '-q:v', '10', os.path.join(temp_dir, 'frame_%04d.jpg')]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return 'ffmpeg не установлен, блять. Установи ffmpeg и попробуй снова.'
+    except Exception as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        logging.error(f'Ошибка ffmpeg при извлечении кадров: {e}')
+        return 'Не смог обработать видео, что-то пошло не так с ffmpeg.'
     parts = []
     frames = sorted(os.listdir(temp_dir))
     if not frames:
@@ -44,7 +43,12 @@ async def generate_video_with_gemini(prompt: str, video_path: str) -> str:
     for frame in frames:
         os.remove(os.path.join(temp_dir, frame))
     audio_path = os.path.join(temp_dir, 'audio.wav')
-    subprocess.run(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', '-y', audio_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.run(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', '-y', audio_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        logging.warning('ffmpeg не найден, пропускаем извлечение аудио.')
+    except Exception as e:
+        logging.warning(f'Ошибка ffmpeg при извлечении аудио: {e}')
     if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
         with open(audio_path, 'rb') as f:
             audio_b64 = base64.b64encode(f.read()).decode('utf-8')

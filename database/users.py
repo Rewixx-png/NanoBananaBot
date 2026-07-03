@@ -53,7 +53,8 @@ async def get_banned_users_db() -> set:
             async with db.execute('SELECT user_id FROM banned_users') as cur:
                 rows = await cur.fetchall()
                 return {r[0] for r in rows}
-    except Exception:
+    except Exception as e:
+        logger.warning(f'Ошибка получения забаненных пользователей: {e}')
         return set()
 
 
@@ -62,8 +63,8 @@ async def add_banned_user_db(user_id: int):
         async with get_db() as db:
             await db.execute('INSERT OR IGNORE INTO banned_users (user_id) VALUES (?)', (user_id,))
             await db.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f'Ошибка добавления в бан {user_id}: {e}')
 
 
 async def remove_banned_user_db(user_id: int):
@@ -71,8 +72,8 @@ async def remove_banned_user_db(user_id: int):
         async with get_db() as db:
             await db.execute('DELETE FROM banned_users WHERE user_id = ?', (user_id,))
             await db.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f'Ошибка удаления из бана {user_id}: {e}')
 
 
 async def get_all_vip_users() -> dict:
