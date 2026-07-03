@@ -53,8 +53,8 @@ async def generate_music(
         model_id = info["id"]
 
         payload = {
-            "model": model_id,
-            "input": prompt,
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 1.0},
         }
         if output_format == "wav" and mk == "lyria-pro":
             payload["response_format"] = {"type": "audio"}
@@ -62,7 +62,7 @@ async def generate_music(
         for key in keys[:5]:
             try:
                 async with aiohttp.ClientSession() as s:
-                    url = f"https://generativelanguage.googleapis.com/v1beta/interactions?key={key}"
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={key}"
                     async with s.post(
                         url,
                         json=payload,
@@ -71,25 +71,22 @@ async def generate_music(
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
+                            candidates = data.get("candidates", [])
+                            if not candidates:
+                                errors.append(f"{mk}: empty candidates")
+                                continue
+                            c = candidates[0]
+                            parts = c.get("content", {}).get("parts", [])
                             audio_b64 = None
                             lyrics_parts = []
-
-                            steps = data.get("steps", [])
-                            for step in steps:
-                                if step.get("type") == "model_output":
-                                    for block in step.get("content", []):
-                                        if block.get("type") == "audio":
-                                            audio_b64 = block.get("data", "")
-                                        elif block.get("type") == "text":
-                                            lyrics_parts.append(block.get("text", ""))
-
-                            if not audio_b64:
-                                out_audio = data.get("output_audio")
-                                if out_audio and isinstance(out_audio, dict):
-                                    audio_b64 = out_audio.get("data", "")
+                            for p in parts:
+                                if "inlineData" in p:
+                                    audio_b64 = p["inlineData"].get("data", "")
+                                elif "text" in p:
+                                    lyrics_parts.append(p["text"])
 
                             audio_bytes = base64.b64decode(audio_b64) if audio_b64 else None
-                            lyrics = "\n".join(lyrics_parts) or data.get("output_text") or None
+                            lyrics = "\n".join(lyrics_parts) or None
 
                             if audio_bytes:
                                 logger.info(f"music: generated {len(audio_bytes)//1024}KB via {mk}")
