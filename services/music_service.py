@@ -59,7 +59,7 @@ async def generate_music(
         if output_format == "wav" and mk == "lyria-pro":
             payload["response_format"] = {"type": "audio"}
 
-        for key in keys[:20]:  # try up to 20 keys (working ones at indices 26-37)
+        for key in keys:
             try:
                 async with aiohttp.ClientSession() as s:
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={key}"
