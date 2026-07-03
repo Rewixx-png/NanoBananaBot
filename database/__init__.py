@@ -1,4 +1,4 @@
-from database.connection import init_db, DB_PATH
+from database.connection import init_db, DB_PATH, get_db
 from database.history import get_history, save_history
 from database.generations import save_pending_gen, delete_pending_gen, get_all_pending_gens
 from database.users import (
