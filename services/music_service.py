@@ -1,7 +1,6 @@
 """Lyria music generation — text-to-music via Gemini Interactions API."""
 
-import asyncio
-import base64
+import json
 import logging
 import aiohttp
 from typing import Tuple, Optional
@@ -84,6 +83,8 @@ async def generate_music(
                             data = await resp.json()
                             candidates = data.get("candidates", [])
                             if not candidates:
+                                # Log raw response structure to debug Lyria format
+                                logger.warning(f"music: {mk}: no candidates. Keys: {list(data.keys())[:10]}. Raw preview: {json.dumps(data, ensure_ascii=False)[:300]}")
                                 errors.append(f"{mk}: empty candidates")
                                 continue
                             c = candidates[0]
