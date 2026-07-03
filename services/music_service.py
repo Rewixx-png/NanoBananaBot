@@ -84,6 +84,8 @@ async def generate_music(
                         timeout=aiohttp.ClientTimeout(total=120),
                     ) as resp:
                         if resp.status == 200:
+                            data = await resp.json()
+                            candidates = data.get("candidates", [])
                             if not candidates:
                                 fb = data.get("promptFeedback", {})
                                 reason = fb.get("blockReason", "")
