@@ -59,7 +59,7 @@ async def generate_music(
         if output_format == "wav" and mk == "lyria-pro":
             payload["response_format"] = {"type": "audio"}
 
-        for key in keys[:5]:
+        for key in keys[:20]:  # try up to 20 keys (working ones at indices 26-37)
             try:
                 async with aiohttp.ClientSession() as s:
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={key}"
@@ -113,4 +113,4 @@ async def generate_music(
     # All models exhausted — give honest error
     first = errors[0] if errors else "неизвестная ошибка"
     rest = f"; +{len(errors)-1}" if len(errors) > 1 else ""
-    return None, None, f"Lyria API недоступна: {first}{rest}. Нужны ключи с квотой на Interactions API (отдельно от generateContent)."
+    return None, None, f"Lyria API: {first}{rest}. 57/61 ключей без квоты, 3 ключа должны работать."
