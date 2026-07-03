@@ -52,10 +52,10 @@ from .prompts import _TOOLS, _SYSTEM, _build_system
 
 
 async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> dict:
-    """Call Gemini 3.5 Flash with tools — Groq removed."""
+    """Call Gemini 3.5 Flash with tools — returns dict with '_error' on failure."""
     import time as _t
+    last_error = None
 
-    # Keep only last 15 messages
     if len(contents) > 16:
         contents = [contents[0]] + contents[-15:]
 
@@ -95,15 +95,19 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
                                 if text:
                                     logger.info(f"agent: Gemini text [{dt:.1f}s] ({len(text)} chars)")
                                     return {"content": {"parts": [{"text": text}], "role": "model"}}
-                                logger.warning(f"agent: Gemini empty response, finishReason={c.get('finishReason')}")
+                                last_error = f"{model_name}: empty response ({c.get('finishReason', '?')})"
+                                logger.warning(f"agent: {last_error}")
                         elif resp.status in (429, 403):
+                            last_error = f"{model_name}: HTTP {resp.status} (rate limited)"
                             continue
                         else:
                             body = await resp.text()
-                            logger.warning(f"agent: Gemini key HTTP {resp.status}: {body[:120]}")
+                            last_error = f"{model_name}: HTTP {resp.status} — {body[:100]}"
+                            logger.warning(f"agent: {last_error}")
             except Exception as e:
-                logger.warning(f"agent: Gemini key failed: {type(e).__name__}: {e}")
-    return {}
+                last_error = f"{model_name}: {type(e).__name__}: {e}"
+                logger.warning(f"agent: {last_error}")
+    return {"_error": last_error or "Gemini: no keys available"}
 
 
 # ── Execute one tool ─────────────────────────────────────────────
@@ -520,7 +524,7 @@ async def run_agent(
                 logger.warning("agent: Groq returned empty, retrying once...")
                 candidate = await _gemini_call(keys, contents, is_owner=is_owner)
                 if not candidate:
-                    return "Все модели перегружены — попробуй через минуту.", None
+                    return f"Модели недоступны: {candidate.get('_error', 'неизвестная ошибка')}", None
 
             parts = candidate.get("content", {}).get("parts", [])
             if not parts:
