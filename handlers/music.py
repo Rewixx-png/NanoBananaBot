@@ -75,6 +75,11 @@ async def cmd_music(message: types.Message):
         )
         return
 
+    # Clean up old pending requests for this user
+    for rid in list(_pending_music.keys()):
+        if _pending_music[rid].get("user_id") == uid:
+            del _pending_music[rid]
+
     # Show model selection keyboard
     request_id = uuid.uuid4().hex[:12]
     _pending_music[request_id] = {
