@@ -526,6 +526,9 @@ async def run_agent(
                 if not candidate:
                     return f"Модели недоступны: {candidate.get('_error', 'неизвестная ошибка')}", None
 
+            if candidate.get("_error"):
+                return f"Модели недоступны: {candidate['_error']}", None
+
             parts = candidate.get("content", {}).get("parts", [])
             if not parts:
                 return f"Агент не смог ответить. Причина: {candidate.get('_finish', 'пустой ответ')}", None
