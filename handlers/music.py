@@ -53,8 +53,8 @@ async def cmd_music(message: types.Message):
     """Handle /music command — prompt user for lyrics/prompt, then select model."""
     _track_user(message)
 
+    uid = message.from_user.id
 
-    # Parse prompt from command
     args = message.text.strip()
     cmd_end = args.find(" ")
     if cmd_end == -1:
