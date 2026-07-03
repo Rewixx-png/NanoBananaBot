@@ -1,16 +1,26 @@
 import aiosqlite
 import logging
+from contextlib import asynccontextmanager
 
 logger = logging.getLogger(__name__)
 DB_PATH = 'bot_data.db'
 
 
+@asynccontextmanager
+async def get_db():
+    db = await aiosqlite.connect(DB_PATH, timeout=10)
+    await db.execute('PRAGMA journal_mode=WAL')
+    await db.execute('PRAGMA busy_timeout=5000')
+    try:
+        yield db
+    finally:
+        await db.close()
+
+
 async def init_db():
     """Initialize database schema — creates all tables if they don't exist, sets WAL mode, purges old prompt logs."""
     try:
-        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-            await db.execute('PRAGMA journal_mode=WAL')
-            await db.execute('PRAGMA busy_timeout=5000')
+        async with get_db() as db:
             await db.execute('CREATE TABLE IF NOT EXISTS chat_history (chat_id INTEGER PRIMARY KEY, history TEXT)')
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS pending_generations (
@@ -49,7 +59,7 @@ async def init_db():
                     user_id INTEGER,
                     period TEXT,
                     count INTEGER,
-                    PRIMARY KEY (chat_id, user_id)
+                    PRIMARY KEY (chat_id, user_id, period)
                 )
             ''')
             await db.execute('''

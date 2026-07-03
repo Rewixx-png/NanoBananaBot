@@ -1,11 +1,10 @@
-import aiosqlite
 import json
 import os
 import time
 import logging
 from typing import List, Dict, Any, Optional
 
-from database.connection import DB_PATH
+from database.connection import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +59,7 @@ async def save_pending_gen(
     veo_api_key: str = None, model_label: str = ''
 ):
     try:
-        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        async with get_db() as db:
             await db.execute('''
                 INSERT OR REPLACE INTO pending_generations
                 (id, gen_type, user_id, chat_id, source_message_id, message_thread_id,
@@ -78,7 +77,7 @@ async def save_pending_gen(
 
 async def delete_pending_gen(gen_id: str):
     try:
-        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        async with get_db() as db:
             await db.execute('DELETE FROM pending_generations WHERE id = ?', (gen_id,))
             await db.commit()
     except Exception as e:
@@ -87,7 +86,7 @@ async def delete_pending_gen(gen_id: str):
 
 async def get_all_pending_gens() -> List[Dict[str, Any]]:
     try:
-        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        async with get_db() as db:
             async with db.execute('SELECT * FROM pending_generations ORDER BY created_at') as cursor:
                 rows = await cursor.fetchall()
                 cols = [

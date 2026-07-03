@@ -278,6 +278,7 @@ def start_dual(chat_id: int, thread_id=None) -> bool:
 
 def stop_dual(chat_id: int) -> bool:
     task = dual_tasks.pop(chat_id, None)
+    dual_histories.pop(chat_id, None)
     if task:
         task.cancel()
         return True

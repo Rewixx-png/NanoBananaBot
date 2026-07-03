@@ -1,16 +1,15 @@
-import aiosqlite
 import json
 import logging
 from typing import List, Dict, Any
 
-from database.connection import DB_PATH
+from database.connection import get_db
 
 logger = logging.getLogger(__name__)
 
 
 async def get_history(chat_id: int) -> List[Dict[str, Any]]:
     try:
-        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        async with get_db() as db:
             async with db.execute('SELECT history FROM chat_history WHERE chat_id = ?', (chat_id,)) as cursor:
                 row = await cursor.fetchone()
                 if row:
@@ -26,7 +25,7 @@ async def get_history(chat_id: int) -> List[Dict[str, Any]]:
 
 async def save_history(chat_id: int, history: List[Dict[str, Any]]):
     try:
-        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        async with get_db() as db:
             await db.execute(
                 'INSERT OR REPLACE INTO chat_history (chat_id, history) VALUES (?, ?)',
                 (chat_id, json.dumps(history, ensure_ascii=False))

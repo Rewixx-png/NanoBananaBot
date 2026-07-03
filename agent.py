@@ -31,6 +31,7 @@ from ai_services import (
 from keys import load_keys, load_firecrawl_keys, remove_key
 from keys import get_live_keys as _nk_get_live, mark_cooldown as _nk_cooldown, sync_from_keyhunter as _nk_sync, init_db as _nk_init
 
+from services.security_utils import is_safe_url
 logger = logging.getLogger(__name__)
 
 MAX_STEPS       = 60
@@ -239,7 +240,9 @@ class _ToolBudget:
         "tg_promote_member": 2, "tg_get_chat_member": 10, "tg_get_admins": 5,
         "tg_get_member_count": 10, "tg_create_forum_topic": 3, "tg_close_forum_topic": 3,
         "tg_get_sticker_set": 5, "tg_approve_join_request": 5, "tg_export_invite_link": 3,
-        "read_bot_logs": 5,
+        "read_bot_logs": 5, "list_image_models": 5,
+        "analyze_audio": 5, "analyze_image": 10, "playwright_browse": 5,
+        "tg_unban_user": 5, "tg_set_bot_photo": 2, "tg_set_chat_description": 3,
     }
 
     def __init__(self):
@@ -1127,6 +1130,8 @@ with sync_playwright() as p:
 
 
 async def _tool_fetch_json(url: str) -> str:
+    if not is_safe_url(url):
+        return f"fetch_json error: unsafe URL blocked"
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(url, timeout=aiohttp.ClientTimeout(total=15),
@@ -2669,7 +2674,7 @@ async def _execute_tool(
             selector=args.get("selector", ""),
             value=args.get("value", ""),
             js_code=args.get("js_code", ""),
-            ws=ws, status_cb=_st, send_cb=send_media_cb,
+            ws=ws, status_cb=_st, send_cb=send_cb,
         ), None
 
     if name == "write_file":
