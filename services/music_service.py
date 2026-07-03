@@ -113,8 +113,7 @@ async def generate_music(
                 errors.append(f"{mk}: timeout")
             except Exception as e:
                 errors.append(f"{mk}: {type(e).__name__}")
-                logger.warning(f"music: {mk}: {e}")
-
-    first = errors[0] if errors else "все ключи исчерпаны"
-    rest = f" + ещё {len(errors)-1}" if len(errors) > 1 else ""
-    return None, None, f"{first}{rest}"
+    # All models exhausted — give honest error
+    first = errors[0] if errors else "неизвестная ошибка"
+    rest = f"; +{len(errors)-1}" if len(errors) > 1 else ""
+    return None, None, f"Lyria API недоступна: {first}{rest}. Нужны ключи с квотой на Interactions API (отдельно от generateContent)."
