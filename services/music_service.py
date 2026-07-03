@@ -62,13 +62,11 @@ async def generate_music(
         for key in keys[:5]:
             try:
                 async with aiohttp.ClientSession() as s:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/interactions?key={key}"
                     async with s.post(
-                        "https://generativelanguage.googleapis.com/v1beta/interactions",
+                        url,
                         json=payload,
-                        headers={
-                            "Content-Type": "application/json",
-                            "x-goog-api-key": key,
-                        },
+                        headers={"Content-Type": "application/json"},
                         timeout=aiohttp.ClientTimeout(total=120),
                     ) as resp:
                         if resp.status == 200:
