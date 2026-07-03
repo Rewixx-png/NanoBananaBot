@@ -188,8 +188,9 @@ async def music_model_callback(callback: types.CallbackQuery):
 
         filename = f"lyria_{choice}_{request_id}.mp3"
         await safe_send(
-            data["chat_id"],
-            caption or "🎵",
+            callback.message.bot.send_audio,
+            chat_id=data["chat_id"],
+            caption=caption or "🎵",
             audio=BufferedInputFile(audio_bytes, filename=filename),
             title=f"Lyria — {model_info['label']}",
             performer="Hatani AI",
