@@ -68,6 +68,12 @@ async def generate_music(
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 1.0},
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ],
         }
 
         for key in keys:
@@ -108,8 +114,12 @@ async def generate_music(
                             errors.append(f"{mk}: empty audio")
                             logger.warning(f"music: {mk}: empty audio in response")
 
-                        elif resp.status in (429, 403):
-                            errors.append(f"{mk}: HTTP {resp.status}")
+                        elif resp.status == 429:
+                            errors.append(f"{mk}: HTTP 429")
+                            continue
+                        elif resp.status == 403:
+                            body = await resp.text()
+                            errors.append(f"{mk}: HTTP 403 blocked: {body[:150]}")
                             continue
                         elif resp.status == 400:
                             body = await resp.text()
