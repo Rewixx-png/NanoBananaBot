@@ -89,8 +89,9 @@ async def cmd_music(message: types.Message):
         reply_kwargs["message_thread_id"] = message.message_thread_id
 
     sent = await safe_send(
-        message.chat.id,
-        f"🎵 <b>Текст:</b> {prompt[:500]}\n\nВыбери модель генерации:",
+        message.bot.send_message,
+        chat_id=message.chat.id,
+        text=f"🎵 <b>Текст:</b> {prompt[:500]}\n\nВыбери модель генерации:",
         reply_markup=_music_model_keyboard(request_id),
         parse_mode="HTML",
         **reply_kwargs,
