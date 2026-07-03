@@ -5,7 +5,7 @@ import json
 import logging
 from typing import Tuple, Optional
 import asyncio
-
+import aiohttp
 from keys import load_keys, remove_key
 
 logger = logging.getLogger(__name__)
