@@ -59,7 +59,7 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
     if len(contents) > 16:
         contents = [contents[0]] + contents[-15:]
 
-    for model_name in ("gemini-3.5-flash", "gemini-3.1-pro-preview"):
+    for model_name in ("gemini-3.5-flash",):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         payload = {
             "systemInstruction": {"parts": [{"text": _build_system(is_owner)}]},
