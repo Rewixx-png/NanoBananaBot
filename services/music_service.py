@@ -84,13 +84,11 @@ async def generate_music(
                                 fb = data.get("promptFeedback", {})
                                 reason = fb.get("blockReason", "")
                                 if reason:
-                                    errors.append(f"{mk}: {reason}")
-                                    logger.warning(f"music: {mk}: {reason}")
+                                    errors.append(f"{mk}: BLOCKED ({reason})")
+                                    logger.warning(f"music: {mk}: BLOCKED ({reason})")
                                 else:
                                     errors.append(f"{mk}: empty candidates")
                                 continue
-                            c = candidates[0]
-                            parts = c.get("content", {}).get("parts", [])
                             audio_b64 = None
                             lyrics_parts = []
                             for p in parts:
