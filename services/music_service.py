@@ -3,7 +3,7 @@
 import base64
 import json
 import logging
-import aiohttp
+from typing import Tuple, Optional
 import asyncio
 
 from keys import load_keys, remove_key
