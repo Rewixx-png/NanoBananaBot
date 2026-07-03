@@ -87,12 +87,14 @@ async def generate_music(
                         timeout=aiohttp.ClientTimeout(total=120),
                     ) as resp:
                         if resp.status == 200:
-                            data = await resp.json()
-                            candidates = data.get("candidates", [])
                             if not candidates:
-                                # Log raw response structure to debug Lyria format
-                                logger.warning(f"music: {mk}: no candidates. Keys: {list(data.keys())[:10]}. Raw preview: {json.dumps(data, ensure_ascii=False)[:300]}")
-                                errors.append(f"{mk}: empty candidates")
+                                fb = data.get("promptFeedback", {})
+                                reason = fb.get("blockReason", "")
+                                if reason:
+                                    errors.append(f"{mk}: {reason}")
+                                    logger.warning(f"music: {mk}: {reason}")
+                                else:
+                                    errors.append(f"{mk}: empty candidates")
                                 continue
                             c = candidates[0]
                             parts = c.get("content", {}).get("parts", [])
