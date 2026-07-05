@@ -16,7 +16,6 @@ from handlers.common import (
     safe_send,
     _clean_plain_reply,
     _md_to_html,
-    send_rich_message,
     _code_block_ext,
     _maybe_send_random_chat_media,
     _track_user,
@@ -393,27 +392,17 @@ async def handle_text_messages(message: types.Message):
             elif not html_text:
                 html_text = 'Нихуя не понял, но иди в пизду.'
             try:
-                # $$ LaTeX → Rich Message (native math rendering)
-                if '$$' in html_text:
-                    sent_msg = await send_rich_message(
-                        message.bot, chat_id=message.chat.id,
-                        text=html_text,
-                        message_thread_id=reply_kwargs.get('message_thread_id'),
-                        reply_parameters={"message_id": message.message_id}
-                    )
-                    sent_msg = sent_msg or await safe_send(message.reply, _clean_plain_reply(html_text), **reply_kwargs)
-                else:
-                    import bleach
-                    _TG_TAGS = ['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del',
-                                'code', 'pre', 'blockquote', 'tg-spoiler', 'tg-emoji']
-                    safe_html = bleach.clean(
-                        _md_to_html(html_text),
-                        tags=_TG_TAGS,
-                        attributes={'pre': [], 'code': ['class'], 'tg-emoji': ['emoji-id'],
-                                    'blockquote': ['expandable']},
-                        strip=True,
-                    )
-                    sent_msg = await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
+                import bleach
+                _TG_TAGS = ['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del',
+                            'code', 'pre', 'blockquote', 'tg-spoiler', 'tg-emoji']
+                safe_html = bleach.clean(
+                    _md_to_html(html_text),
+                    tags=_TG_TAGS,
+                    attributes={'pre': [], 'code': ['class'], 'tg-emoji': ['emoji-id'],
+                                'blockquote': ['expandable']},
+                    strip=True,
+                )
+                sent_msg = await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
             except Exception:
                 sent_msg = await safe_send(message.reply, _clean_plain_reply(html_text), **reply_kwargs)
             if not sent_msg:

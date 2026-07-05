@@ -16,7 +16,6 @@ from handlers.common import (
     safe_send,
     _clean_plain_reply,
     _md_to_html,
-    send_rich_message,
     _project_filename,
     _validate_generated_files,
     _is_text_filename,
@@ -470,20 +469,12 @@ async def _media_to_agent(
     if agent_project:
         await _send_generated_project(message, agent_project, reply_kwargs)
     elif agent_text:
+        import bleach as _bl2
+        _TAGS2 = ['b','strong','i','em','u','ins','s','code','pre','blockquote','tg-spoiler']
+        safe_html = _bl2.clean(_md_to_html(agent_text), tags=_TAGS2,
+                               attributes={'code': ['class']}, strip=True)
         try:
-            if '$$' in agent_text:
-                await send_rich_message(
-                    message.bot, chat_id=message.chat.id,
-                    text=agent_text,
-                    message_thread_id=reply_kwargs.get('message_thread_id'),
-                    reply_parameters={"message_id": message.message_id}
-                )
-            else:
-                import bleach as _bl2
-                _TAGS2 = ['b','strong','i','em','u','ins','s','code','pre','blockquote','tg-spoiler']
-                safe_html = _bl2.clean(_md_to_html(agent_text), tags=_TAGS2,
-                                       attributes={'code': ['class']}, strip=True)
-                await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
+            await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
         except Exception:
             await safe_send(message.reply, _clean_plain_reply(agent_text), **reply_kwargs)
         from state import chat_context_buffer as _ccb
