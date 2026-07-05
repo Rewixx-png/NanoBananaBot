@@ -229,26 +229,32 @@ async def safe_send(coro_func, *args, **kwargs):
 
 
 async def send_rich_message(bot, chat_id: int, text: str, **kwargs) -> bool:
-    """Send Rich Message via direct HTTP (aiogram doesn't support API 10.1 yet)."""
+    """Send Rich Message via aiogram (3.28+) or direct HTTP fallback."""
+    # Try aiogram first (3.28+ supports sendRichMessage)
+    try:
+        await bot.send_rich_message(
+            chat_id=chat_id,
+            rich_message={"markdown": text},
+            **{k: v for k, v in kwargs.items() if k in (
+                "message_thread_id", "reply_parameters", "reply_markup"
+            ) and v is not None}
+        )
+        return True
+    except Exception:
+        pass
+    # Fallback: direct HTTP
     from config import TELEGRAM_API_URL
     import aiohttp
     token = bot.token
-    payload = {
-        "chat_id": chat_id,
-        "rich_message": {"markdown": text},
-    }
+    payload = {"chat_id": chat_id, "rich_message": {"markdown": text}}
     for k in ("message_thread_id", "reply_parameters", "reply_markup"):
         if k in kwargs and kwargs[k] is not None:
             payload[k] = kwargs[k]
-    # Try local API first, then official
     for base_url in (f"{TELEGRAM_API_URL}/bot{token}", f"https://api.telegram.org/bot{token}"):
         try:
             async with aiohttp.ClientSession() as s:
-                async with s.post(
-                    f"{base_url}/sendRichMessage",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=15)
-                ) as resp:
+                async with s.post(f"{base_url}/sendRichMessage", json=payload,
+                                  timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status == 200:
                         return True
         except Exception:
