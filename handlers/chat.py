@@ -416,7 +416,16 @@ async def handle_text_messages(message: types.Message):
                                     'blockquote': ['expandable']},
                         strip=True,
                     )
-                    sent_msg = await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
+                    if '$$' in safe_html:
+                        sent_msg = await send_rich_message(
+                            message.bot, chat_id=message.chat.id,
+                            text=safe_html,
+                            message_thread_id=reply_kwargs.get('message_thread_id'),
+                            reply_parameters={"message_id": message.message_id}
+                        )
+                        sent_msg = sent_msg or await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
+                    else:
+                        sent_msg = await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
             except Exception:
                 sent_msg = await safe_send(message.reply, _clean_plain_reply(html_text), **reply_kwargs)
             if not sent_msg:
