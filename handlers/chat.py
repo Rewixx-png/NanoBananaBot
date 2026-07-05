@@ -417,9 +417,10 @@ async def handle_text_messages(message: types.Message):
                         strip=True,
                     )
                     if '$$' in safe_html:
+                        # Rich Message: send RAW text (markdown), not HTML-converted
                         sent_msg = await send_rich_message(
                             message.bot, chat_id=message.chat.id,
-                            text=safe_html,
+                            text=html_text,  # raw, not safe_html
                             message_thread_id=reply_kwargs.get('message_thread_id'),
                             reply_parameters={"message_id": message.message_id}
                         )
