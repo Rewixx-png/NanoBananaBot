@@ -28,4 +28,6 @@ RUN playwright install-deps chromium
 
 COPY . .
 
+RUN uv pip install --system aiogram --upgrade
+
 CMD ["python", "main.py"]
