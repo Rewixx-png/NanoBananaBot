@@ -477,8 +477,8 @@ async def _media_to_agent(
             await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
         except Exception:
             await safe_send(message.reply, _clean_plain_reply(agent_text), **reply_kwargs)
+        from state import chat_context_buffer as _ccb
         from config import MAX_HISTORY_MESSAGES as _mhm
-        _buf = _ccb.setdefault(message.chat.id, [])
         _buf.append(f"Hatani: {agent_text[:500]}")
         if len(_buf) > _mhm:
             _ccb[message.chat.id] = _buf[-_mhm:]
