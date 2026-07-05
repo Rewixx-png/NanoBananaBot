@@ -288,12 +288,16 @@ def _md_to_html(text: str) -> str:
     text = re.sub(r'```(?:\w+)?\n?(.*?)```', r'<pre>\1</pre>', text, flags=re.DOTALL)
     # Inline code: `text` → <code>text</code>
     text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', text)
-    # Italic: *text* → <i>text</i> (must be done after bold to avoid conflict)
-    text = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', text)
-    # Horizontal rules: --- → skipped (Telegram doesn't support)
-    # Auto-wrap naked LaTeX in $$ if model forgets
-    if re.search(r'\\frac|\\hbar|\\sum|\\int|\\partial|\\hat|\\nabla|\\mathbf|\\begin|\\end|\\sqrt|\\infty|\\alpha|\\beta|\\gamma|\\delta|\\epsilon|\\zeta|\\eta|\\theta|\\lambda|\\mu|\\pi|\\rho|\\sigma|\\tau|\\phi|\\omega', text) and '$$' not in text:
-        text = f'$$\n{text.strip()}\n$$'
+    # Auto-wrap individual naked LaTeX lines in $$
+    if re.search(r'\\frac|\\int\b|\\sum\b|\\hbar|\\hat\{|\\mathbf\{|\\partial|\\nabla|\\infty|\\sqrt|\\begin\{', text) and '$$' not in text:
+        lines = text.split('\n')
+        wrapped = []
+        for line in lines:
+            if re.search(r'\\frac|\\int\b|\\sum\b|\\hbar|\\hat\{|\\mathbf\{|\\partial|\\nabla|\\infty|\\sqrt|\\begin\{', line) and '$$' not in line:
+                wrapped.append(f'$$\n{line.strip()}\n$$')
+            else:
+                wrapped.append(line)
+        text = '\n'.join(wrapped)
     return text
 
 def _project_filename(name: str, fallback: str = 'project') -> str:
