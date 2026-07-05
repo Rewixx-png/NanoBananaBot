@@ -15,6 +15,7 @@ from aiogram.types import BufferedInputFile, FSInputFile, InlineKeyboardButton, 
 from handlers.common import (
     safe_send,
     _clean_plain_reply,
+    _md_to_html,
     _code_block_ext,
     _maybe_send_random_chat_media,
     _track_user,
@@ -395,7 +396,7 @@ async def handle_text_messages(message: types.Message):
                 _TG_TAGS = ['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del',
                             'code', 'pre', 'blockquote', 'tg-spoiler', 'tg-emoji']
                 safe_html = bleach.clean(
-                    html_text,
+                    _md_to_html(html_text),
                     tags=_TG_TAGS,
                     attributes={'pre': [], 'code': ['class'], 'tg-emoji': ['emoji-id'],
                                 'blockquote': ['expandable']},

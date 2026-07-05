@@ -234,6 +234,30 @@ def _clean_plain_reply(text: str) -> str:
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
+def _md_to_html(text: str) -> str:
+    """Convert Markdown to HTML for Telegram parse_mode='HTML'."""
+    # Links: [text](url) → <a href="url">text</a>
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
+    # Bold: **text** → <b>text</b>
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    # Underline: __text__ → <u>text</u>
+    text = re.sub(r'__(.+?)__', r'<u>\1</u>', text)
+    # Strikethrough: ~~text~~ → <s>text</s>
+    text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
+    # Spoiler: ||text|| → <tg-spoiler>text</tg-spoiler>
+    text = re.sub(r'\|\|(.+?)\|\|', r'<tg-spoiler>\1</tg-spoiler>', text)
+    # Headers: ### Text → <b>Text</b> (Telegram has no H1-H6)
+    text = re.sub(r'^#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+    # Code blocks: ```lang\n...``` → <pre>...</pre>
+    text = re.sub(r'```(?:\w+)?\n?(.*?)```', r'<pre>\1</pre>', text, flags=re.DOTALL)
+    # Inline code: `text` → <code>text</code>
+    text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', text)
+    # Italic: *text* → <i>text</i> (must be done after bold to avoid conflict)
+    text = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', text)
+    # Horizontal rules: --- → skipped (Telegram doesn't support)
+    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+    return text
+
 def _project_filename(name: str, fallback: str = 'project') -> str:
     cleaned = re.sub(r'[^a-zA-Z0-9_.-]+', '_', name.strip())[:80].strip('._-')
     return cleaned or fallback
