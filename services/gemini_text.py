@@ -59,7 +59,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
             ctx_lines = chat_context_buffer.get(chat_id, [])[-8:]
             ctx_text = '\n'.join(ctx_lines) if ctx_lines else ''
             groq_prompt = f'[История чата — последние сообщения]:\n{ctx_text}\n\n[Пользователь]: {prefixed_prompt}' if ctx_text else prefixed_prompt
-            result = await generate_text_with_groq(groq_prompt, system_prompt=system, temperature=0.8)
+            result = await generate_text_with_groq(groq_prompt, system_prompt=system, temperature=0.8, max_tokens=512)
             if result:
                 history.append({'role': 'user', 'text': prefixed_prompt})
                 history.append({'role': 'model', 'text': result})
@@ -125,7 +125,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
             payload = {
                 'systemInstruction': {'parts': [{'text': _build_text_system_prompt(allow_web_directive=allow_web_directive, is_owner=is_owner)}]},
                 'contents': call_contents,
-                'generationConfig': {'temperature': 1.0, 'maxOutputTokens': 512, 'thinkingConfig': {'thinkingLevel': 'minimal'}},
+                'generationConfig': {'temperature': 1.0, 'maxOutputTokens': 800 if web_context else 300, 'thinkingConfig': {'thinkingLevel': 'minimal'}},
                 'safetySettings': [
                     {'category': 'HARM_CATEGORY_HARASSMENT',       'threshold': 'BLOCK_NONE'},
                     {'category': 'HARM_CATEGORY_HATE_SPEECH',       'threshold': 'BLOCK_NONE'},
