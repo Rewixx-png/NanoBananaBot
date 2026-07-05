@@ -392,21 +392,17 @@ async def handle_text_messages(message: types.Message):
             elif not html_text:
                 html_text = 'Нихуя не понял, но иди в пизду.'
             try:
-                if '$$' in html_text:
-                    # $$ LaTeX only renders in MarkdownV2 — send raw model output
-                    sent_msg = await safe_send(message.reply, html_text, parse_mode='MarkdownV2', **reply_kwargs)
-                else:
-                    import bleach
-                    _TG_TAGS = ['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del',
-                                'code', 'pre', 'blockquote', 'tg-spoiler', 'tg-emoji']
-                    safe_html = bleach.clean(
-                        _md_to_html(html_text),
-                        tags=_TG_TAGS,
-                        attributes={'pre': [], 'code': ['class'], 'tg-emoji': ['emoji-id'],
-                                    'blockquote': ['expandable']},
-                        strip=True,
-                    )
-                    sent_msg = await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
+                import bleach
+                _TG_TAGS = ['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del',
+                            'code', 'pre', 'blockquote', 'tg-spoiler', 'tg-emoji']
+                safe_html = bleach.clean(
+                    _md_to_html(html_text),
+                    tags=_TG_TAGS,
+                    attributes={'pre': [], 'code': ['class'], 'tg-emoji': ['emoji-id'],
+                                'blockquote': ['expandable']},
+                    strip=True,
+                )
+                sent_msg = await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
             except Exception:
                 sent_msg = await safe_send(message.reply, _clean_plain_reply(html_text), **reply_kwargs)
             if not sent_msg:
