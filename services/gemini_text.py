@@ -59,7 +59,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
             ctx_lines = chat_context_buffer.get(chat_id, [])[-8:]
             ctx_text = '\n'.join(ctx_lines) if ctx_lines else ''
             groq_prompt = f'[История чата — последние сообщения]:\n{ctx_text}\n\n[Пользователь]: {prefixed_prompt}' if ctx_text else prefixed_prompt
-            result = await generate_text_with_groq(groq_prompt, system_prompt=system, temperature=0.8, max_tokens=512)
+            result = await generate_text_with_groq(groq_prompt, system_prompt=system, temperature=0.8, max_tokens=300)
             if result:
                 history.append({'role': 'user', 'text': prefixed_prompt})
                 history.append({'role': 'model', 'text': result})
