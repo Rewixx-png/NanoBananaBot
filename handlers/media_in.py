@@ -469,12 +469,15 @@ async def _media_to_agent(
     if agent_project:
         await _send_generated_project(message, agent_project, reply_kwargs)
     elif agent_text:
-        import bleach as _bl2
-        _TAGS2 = ['b','strong','i','em','u','ins','s','code','pre','blockquote','tg-spoiler']
-        safe_html = _bl2.clean(_md_to_html(agent_text), tags=_TAGS2,
-                               attributes={'code': ['class']}, strip=True)
         try:
-            await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
+            if '$$' in agent_text:
+                await safe_send(message.reply, agent_text, parse_mode='MarkdownV2', **reply_kwargs)
+            else:
+                import bleach as _bl2
+                _TAGS2 = ['b','strong','i','em','u','ins','s','code','pre','blockquote','tg-spoiler']
+                safe_html = _bl2.clean(_md_to_html(agent_text), tags=_TAGS2,
+                                       attributes={'code': ['class']}, strip=True)
+                await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
         except Exception:
             await safe_send(message.reply, _clean_plain_reply(agent_text), **reply_kwargs)
         from state import chat_context_buffer as _ccb
