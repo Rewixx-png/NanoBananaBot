@@ -15,6 +15,7 @@ from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboar
 from handlers.common import (
     safe_send,
     _clean_plain_reply,
+    _md_to_html,
     _project_filename,
     _validate_generated_files,
     _is_text_filename,
@@ -470,13 +471,12 @@ async def _media_to_agent(
     elif agent_text:
         import bleach as _bl2
         _TAGS2 = ['b','strong','i','em','u','ins','s','code','pre','blockquote','tg-spoiler']
-        safe_html = _bl2.clean(agent_text, tags=_TAGS2,
+        safe_html = _bl2.clean(_md_to_html(agent_text), tags=_TAGS2,
                                attributes={'code': ['class']}, strip=True)
         try:
             await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
         except Exception:
             await safe_send(message.reply, _clean_plain_reply(agent_text), **reply_kwargs)
-        from state import chat_context_buffer as _ccb
         from config import MAX_HISTORY_MESSAGES as _mhm
         _buf = _ccb.setdefault(message.chat.id, [])
         _buf.append(f"Hatani: {agent_text[:500]}")
