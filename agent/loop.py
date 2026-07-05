@@ -56,8 +56,8 @@ async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> di
     import time as _t
     errors = []  # accumulate errors from all models
 
-    if len(contents) > 16:
-        contents = [contents[0]] + contents[-15:]
+    if len(contents) > 31:
+        contents = [contents[0]] + contents[-30:]
 
     for model_name in ("gemini-3.5-flash",):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
