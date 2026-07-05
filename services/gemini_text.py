@@ -125,7 +125,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
             payload = {
                 'systemInstruction': {'parts': [{'text': _build_text_system_prompt(allow_web_directive=allow_web_directive, is_owner=is_owner)}]},
                 'contents': call_contents,
-                'generationConfig': {'temperature': 1.0, 'thinkingConfig': {'thinkingLevel': 'minimal'}},
+                'generationConfig': {'temperature': 1.0, 'maxOutputTokens': 512, 'thinkingConfig': {'thinkingLevel': 'minimal'}},
                 'safetySettings': [
                     {'category': 'HARM_CATEGORY_HARASSMENT',       'threshold': 'BLOCK_NONE'},
                     {'category': 'HARM_CATEGORY_HATE_SPEECH',       'threshold': 'BLOCK_NONE'},
