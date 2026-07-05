@@ -393,11 +393,14 @@ async def handle_text_messages(message: types.Message):
             elif not html_text:
                 html_text = 'Нихуя не понял, но иди в пизду.'
             try:
-                # $$ LaTeX → Rich Message — send RAW text (markdown parser handles formatting)
+                import logging as _logging
+                _log = _logging.getLogger(__name__)
+                _log.info(f"$$ check: agent={'$$' in agent_text} html={'$$' in html_text} len={len(html_text)}")
+                # $$ LaTeX → Rich Message
                 if '$$' in html_text:
                     sent_msg = await send_rich_message(
                         message.bot, chat_id=message.chat.id,
-                        text=html_text,  # raw text, not _md_to_html converted
+                        text=html_text,
                         message_thread_id=reply_kwargs.get('message_thread_id'),
                         reply_parameters={"message_id": message.message_id}
                     )
