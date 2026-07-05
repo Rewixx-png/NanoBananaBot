@@ -294,7 +294,7 @@ def _md_to_html(text: str) -> str:
     # Inline code: `text` → <code>text</code>
     text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', text)
     # Auto-wrap individual naked LaTeX lines in $$
-    if re.search(r'\\frac|\\int\b|\\sum\b|\\hbar|\\hat\{|\\mathbf\{|\\partial|\\nabla|\\infty|\\sqrt|\\begin\{', text) and '$$' not in text:
+    if re.search(r'\\frac|\\int\b|\\sum\b|\\hbar|\\hat\{|\\mathbf\{|\\partial|\\nabla|\\infty|\\sqrt|\\begin\{|e\^\{|\\times|\\cdot|\\pm|\\leq|\\geq|\\neq|\\approx|\\equiv|\\propto|\\sim|\\rightarrow|\\Rightarrow|\\leftarrow|\\Leftarrow|\\leftrightarrow|\\Leftrightarrow|\\forall|\\exists|\\in|\\notin|\\subset|\\supset|\\cup|\\cap|\\emptyset|\\mathbb|\\mathcal', text) and '$$' not in text:
         lines = text.split('\n')
         wrapped = []
         for line in lines:
