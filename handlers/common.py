@@ -256,6 +256,9 @@ def _md_to_html(text: str) -> str:
     text = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', text)
     # Horizontal rules: --- → skipped (Telegram doesn't support)
     text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+    # Auto-wrap naked LaTeX in $$ if model forgot: \frac, \hbar, \sum, \int, etc.
+    if re.search(r'\\frac|\\hbar|\\sum|\\int|\\partial|\\hat|\\nabla|\\mathbf|\\begin|\\end', text) and '$$' not in text:
+        text = f'$$\n{text.strip()}\n$$'
     return text
 
 def _project_filename(name: str, fallback: str = 'project') -> str:
