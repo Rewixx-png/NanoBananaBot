@@ -225,6 +225,23 @@ async def safe_send(coro_func, *args, **kwargs):
             else:
                 raise
 
+
+async def send_rich_message(bot, chat_id: int, text: str, **kwargs) -> bool:
+    """Send a Rich Message via Bot API. Supports $$ LaTeX math natively."""
+    from aiogram.types import BufferedInputFile
+    payload = {
+        "chat_id": chat_id,
+        "rich_message": {"markdown": text},
+        **{k: v for k, v in kwargs.items() if k in (
+            "message_thread_id", "disable_notification", "protect_content",
+            "reply_parameters", "reply_markup", "business_connection_id"
+        )}
+    }
+    try:
+        return await safe_send(bot.send_rich_message, **payload)
+    except Exception:
+        return False
+
 def _clean_plain_reply(text: str) -> str:
     text = re.sub(r'</?(?:b|strong|i|em|u|s|code|pre|blockquote|a)(?:\s+[^>]*)?>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'^\s{0,3}#{1,6}\s*', '', text, flags=re.MULTILINE)
