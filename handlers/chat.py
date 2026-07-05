@@ -416,11 +416,19 @@ async def handle_text_messages(message: types.Message):
                                     'blockquote': ['expandable']},
                         strip=True,
                     )
+                    # _md_to_html added $$ wrappers in safe_html — send raw text WITH $$ to Rich Message
+                    # Strip HTML tags added by _md_to_html, keep $$ blocks
                     if '$$' in safe_html:
-                        # Rich Message: send RAW text (markdown), not HTML-converted
+                        rich_text = html_text  # raw model output
+                        # If _md_to_html added $$, also wrap in rich_text
+                        if '$$' not in rich_text and '$$' in safe_html:
+                            rich_text = safe_html  # has $$ wrappers added by _md_to_html
+                            # Strip HTML tags for Rich Message markdown parser
+                            import re as _re2
+                            rich_text = _re2.sub(r'<[^>]+>', '', rich_text)
                         sent_msg = await send_rich_message(
                             message.bot, chat_id=message.chat.id,
-                            text=html_text,  # raw, not safe_html
+                            text=rich_text,
                             message_thread_id=reply_kwargs.get('message_thread_id'),
                             reply_parameters={"message_id": message.message_id}
                         )
