@@ -225,42 +225,6 @@ async def safe_send(coro_func, *args, **kwargs):
             else:
                 raise
 
-
-
-
-async def send_rich_message(bot, chat_id: int, text: str, **kwargs) -> bool:
-    """Send Rich Message via aiogram (3.28+) or direct HTTP fallback."""
-    # Try aiogram first (3.28+ supports sendRichMessage)
-    try:
-        await bot.send_rich_message(
-            chat_id=chat_id,
-            rich_message={"markdown": text},
-            **{k: v for k, v in kwargs.items() if k in (
-                "message_thread_id", "reply_parameters", "reply_markup"
-            ) and v is not None}
-        )
-        return True
-    except Exception:
-        pass
-    # Fallback: direct HTTP
-    from config import TELEGRAM_API_URL
-    import aiohttp
-    token = bot.token
-    payload = {"chat_id": chat_id, "rich_message": {"markdown": text}}
-    for k in ("message_thread_id", "reply_parameters", "reply_markup"):
-        if k in kwargs and kwargs[k] is not None:
-            payload[k] = kwargs[k]
-    for base_url in (f"{TELEGRAM_API_URL}/bot{token}", f"https://api.telegram.org/bot{token}"):
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(f"{base_url}/sendRichMessage", json=payload,
-                                  timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status == 200:
-                        return True
-        except Exception:
-            continue
-    return False
-
 def _clean_plain_reply(text: str) -> str:
     text = re.sub(r'</?(?:b|strong|i|em|u|s|code|pre|blockquote|a)(?:\s+[^>]*)?>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'^\s{0,3}#{1,6}\s*', '', text, flags=re.MULTILINE)
@@ -291,9 +255,7 @@ def _md_to_html(text: str) -> str:
     # Italic: *text* → <i>text</i> (must be done after bold to avoid conflict)
     text = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', text)
     # Horizontal rules: --- → skipped (Telegram doesn't support)
-    # Auto-wrap naked LaTeX in $$ if model forgets
-    if re.search(r'\\frac|\\hbar|\\sum|\\int|\\partial|\\hat|\\nabla|\\mathbf|\\begin|\\end|\\sqrt|\\infty|\\alpha|\\beta|\\gamma|\\delta|\\epsilon|\\zeta|\\eta|\\theta|\\lambda|\\mu|\\pi|\\rho|\\sigma|\\tau|\\phi|\\omega', text) and '$$' not in text:
-        text = f'$$\n{text.strip()}\n$$'
+    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
     return text
 
 def _project_filename(name: str, fallback: str = 'project') -> str:
