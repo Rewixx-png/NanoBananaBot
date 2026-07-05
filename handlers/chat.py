@@ -393,9 +393,6 @@ async def handle_text_messages(message: types.Message):
             elif not html_text:
                 html_text = 'Нихуя не понял, но иди в пизду.'
             try:
-                import logging as _logging
-                _log = _logging.getLogger(__name__)
-                _log.info(f"$$ check: agent={'$$' in agent_text} html={'$$' in html_text} len={len(html_text)}")
                 # $$ LaTeX → Rich Message
                 if '$$' in html_text:
                     sent_msg = await send_rich_message(
