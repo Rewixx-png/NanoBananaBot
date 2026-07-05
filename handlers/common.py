@@ -229,8 +229,9 @@ async def safe_send(coro_func, *args, **kwargs):
 
 
 async def send_rich_message(bot, chat_id: int, text: str, **kwargs) -> bool:
-    """Send Rich Message via aiogram (3.28+) or direct HTTP fallback."""
-    # Try aiogram first (3.28+ supports sendRichMessage)
+    """Send Rich Message via aiogram or direct HTTP."""
+    import logging
+    _log = logging.getLogger(__name__)
     try:
         await bot.send_rich_message(
             chat_id=chat_id,
@@ -239,9 +240,10 @@ async def send_rich_message(bot, chat_id: int, text: str, **kwargs) -> bool:
                 "message_thread_id", "reply_parameters", "reply_markup"
             ) and v is not None}
         )
+        _log.info(f"sendRichMessage OK ({len(text)} chars)")
         return True
-    except Exception:
-        pass
+    except Exception as e:
+        _log.warning(f"sendRichMessage failed: {type(e).__name__}: {e}")
     # Fallback: direct HTTP
     from config import TELEGRAM_API_URL
     import aiohttp
@@ -255,10 +257,13 @@ async def send_rich_message(bot, chat_id: int, text: str, **kwargs) -> bool:
             async with aiohttp.ClientSession() as s:
                 async with s.post(f"{base_url}/sendRichMessage", json=payload,
                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    body = await resp.text()
                     if resp.status == 200:
+                        _log.info(f"sendRichMessage HTTP OK ({base_url})")
                         return True
-        except Exception:
-            continue
+                    _log.warning(f"sendRichMessage HTTP {resp.status}: {body[:120]}")
+        except Exception as e:
+            _log.warning(f"sendRichMessage HTTP {base_url}: {type(e).__name__}: {e}")
     return False
 
 def _clean_plain_reply(text: str) -> str:
