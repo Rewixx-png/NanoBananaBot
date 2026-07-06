@@ -56,10 +56,14 @@ async def cmd_video(message: types.Message):
         image_bytes = downloaded.read()
     if message.video:
         vid = message.video
-        file_info = await message.bot.get_file(vid.file_id)
-        downloaded = await message.bot.download_file(file_info.file_path)
-        video_bytes = downloaded.read()
-    request_id = uuid.uuid4().hex[:10]
+        try:
+            file_info = await message.bot.get_file(vid.file_id)
+            downloaded = await message.bot.download_file(file_info.file_path)
+            video_bytes = downloaded.read()
+        except Exception as e:
+            logger.warning(f"Failed to download video: {e}")
+            await message.reply("❌ Не удалось скачать видео. Возможно файл устарел, попробуйте переотправить.")
+            return
     pending_video_requests[request_id] = {'user_id': message.from_user.id, 'chat_id': message.chat.id, 'source_message_id': message.message_id, 'message_thread_id': message.message_thread_id if message.chat.is_forum else None, 'prompt': prompt, 'image_bytes': image_bytes, 'video_bytes': video_bytes}
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     rows = [[InlineKeyboardButton(text=label, callback_data=f'veosel:{request_id}:{mid}')] for (mid, (label, _)) in VEO_MODELS.items()]
