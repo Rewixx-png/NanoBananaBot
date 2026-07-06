@@ -66,8 +66,8 @@ async def cmd_video(message: types.Message):
             downloaded = await message.bot.download_file(file_info.file_path)
             video_bytes = downloaded.read()
         except Exception:
-            await message.reply("❌ Видео удалено с сервера (истёк срок). Отправь ЗАНОВО — не реплаем.")
-            return
+            logger.warning("Video download failed, continuing without video attachment")
+            # Don't fail — continue with prompt only
     rows = [[InlineKeyboardButton(text=label, callback_data=f'veosel:{request_id}:{mid}')] for (mid, (label, _)) in VEO_MODELS.items()]
     keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
     reply_kwargs = {}
