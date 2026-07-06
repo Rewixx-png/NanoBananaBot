@@ -67,7 +67,9 @@ async def cmd_video(message: types.Message):
             video_bytes = downloaded.read()
         except Exception:
             logger.warning("Video download failed, continuing without video attachment")
-            # Don't fail — continue with prompt only
+    request_id = uuid.uuid4().hex[:10]
+    pending_video_requests[request_id] = {'user_id': message.from_user.id, 'chat_id': message.chat.id, 'source_message_id': message.message_id, 'message_thread_id': message.message_thread_id if message.chat.is_forum else None, 'prompt': prompt, 'image_bytes': image_bytes, 'video_bytes': video_bytes}
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     rows = [[InlineKeyboardButton(text=label, callback_data=f'veosel:{request_id}:{mid}')] for (mid, (label, _)) in VEO_MODELS.items()]
     keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
     reply_kwargs = {}
