@@ -1,7 +1,7 @@
 import time
 import uuid
-import logging
 import asyncio
+import logging
 
 from aiogram import F, types
 from aiogram.filters import Command
@@ -13,9 +13,7 @@ from state import (
     pending_tts_configs,
     tts_voice_previews,
 )
-from ai_services import (
-    generate_tts_with_gemini,
-)
+from services.audio_service import generate_tts_with_gemini
 from utils import check_membership
 from handlers.common import (
     _track_user,
@@ -24,9 +22,14 @@ from handlers.common import (
 )
 from handlers.media_gen import media_router, TTS_MODELS
 
-logger = logging.getLogger(__name__)
 
 _tts_awaiting_input: dict = {}
+TTS_COOLDOWN_SECONDS = 10
+
+def _tts_model_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=label, callback_data=f'ttssel:{request_id}:{model_id}')] for (model_id, (label, _)) in TTS_MODELS.items()]
+    rows.append([InlineKeyboardButton(text='Отмена', callback_data=f'ttsabort:{request_id}')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @media_router.message(Command('tts'))
@@ -34,30 +37,70 @@ async def cmd_tts(message: types.Message):
     _track_user(message)
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member and message.chat.type != 'private':
-        await message.reply('Доступ запрещен.')
+        await message.reply('Доступ закрыт: сначала вступи в обязательную беседу, потом озвучивай.')
+        return
+    prompt = (message.text or '').replace('/tts', '').strip()
+    if not prompt:
+        await message.reply('Текст пустой. Напиши, что озвучить: /tts Привет, ублюдок!')
+        return
+    if not TTS_MODELS:
+        await message.reply('TTS-модели не загрузились. Попробуй /tts позже; повторный тык сейчас ничего не исправит.')
         return
     current_time = time.time()
     last_time = user_tts_cooldowns.get(message.from_user.id, 0)
-    if current_time - last_time < 30:
-        await message.reply(f'Подожди еще {int(30 - (current_time - last_time))} сек.')
+    if current_time - last_time < TTS_COOLDOWN_SECONDS:
+        await message.reply(f'Озвучка уже запускалась. Подожди ещё {int(TTS_COOLDOWN_SECONDS - (current_time - last_time))} сек.')
         return
     user_tts_cooldowns[message.from_user.id] = current_time
-    prompt = (message.text or '').replace('/tts', '').strip()
-    if not prompt:
-        await message.reply('Напиши текст после команды, например:\n/tts Привет, ублюдок!')
-        return
     request_id = uuid.uuid4().hex[:10]
     thread_id = message.message_thread_id if message.chat.is_forum else None
     pending_tts_requests[request_id] = {'user_id': message.from_user.id, 'chat_id': message.chat.id, 'source_message_id': message.message_id, 'message_thread_id': thread_id, 'prompt': prompt, 'username': message.from_user.username or '', 'first_name': message.from_user.first_name or 'Аноним'}
-    if not TTS_MODELS:
-        await message.reply('Нет доступных TTS моделей.')
-        return
-    rows = [[InlineKeyboardButton(text=label, callback_data=f'ttssel:{request_id}:{mid}')] for (mid, (label, _)) in TTS_MODELS.items()]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+    keyboard = _tts_model_keyboard(request_id)
     reply_kwargs = {}
     if message.chat.is_forum and thread_id:
         reply_kwargs['message_thread_id'] = thread_id
-    await message.reply('Выберите модель TTS:', reply_markup=keyboard, **reply_kwargs)
+    await message.reply('Выбирай TTS-модель. Не знаешь разницу — бери Flash.', reply_markup=keyboard, **reply_kwargs)
+
+@media_router.callback_query(F.data.startswith('ttsabort:'))
+async def handle_tts_abort(callback: types.CallbackQuery):
+    request_id = (callback.data or '').removeprefix('ttsabort:')
+    request_data = pending_tts_requests.get(request_id) or pending_tts_configs.get(request_id)
+    if not request_data:
+        await callback.answer('Запрос уже завершён.', show_alert=True)
+        return
+    if callback.from_user.id != request_data['user_id']:
+        await callback.answer('Только автор запроса может его отменить.', show_alert=True)
+        return
+    pending_tts_requests.pop(request_id, None)
+    pending_tts_configs.pop(request_id, None)
+    _tts_awaiting_input.pop((request_data['chat_id'], request_data['user_id']), None)
+    await callback.answer('Отменено')
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='← К созданию', callback_data='menu:create')]])
+    await callback.message.edit_text('Генерация аудио отменена.', reply_markup=keyboard)
+
+
+@media_router.callback_query(F.data.startswith('ttsback:'))
+async def handle_tts_back(callback: types.CallbackQuery):
+    request_id = (callback.data or '').removeprefix('ttsback:')
+    config = pending_tts_configs.get(request_id)
+    if not config:
+        await callback.answer('Запрос устарел.', show_alert=True)
+        return
+    if callback.from_user.id != config['user_id']:
+        await callback.answer('Только автор запроса.', show_alert=True)
+        return
+    request_data = {key: value for key, value in config.items() if key not in {'model', 'label', 'cfg'}}
+    try:
+        await callback.message.edit_text('Выбирай TTS-модель.', reply_markup=_tts_model_keyboard(request_id))
+    except Exception as e:
+        logging.warning(f'TTS back edit failed: {type(e).__name__}: {e}', exc_info=True)
+        await callback.answer(f'Не удалось вернуться: {type(e).__name__}: {e}', show_alert=True)
+        return
+    pending_tts_configs.pop(request_id, None)
+    _tts_awaiting_input.pop((config['chat_id'], config['user_id']), None)
+    pending_tts_requests[request_id] = request_data
+    await callback.answer()
+
 
 @media_router.callback_query(F.data.startswith('ttssel:'))
 async def handle_tts_model_select(callback: types.CallbackQuery):
@@ -200,13 +243,14 @@ async def handle_tts_generate(callback: types.CallbackQuery):
     if len(parts) != 2:
         return
     (_, request_id) = parts
-    d = pending_tts_configs.pop(request_id, None)
+    d = pending_tts_configs.get(request_id)
     if not d:
         await callback.answer('Запрос устарел.', show_alert=True)
         return
     if callback.from_user.id != d['user_id']:
         await callback.answer('Только автор.', show_alert=True)
         return
+    pending_tts_configs.pop(request_id, None)
     await callback.answer()
     reply_kwargs = {'message_thread_id': d.get('message_thread_id')} if d.get('message_thread_id') else {}
     try:

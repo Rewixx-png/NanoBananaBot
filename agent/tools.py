@@ -3,16 +3,17 @@ import json
 import math
 import operator
 import os
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 
 import aiohttp
 
 from services.security_utils import is_safe_url
 
-from .workspace import AgentWorkspace
+if TYPE_CHECKING:
+    from .workspace import AgentWorkspace
 
-_TG_MAX_BYTES = 48 * 1024 * 1024
-
+from config import TELEGRAM_MEDIA_MAX_BYTES
+_TG_MAX_BYTES = TELEGRAM_MEDIA_MAX_BYTES
 
 async def _tool_fetch_json(url: str) -> str:
     if not is_safe_url(url):
@@ -73,7 +74,7 @@ def _ast_eval(expr: str) -> str:
 
 async def _tool_read_bot_logs(lines: int = 100) -> str:
     """Read the last N lines of the bot's own log file from the host."""
-    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log")
+    log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bot.log")
     if not os.path.exists(log_path):
         return "bot.log not found."
     try:
@@ -90,8 +91,22 @@ async def _tool_send_workspace_file(rel_path: str, caption: str, ws: "AgentWorks
         full = ws._safe_path(rel_path)
     except ValueError as e:
         return f"Access denied: {e}"
-    if not os.path.exists(full):
-        return f"[НЕ НАЙДЕНО] File not found: {rel_path}"
+    if os.path.isdir(full):
+        # Zip the directory and send
+        import shutil, tempfile
+        tmp = tempfile.mktemp(suffix='.zip')
+        shutil.make_archive(tmp[:-4], 'zip', full)
+        size = os.path.getsize(tmp)
+        if size > _TG_MAX_BYTES:
+            os.remove(tmp)
+            return f"Directory too large ({size // 1024 // 1024} MB > 48 MB)."
+        with open(tmp, "rb") as f:
+            data = f.read()
+        os.remove(tmp)
+        filename = os.path.basename(rel_path.rstrip('/')) + '.zip'
+        await send_cb({"type": "document", "data": data,
+                       "caption": (caption[:1024] or filename)[:1024], "filename": filename})
+        return f"[ОТПРАВЛЕНО] Архив '{filename}' ({size // 1024} KB) отправлен."
     size = os.path.getsize(full)
     if size > _TG_MAX_BYTES:
         return f"File too large ({size // 1024 // 1024} MB > 48 MB)."
@@ -101,8 +116,6 @@ async def _tool_send_workspace_file(rel_path: str, caption: str, ws: "AgentWorks
     await send_cb({"type": "document", "data": data,
                    "caption": caption[:1024] or filename, "filename": filename})
     return f"[ОТПРАВЛЕНО] Файл '{filename}' ({size // 1024} KB) отправлен."
-
-
 async def _tool_create_file(filename: str, content: str, caption: str, send_cb: Callable) -> str:
     data = content.encode("utf-8")
     if len(data) > _TG_MAX_BYTES:

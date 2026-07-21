@@ -1,11 +1,10 @@
 """Telegram Bot API tools and dispatch for NanoHatani agent."""
+import time
 
-import logging
 from typing import Callable, Optional, Tuple
 
 import aiohttp
 
-logger = logging.getLogger(__name__)
 
 _PRIVILEGED = {
     "tg_ban_user", "tg_unban_user", "tg_kick_user", "tg_restrict_member", "tg_promote_member",
@@ -81,28 +80,35 @@ async def handle_tg_tool(
         return result, None
 
     if name == "tg_ban_user":
-        await _send({"type": "tg_ban", "user_id": args.get("user_id"),
-                     "reason": args.get("reason", ""), "until_date": args.get("until_date")})
-        return f"Пользователь {args.get('user_id')} заблокирован.", None
+        r = await _tg_api("banChatMember", {"chat_id": chat_id, "user_id": args.get("user_id"),
+            "until_date": args.get("until_date", 0)})
+        if r.get("ok"):
+            return f"✅ Пользователь {args.get('user_id')} забанен.", None
+        return f"❌ Ошибка бана: {r.get('description','?')}", None
 
     if name == "tg_unban_user":
-        await _send({"type": "tg_unban", "user_id": args.get("user_id")})
-        return f"Пользователь {args.get('user_id')} разбанен.", None
+        r = await _tg_api("unbanChatMember", {"chat_id": chat_id, "user_id": args.get("user_id")})
+        if r.get("ok"):
+            return f"✅ Пользователь {args.get('user_id')} разбанен.", None
+        return f"❌ Ошибка разбана: {r.get('description','?')}", None
 
     if name == "tg_kick_user":
-        await _send({"type": "tg_kick", "user_id": args.get("user_id"),
-                     "reason": args.get("reason", "")})
-        return f"Пользователь {args.get('user_id')} кикнут.", None
+        r = await _tg_api("banChatMember", {"chat_id": chat_id, "user_id": args.get("user_id"),
+            "until_date": int(time.time()) + 60})
+        if r.get("ok"):
+            return f"✅ Пользователь {args.get('user_id')} кикнут.", None
+        return f"❌ Ошибка кика: {r.get('description','?')}", None
 
     if name == "tg_send_chat_action":
         await _send({"type": "tg_chat_action", "action": args.get("action", "typing")})
         return "Действие отправлено.", None
     if name == "tg_restrict_member":
-        await _send({"type": "tg_restrict", "user_id": args.get("user_id"),
-                     "can_send_messages": args.get("can_send_messages", False),
-                     "can_send_media": args.get("can_send_media", False),
-                     "until_date": args.get("until_date")})
-        return f"Пользователь {args.get('user_id')} ограничен.", None
+        r = await _tg_api("restrictChatMember", {"chat_id": chat_id, "user_id": args.get("user_id"),
+            "permissions": {"can_send_messages": args.get("can_send_messages", False),
+                           "can_send_media": args.get("can_send_media", False)}})
+        if r.get("ok"):
+            return f"✅ Пользователь {args.get('user_id')} ограничен.", None
+        return f"❌ Ошибка: {r.get('description','?')}", None
     if name == "tg_unpin_message":
         await _send({"type": "tg_unpin", "message_id": args.get("message_id")})
         return "Сообщение откреплено.", None
@@ -158,13 +164,20 @@ async def handle_tg_tool(
                      "address": args.get("address","")})
         return "[ОТПРАВЛЕНО] Место отправлено.", None
     if name == "tg_promote_member":
-        await _send({"type": "tg_promote", "user_id": args.get("user_id"),
-                     "can_delete_messages": args.get("can_delete_messages", False),
-                     "can_pin_messages": args.get("can_pin_messages", False),
-                     "can_manage_chat": args.get("can_manage_chat", False),
-                     "can_ban_members": args.get("can_ban_members", False),
-                     "custom_title": args.get("custom_title","")})
-        return f"Пользователь {args.get('user_id')} обновлён.", None
+        user_id = args.get("user_id")
+        params = {"chat_id": chat_id, "user_id": user_id}
+        for perm in ("can_delete_messages","can_pin_messages","can_manage_chat",
+                      "can_ban_members","can_manage_video_chats","can_invite_users"):
+            if args.get(perm) is not None:
+                params[perm] = args.get(perm)
+            else:
+                params[perm] = True  # default: grant all
+        if args.get("custom_title"):
+            params["custom_title"] = args["custom_title"]
+        r = await _tg_api("promoteChatMember", params)
+        if r.get("ok"):
+            return f"✅ Пользователь {user_id} повышен до администратора.", None
+        return f"❌ Ошибка: {r.get('description','?')}", None
     if name == "tg_get_chat_member":
         r = await _tg_api("getChatMember", {"chat_id": chat_id, "user_id": args.get("user_id")})
         if not r.get("ok"):

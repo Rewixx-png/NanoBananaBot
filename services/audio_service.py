@@ -1,22 +1,16 @@
 import asyncio
 import base64
-import io
-import json
 import logging
-import re
-import wave
 import aiohttp
 from typing import Tuple, Optional
 
 from keys import load_keys, remove_key
-from shared_types import _models_cache, _MODELS_CACHE_TTL, _pretty_model_name, _build_text_system_prompt
+from shared_types import _models_cache, _MODELS_CACHE_TTL, _pretty_model_name, _build_text_system_prompt, _gemini_url, _gemini_headers, gemini_post, gemini_text_of
 
-logger = logging.getLogger(__name__)
 
 # ── Audio service implementation ──────────────────────────────────────────
 async def analyze_voice_with_gemini(audio_bytes: bytes, mime_type: str, prompt: str) -> str:
-    keys = await load_keys()
-    if not keys:
+    if not await load_keys():
         return 'Блять, ключи закончились, иди нахуй.'
     if not prompt:
         prompt = 'Что сказано в этом голосовом сообщении? Транскрибируй и ответь по существу.'
@@ -30,29 +24,17 @@ async def analyze_voice_with_gemini(audio_bytes: bytes, mime_type: str, prompt: 
         'contents': [{'role': 'user', 'parts': parts}],
         'generationConfig': {'temperature': 1.0, 'thinkingConfig': {'thinkingLevel': 'minimal'}},
     }
-    for key in keys:
-        url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={key}'
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        try:
-                            return data['candidates'][0]['content']['parts'][0]['text']
-                        except KeyError:
-                            return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
-                    elif resp.status in [429, 403, 400]:
-                        resp_text = await resp.text()
-                        logging.warning(f'Ошибка ключа (аудио) {key[:10]}... Код: {resp.status}. Текст: {resp_text}')
-                        if resp.status == 400 and any(w in resp_text.lower() for w in ('safety', 'prohibited', 'harm', 'block', 'policy', 'recitation')):
-                            return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
-                        remove_key(key, resp.status)
-                        continue
-                    else:
-                        continue
-        except Exception as e:
-            logging.error(f'Сетевая ошибка (аудио): {e}')
-            continue
+    data, key, err = await gemini_post("models/gemini-3.5-flash:generateContent", payload, timeout=30)
+    if data:
+        text = gemini_text_of(data)
+        if not text:
+            return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
+        return text
+    if err:
+        err_lower = err.lower()
+        if any(w in err_lower for w in ('safety', 'prohibited', 'harm', 'block', 'policy', 'recitation')):
+            return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
+        logging.warning(f'Ошибка аудио Gemini: {err}')
     return 'Все ключи проебаны или сдохли, отъебись.'
 async def fetch_gemini_tts_models() -> list:
     cache_key = 'gemini_tts'
@@ -62,10 +44,11 @@ async def fetch_gemini_tts_models() -> list:
     keys = await load_keys()
     if not keys:
         return []
-    url = f'https://generativelanguage.googleapis.com/v1beta/models?key={keys[0]}&pageSize=200'
+    url = _gemini_url("models") + "?pageSize=200"
+    headers = _gemini_headers(keys[0])
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     result = []
@@ -103,8 +86,7 @@ def _split_text(text: str, max_chars: int = 800) -> list:
 async def generate_tts_with_gemini(text: str, model: str, voice_name: str, temperature: float=1.0, language_code: str='ru-RU', scene: str='', style: str='', pace: str='', accent: str='', _is_chunk: bool=False) -> Tuple[Optional[bytes], Optional[str]]:
     import wave
     import io
-    keys = await load_keys()
-    if not keys:
+    if not await load_keys():
         return (None, 'Нет ключей Gemini.')
 
     if '#### TRANSCRIPT' in text:
@@ -217,103 +199,81 @@ async def generate_tts_with_gemini(text: str, model: str, voice_name: str, tempe
         full_text += '\n#### TRANSCRIPT\n'
     full_text += text
     last_err = 'Нет доступных ключей.'
-    keys_pool = keys.copy()
-    import random as _random
-    _random.shuffle(keys_pool)
-    for key in keys_pool:
-        url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}'
-        payload = {
-            'contents': [{'parts': [{'text': full_text}]}],
-            'generationConfig': {
-                'temperature': temperature,
-                'responseModalities': ['AUDIO'],
-                'speechConfig': {
-                    'languageCode': language_code,
-                    'voiceConfig': {'prebuiltVoiceConfig': {'voiceName': voice_name}}
-                }
-            },
-            'safetySettings': [
-                {'category': 'HARM_CATEGORY_HARASSMENT',       'threshold': 'BLOCK_NONE'},
-                {'category': 'HARM_CATEGORY_HATE_SPEECH',       'threshold': 'BLOCK_NONE'},
-                {'category': 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'threshold': 'BLOCK_NONE'},
-                {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_NONE'},
-                {'category': 'HARM_CATEGORY_CIVIC_INTEGRITY',   'threshold': 'BLOCK_NONE'},
-            ]
-        }
-        async with aiohttp.ClientSession() as session:
-            for attempt in range(2):
-                try:
-                    async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=300)) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            candidates = data.get('candidates', [])
-                            if not candidates:
-                                remove_key(key, 400)
-                                last_err = 'Gemini заблокировал текст или вернул пустой ответ.'
-                                break
-                            candidate = candidates[0]
-                            finish_reason = candidate.get('finishReason', '')
-                            if finish_reason and finish_reason != 'STOP' and finish_reason != 'MAX_TOKENS':
-                                remove_key(key, 400)
-                                last_err = f'Ошибка генерации (Finish Reason: {finish_reason}).'
-                                break
-                            parts = candidate.get('content', {}).get('parts', [])
-                            for part in parts:
-                                if 'inlineData' in part:
-                                    b64_data = part['inlineData']['data']
-                                    pcm_data = base64.b64decode(b64_data)
-                                    if _is_chunk:
-                                        return (pcm_data, None)
-                                    import tempfile
-                                    import subprocess
-                                    import os
-                                    (fd, temp_wav) = tempfile.mkstemp(suffix='.wav')
-                                    os.close(fd)
-                                    with wave.open(temp_wav, 'wb') as wav_file:
-                                        wav_file.setnchannels(1)
-                                        wav_file.setsampwidth(2)
-                                        wav_file.setframerate(24000)
-                                        wav_file.writeframes(pcm_data)
-                                    temp_ogg = temp_wav.replace('.wav', '.ogg')
-                                    subprocess.run(['ffmpeg', '-i', temp_wav, '-c:a', 'libopus', '-b:a', '48k', '-y', temp_ogg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                                    ogg_data = None
-                                    if os.path.exists(temp_ogg):
-                                        with open(temp_ogg, 'rb') as f:
-                                            ogg_data = f.read()
-                                        os.remove(temp_ogg)
-                                    os.remove(temp_wav)
-                                    if ogg_data:
-                                        return (ogg_data, None)
-                                    wav_io = io.BytesIO()
-                                    with wave.open(wav_io, 'wb') as wav_file:
-                                        wav_file.setnchannels(1)
-                                        wav_file.setsampwidth(2)
-                                        wav_file.setframerate(24000)
-                                        wav_file.writeframes(pcm_data)
-                                    return (wav_io.getvalue(), None)
-                            last_err = 'Gemini не вернул аудио-данные.'
-                            break
-                        else:
-                            remove_key(key, resp.status)
-                            last_err = f'Ошибка Gemini TTS ({resp.status})'
-                            if attempt < 1:
-                                await asyncio.sleep(0.3)
-                                continue
-                            break
-                except asyncio.TimeoutError:
-                    last_err = 'Сетевая ошибка: Таймаут (API долго думало)'
-                    if attempt < 1:
-                        await asyncio.sleep(0.3)
-                        continue
-                    break
-                except Exception as e:
-                    import traceback
-                    logging.error(f"TTS Error: {traceback.format_exc()}")
-                    last_err = f'Сетевая ошибка: {type(e).__name__} {e}'
-                    if attempt < 1:
-                        await asyncio.sleep(0.3)
-                        continue
-                    break
+    payload = {
+        'contents': [{'parts': [{'text': full_text}]}],
+        'generationConfig': {
+            'temperature': temperature,
+            'responseModalities': ['AUDIO'],
+            'speechConfig': {
+                'languageCode': language_code,
+                'voiceConfig': {'prebuiltVoiceConfig': {'voiceName': voice_name}}
+            }
+        },
+        'safetySettings': [
+            {'category': 'HARM_CATEGORY_HARASSMENT',       'threshold': 'BLOCK_NONE'},
+            {'category': 'HARM_CATEGORY_HATE_SPEECH',       'threshold': 'BLOCK_NONE'},
+            {'category': 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'threshold': 'BLOCK_NONE'},
+            {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_NONE'},
+            {'category': 'HARM_CATEGORY_CIVIC_INTEGRITY',   'threshold': 'BLOCK_NONE'},
+        ]
+    }
+    for attempt in range(2):
+        data, used_key, err = await gemini_post(f"models/{model}:generateContent", payload, timeout=300)
+        if data:
+            candidates = data.get('candidates', [])
+            if not candidates:
+                if used_key:
+                    remove_key(used_key, 400)
+                last_err = 'Gemini заблокировал текст или вернул пустой ответ.'
+                break
+            candidate = candidates[0]
+            finish_reason = candidate.get('finishReason', '')
+            if finish_reason and finish_reason != 'STOP' and finish_reason != 'MAX_TOKENS':
+                if used_key:
+                    remove_key(used_key, 400)
+                last_err = f'Ошибка генерации (Finish Reason: {finish_reason}).'
+                break
+            parts = candidate.get('content', {}).get('parts', [])
+            for part in parts:
+                if 'inlineData' in part:
+                    b64_data = part['inlineData']['data']
+                    pcm_data = base64.b64decode(b64_data)
+                    if _is_chunk:
+                        return (pcm_data, None)
+                    import tempfile
+                    import subprocess
+                    import os
+                    (fd, temp_wav) = tempfile.mkstemp(suffix='.wav')
+                    os.close(fd)
+                    with wave.open(temp_wav, 'wb') as wav_file:
+                        wav_file.setnchannels(1)
+                        wav_file.setsampwidth(2)
+                        wav_file.setframerate(24000)
+                        wav_file.writeframes(pcm_data)
+                    temp_ogg = temp_wav.replace('.wav', '.ogg')
+                    subprocess.run(['ffmpeg', '-i', temp_wav, '-c:a', 'libopus', '-b:a', '48k', '-y', temp_ogg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    ogg_data = None
+                    if os.path.exists(temp_ogg):
+                        with open(temp_ogg, 'rb') as f:
+                            ogg_data = f.read()
+                        os.remove(temp_ogg)
+                    os.remove(temp_wav)
+                    if ogg_data:
+                        return (ogg_data, None)
+                    wav_io = io.BytesIO()
+                    with wave.open(wav_io, 'wb') as wav_file:
+                        wav_file.setnchannels(1)
+                        wav_file.setsampwidth(2)
+                        wav_file.setframerate(24000)
+                        wav_file.writeframes(pcm_data)
+                    return (wav_io.getvalue(), None)
+            last_err = 'Gemini не вернул аудио-данные.'
+            break
+        if err:
+            last_err = f'Ошибка Gemini TTS: {err}'
+            if attempt < 1:
+                await asyncio.sleep(0.3)
+                continue
+            break
     return (None, f'Все API ключи исчерпаны или недоступны. Последняя ошибка: {last_err}')
-    return (None, 'Все модели недоступны.')
 

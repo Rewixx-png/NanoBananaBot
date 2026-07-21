@@ -6,24 +6,23 @@ import logging
 import os
 import re
 import tempfile
-from typing import Callable, Optional, Tuple
+from typing import Callable
 from urllib.parse import urlparse
 
 import aiohttp
 
-from ai_services import (
-    generate_image_with_gemini,
-    generate_image_with_gpt,
-    generate_tts_with_gemini,
-)
+from services.gemini_image import generate_image_with_gemini
+from services.openai_service import generate_image_with_gpt
+from services.audio_service import generate_tts_with_gemini
 from keys import load_keys, load_openai_keys
 
+from config import AGENT_VIDEO_DOWNLOAD_TIMEOUT, TELEGRAM_MEDIA_MAX_BYTES
 from .search import _fc_search, _fc_scrape, _search_image_urls, _download_bytes, _image_is_relevant
 
 logger = logging.getLogger(__name__)
 
-_VDL_TIMEOUT  = 120.0
-_TG_MAX_BYTES = 48 * 1024 * 1024
+_VDL_TIMEOUT = AGENT_VIDEO_DOWNLOAD_TIMEOUT
+_TG_MAX_BYTES = TELEGRAM_MEDIA_MAX_BYTES
 
 
 async def _tool_search_image(
@@ -311,7 +310,7 @@ async def _tool_search_video(
 
     async def _st(t: str):
         try: await status_cb(t)
-        except Exception: pass
+        except Exception as e: logger.debug(f"status_cb suppressed: {e}")
 
     for rnd in range(max_rounds):
         if rnd == 0:
@@ -388,9 +387,6 @@ async def _tool_tts(text: str, voice: str, lang: str, send_cb: Callable) -> str:
     return "Audio sent."
 
 
-_COOKIE_MASK_RE = re.compile(
-    r'(?m)^(#?HttpOnly_\S+\s+\S+\s+\S+\s+\S+\s+\d+\s+\S+\s+).+$'
-)
 
 
 async def _tool_qr_code(text: str, caption: str, send_cb: Callable) -> str:

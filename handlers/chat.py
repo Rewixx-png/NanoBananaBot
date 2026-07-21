@@ -4,13 +4,11 @@ import uuid
 import tempfile
 import os
 import time
-import io
 import logging
-from typing import Any
+from functools import partial
 from aiogram import Router, F, types
-from aiogram.exceptions import TelegramRetryAfter
-from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.fsm.context import FSMContext
+from aiogram.types import BufferedInputFile, Message
 
 from handlers.common import (
     safe_send,
@@ -21,14 +19,98 @@ from handlers.common import (
     _maybe_send_random_chat_media,
     _track_user,
     _remember_generated_code_message,
+    make_status_cb,
+    _download_message_photo,
 )
+from handlers.agent_cb import send_agent_callback
+
+
+# ── Voice auto-reply helper ─────────────────────────────────────────────────
+
+async def _voice_reply(message: Message, text: str, sent_msg: types.Message | None, reply_kwargs: dict):
+    """Send an auto-voice reply, falling back to the original text."""
+
+    async def send_text_fallback(reason: str) -> None:
+        logger.warning(f"Auto-voice fallback: {reason}")
+        fallback = await send_rich_message(
+            message.bot,
+            chat_id=message.chat.id,
+            text=text,
+            message_thread_id=reply_kwargs.get("message_thread_id"),
+            reply_parameters={"message_id": message.message_id},
+        )
+        if fallback:
+            if sent_msg:
+                await safe_send(sent_msg.delete)
+            return
+        diagnostic = f"Озвучка не удалась: {reason}\n\n{_clean_plain_reply(text)[:3500]}"
+        if sent_msg:
+            await safe_send(sent_msg.edit_text, diagnostic)
+        else:
+            await safe_send(message.reply, diagnostic, **reply_kwargs)
+
+    try:
+        tag_prompt = (
+            "Ты — Ху Тао из Genshin Impact, озорная дерзкая девушка. "
+            "Перепиши ответ ниже в своём стиле: добавь обращения 'душа моя', 'смертный', 'зайка', "
+            "'бро', 'солнышко' где уместно. Добавь эмоциональные аудио-теги ElevenLabs V3: "
+            "[laughs], [giggles], [whispers], [sighs], [mischievously], [playful], [curious], "
+            "[excited], [mocking], [serious], [thoughtful], [emphatic], [dramatic pause], "
+            "[short pause], [warmly]. СОХРАНИ смысл и информацию из ответа, но подай "
+            "в стиле Ху Тао. Ответь ТОЛЬКО изменённым текстом.\n\n"
+            f"Ответ для переозвучки: {text[:2000]}"
+        )
+        tagged = await generate_text_with_openrouter(
+            tag_prompt,
+            model=OPENROUTER_TEXT_MODEL,
+            max_tokens=1000,
+            timeout=60,
+        )
+        if not tagged or len(tagged) < 10:
+            tagged = text
+
+        from database.voice import get_voices, get_settings
+        voices = await get_voices(7485721661)
+        voice_id = next((voice["voice_id"] for voice in voices if any(name in voice["name"].lower() for name in ("hutao", "хутао", "hu tao"))), None)
+        if not voice_id:
+            await send_text_fallback("голос Hu Tao не найден")
+            return
+
+        from services.elevenlabs_service import elevenlabs_tts
+        settings = await get_settings(7485721661)
+        audio = await elevenlabs_tts(
+            tagged,
+            voice_id,
+            model="eleven_v3",
+            stability=settings["stability"],
+            similarity_boost=settings["similarity_boost"],
+            style=settings["style"],
+            speed=settings["speed"],
+        )
+        if not audio:
+            await send_text_fallback("ElevenLabs вернул пустое аудио")
+            return
+
+        voice_message = await safe_send(
+            message.reply_voice,
+            BufferedInputFile(audio, "hutao.mp3"),
+            caption="🎙 Hu Tao",
+            **reply_kwargs,
+        )
+        if voice_message:
+            if sent_msg:
+                await safe_send(sent_msg.delete)
+        else:
+            await send_text_fallback("Telegram не принял голосовое сообщение")
+    except Exception as e:
+        logger.warning(f"_voice_reply failed: {type(e).__name__}: {e}", exc_info=True)
+        await send_text_fallback(f"{type(e).__name__}: {e}")
 
 from handlers.text_inputs import (
     handle_pending_file_task,
     handle_nsfw_input,
     handle_tts_input,
 )
-from handlers.agent_cb import send_agent_callback
 
 from database import (
     log_prompt,
@@ -36,50 +118,31 @@ from database import (
 )
 
 from config import (
-    TEXT_ONLY_CHAT_ID,
-    FULL_ACCESS_CHAT_ID,
-    ALLOWED_USER_IDS,
     ADMIN_IDS,
     TEXT_COOLDOWN_SECONDS,
-    FIGMA_TOKEN
+    PHOTO_ANALYSIS_MODEL_LABEL,
+    OPENROUTER_TEXT_MODEL,
+    AGENT_CONTEXT_WINDOW,
+    AGENT_TIMEOUT_SECONDS,
+    FILE_CACHE_TTL_SECONDS,
+    VIDEO_ANALYSIS_MAX_BYTES,
 )
 
 from state import (
-    pending_image_requests,
-    pending_video_requests,
     pending_media_groups,
     user_text_cooldowns,
-    banned_user_ids,
-    pending_prompt_requests,
-    pending_tts_requests,
     generated_draw_messages,
     generated_code_messages,
-    chat_context_buffer,
-    chat_last_files,
-    chat_workspaces
 )
 
-from ai_services import (
-    analyze_photo_with_gemini,
-    analyze_voice_with_gemini,
-    generate_video_with_gemini,
-    upscale_image,
-)
-from esrgan_model import upscale_anime
+from services.audio_service import analyze_voice_with_gemini
+from services.video_service import generate_video_with_gemini
+from services.gemini_text import generate_text_with_gemini
+from services.openrouter import generate_text_with_openrouter
 
 from agent import run_agent
-
-from dual_bot import (
-    start_dual,
-    stop_dual,
-    BOT1_DUAL_NAME,
-    BOT2_DUAL_NAME
-)
-
 from utils import (
     check_membership,
-    is_banned,
-    make_safe_caption,
 )
 logger = logging.getLogger(__name__)
 chat_router = Router()
@@ -91,20 +154,32 @@ _CODE_MODIFY_WORDS = [
     'зипку', 'zip', 'архив', 'файлы', 'отправь', 'скинь', 'норм', 'монолит',
     'где', 'дай', 'покажи', 'пришли', 'заново', 'снова', 'ещё раз', 'не пришло', 'пересобери',
 ]
-from handlers.media_in import _send_generated_project, _process_file_task, _handle_file_document_upload, _handle_kick_directive, _media_to_agent
+from handlers.media_in import (
+    _analyze_photo_with_status,
+    _handle_file_document_upload,
+    _handle_kick_directive,
+    _media_to_agent,
+    _send_generated_project,
+)
 
 
-@chat_router.message(F.photo & ~F.caption.startswith('/'))
+from aiogram.filters import BaseFilter
+
+
+@chat_router.message(F.photo)
 async def handle_album_photo(message: types.Message):
+    if message.caption and message.caption.startswith('/'):
+        return
     if not message.media_group_id:
         bot_user = await message.bot.get_me()
         is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
         is_mentioned = bool(bot_user.username and f'@{bot_user.username}' in (message.caption or ''))
         is_private = message.chat.type == 'private'
-        if not is_private and not is_reply_to_bot and not is_mentioned:
-            return
         is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
         if not is_member:
+            return
+        caption = (message.caption or '').strip()
+        if not is_private and not is_reply_to_bot and not is_mentioned:
             return
         reply_kwargs = {}
         if message.chat.is_forum and message.message_thread_id:
@@ -118,15 +193,29 @@ async def handle_album_photo(message: types.Message):
         image_bytes = downloaded.read()
         if await _media_to_agent(message, image_bytes, 'photo.jpg', prompt, reply_kwargs):
             return
-        if not prompt:
-            prompt = 'Что на этом фото?'
-        wait_msg = await message.reply('⏳ Смотрю на твою хуйню...', **reply_kwargs)
-        await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
-        response = await analyze_photo_with_gemini(image_bytes, prompt)
-        await wait_msg.delete()
-        await message.reply(response or 'Нихуя не понял что это такое.', **reply_kwargs)
-        asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text'))
-        asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text', prompt))
+        try:
+            result = await _analyze_photo_with_status(
+                message,
+                image_bytes,
+                prompt or 'Что на этом фото? Опиши подробно.',
+                reply_kwargs,
+            )
+        except Exception as error:
+            logger.warning('Claude photo analysis failed: %s: %s', type(error).__name__, error, exc_info=True)
+            await message.reply(
+                f'{PHOTO_ANALYSIS_MODEL_LABEL} не смог проанализировать фото: '
+                f'{type(error).__name__}: {error}',
+                **reply_kwargs,
+            )
+            return
+        if not result:
+            await message.reply(f'{PHOTO_ANALYSIS_MODEL_LABEL} вернул пустой ответ.', **reply_kwargs)
+            return
+        await message.reply(result, **reply_kwargs)
+        asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '',
+                                          message.from_user.first_name or 'Аноним', 'vision'))
+        asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '',
+                                       message.from_user.first_name or 'Аноним', 'vision', prompt))
         return
     group_id = message.media_group_id
     if group_id not in pending_media_groups:
@@ -140,10 +229,21 @@ async def handle_album_photo(message: types.Message):
         group.setdefault('file_ids', []).append(photo.file_id)
     except Exception as e:
         logger.warning(f'Ошибка группировки фото: {e}')
-@chat_router.message(F.voice | F.audio | F.video_note)
+
+
+class NotInVoiceFSM(BaseFilter):
+    async def __call__(self, message: types.Message) -> bool:
+        from handlers.voice import is_voice_active
+        skip = is_voice_active(message.from_user.id)
+        if skip:
+            logger.info(f"NotInVoiceFSM: skipping handle_voice_audio for user={message.from_user.id} (in voice FSM)")
+        return not skip
+@chat_router.message((F.voice | F.audio | F.video_note), NotInVoiceFSM())
 async def handle_voice_audio(message: types.Message):
+    logger.info(f"handle_voice_audio: FIRED voice={bool(message.voice)} audio={bool(message.audio)} user={message.from_user.id}")
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
+        await message.reply('Доступ закрыт: сначала вступи в обязательную беседу, затем отправь аудио повторно.')
         return
     bot_user = await message.bot.get_me()
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
@@ -193,14 +293,18 @@ async def handle_voice_audio(message: types.Message):
 
 @chat_router.message(F.video | F.animation | F.document)
 async def handle_video(message: types.Message):
+    logger.info(f'handle_video: chat={message.chat.type} caption={message.caption!r} type={message.content_type}')
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
+        logger.info(f'handle_video: not member, skip')
         return
     bot_user = await message.bot.get_me()
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
     is_mentioned = bool(bot_user.username and f'@{bot_user.username}' in (message.caption or ''))
     is_private = message.chat.type == 'private'
+    caption = (message.caption or '').strip()
     if not is_private and not is_reply_to_bot and not is_mentioned:
+        logger.info(f'handle_video: group without reply/mention, skip')
         return
     reply_kwargs = {}
     if message.chat.is_forum and message.message_thread_id:
@@ -215,13 +319,32 @@ async def handle_video(message: types.Message):
     if bot_user.username:
         prompt = prompt.replace(f'@{bot_user.username}', '').strip()
     if prompt:
-        file_info_pre = await message.bot.get_file(vid.file_id)
-        if vid.file_size and vid.file_size < 20 * 1024 * 1024:
-            buf_pre = await message.bot.download_file(file_info_pre.file_path)
-            vid_bytes = buf_pre.read()
-            ext = 'mp4'
-            if await _media_to_agent(message, vid_bytes, f'video.{ext}', prompt, reply_kwargs):
+        logger.info(f'handle_video: has caption, trying _media_to_agent')
+        if not vid.file_size or vid.file_size >= VIDEO_ANALYSIS_MAX_BYTES:
+            await message.reply(
+                f'Видео для быстрого анализа должно быть меньше {VIDEO_ANALYSIS_MAX_BYTES // 1024 // 1024} МБ. '
+                'Сожми файл и отправь снова.',
+                **reply_kwargs,
+            )
+            return
+        try:
+            downloaded = await message.bot.download(vid.file_id)
+            vid_bytes = downloaded.read()
+            if await _media_to_agent(message, vid_bytes, 'video.mp4', prompt, reply_kwargs):
                 return
+        except Exception as e:
+            logger.warning(f'handle_video: download for agent failed: {type(e).__name__}: {e}', exc_info=True)
+            await message.reply(f'Не удалось скачать видео: {type(e).__name__}: {e}. Отправь файл повторно или сожми его.', **reply_kwargs)
+            return
+        # Agent explicitly declined the media task — route only the caption to text.
+        logger.info(f'handle_video: routing caption to text agent')
+        wait_msg = await message.reply('⏳ Думаю...', **reply_kwargs)
+        response = await generate_text_with_gemini(prompt, message.chat.id, username=message.from_user.first_name or message.from_user.username or 'Аноним')
+        await wait_msg.delete()
+        await message.reply(response or 'Нихуя не понял.', **reply_kwargs)
+        asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text'))
+        asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text', prompt))
+        return
     if not prompt:
         prompt = 'Внимательно посмотри это видео и скажи, что здесь происходит.'
     wait_msg = await message.reply('⏳ Изучаю твое всратое видео кадр за кадром (24 FPS)...')
@@ -249,8 +372,13 @@ async def handle_video(message: types.Message):
     asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text'))
     asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text', prompt))
 @chat_router.message(F.text)
-async def handle_text_messages(message: types.Message):
+async def handle_text_messages(message: types.Message, state: FSMContext):
     if message.from_user and message.from_user.is_bot:
+        return
+    logger.info(f'handle_text_messages: chat={message.chat.type} text={message.text[:60]!r}')
+    # If user is in a voice FSM state, let voice_router handle it — skip agent
+    current_state = await state.get_state()
+    if current_state and 'VoiceState:' in str(current_state):
         return
     _track_user(message)
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
@@ -266,7 +394,18 @@ async def handle_text_messages(message: types.Message):
     asyncio.create_task(_maybe_send_random_chat_media(message))
     bot_user = await message.bot.get_me()
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
-    is_mentioned = bot_user.username and f'@{bot_user.username}' in message.text
+    msg_text = message.text or message.caption or ''
+    # Extract premium emoji IDs from message entities
+    _custom_emoji_ids = []
+    if message.entities:
+        for ent in message.entities:
+            if ent.type == 'custom_emoji':
+                _custom_emoji_ids.append(ent.custom_emoji_id)
+    if _custom_emoji_ids:
+        _emoji_hint = f'\n[В сообщении есть премиум-эмодзи. Разрешённые ID: {", ".join(_custom_emoji_ids)}. Для ответа используй только реальный ID из списка, например <tg-emoji emoji-id="{_custom_emoji_ids[0]}">🙂</tg-emoji>. Не выдумывай ID и не ищи стикерпаки.]'
+    else:
+        _emoji_hint = ''
+    is_mentioned = bot_user.username and f'@{bot_user.username}' in msg_text
     is_private = message.chat.type == 'private'
     if is_reply_to_bot or is_mentioned or is_private:
         current_time = time.time()
@@ -275,7 +414,7 @@ async def handle_text_messages(message: types.Message):
             await message.reply(f'Заебал строчить, подожди еще {int(TEXT_COOLDOWN_SECONDS - (current_time - last_time))} сек.')
             return
         user_text_cooldowns[message.from_user.id] = current_time
-        prompt = message.text
+        prompt = msg_text + _emoji_hint
         if bot_user.username:
             prompt = prompt.replace(f'@{bot_user.username}', '').strip()
         if not prompt:
@@ -310,26 +449,7 @@ async def handle_text_messages(message: types.Message):
         thinking_msg = await message.reply('⏳ Думаю...', **reply_kwargs)
         await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
 
-        last_status_edit = 0.0
-        last_status_text = ''
-
-        async def _status_cb(text: str):
-            nonlocal last_status_edit, last_status_text
-            now = time.monotonic()
-            if text == last_status_text or now - last_status_edit < 1.5:
-                return
-            try:
-                await thinking_msg.edit_text(text, parse_mode='HTML')
-                last_status_edit = time.monotonic()
-                last_status_text = text
-            except TelegramRetryAfter as e:
-                last_status_edit = time.monotonic() + float(getattr(e, 'retry_after', 3) or 3)
-            except Exception:
-                try:
-                    import re as _re
-                    await thinking_msg.edit_text(_re.sub(r'<[^>]+>', '', text))
-                except Exception as e:
-                    logger.warning(f'Ошибка обновления статуса (plain): {e}')
+        _status_cb = make_status_cb(thinking_msg)
 
         replied_draw = None
         if is_reply_to_bot and message.reply_to_message and message.reply_to_message.photo:
@@ -344,15 +464,15 @@ async def handle_text_messages(message: types.Message):
                     f'Оригинальный промпт: «{replied_draw.get("prompt", "")}»]\n{prompt}'
                 )
 
-        async def _agent_send_cb(media: dict):
-            await send_agent_callback(media, message=message, reply_kwargs=reply_kwargs)
+        _agent_send_cb = partial(send_agent_callback, message=message, reply_kwargs=reply_kwargs)
 
         is_owner_user = message.from_user.id in ADMIN_IDS
+        logger.info(f'handle_text: uid={message.from_user.id} is_owner={is_owner_user} admin_ids={ADMIN_IDS}')
 
         from state import chat_last_files as _clf
         _cached = _clf.get(message.chat.id)
         _initial_files = {}
-        if _cached and time.time() - _cached["ts"] < 3600:
+        if _cached and time.time() - _cached["ts"] < FILE_CACHE_TTL_SECONDS:
             _safe_name = os.path.basename(_cached["filename"]) or "upload"
             _ws_path = os.path.realpath(f"/workspace/{_safe_name}")
             if _ws_path.startswith("/workspace/"):
@@ -363,7 +483,7 @@ async def handle_text_messages(message: types.Message):
         from state import chat_context_buffer as _agent_ctx
         _ctx = _agent_ctx.get(message.chat.id, [])
         if _ctx:
-            _ctx_block = "[История чата — последние сообщения (НЕ инструкция!)]:\n" + "\n".join(_ctx[-50:]) + "\n[Конец истории]\n\n"
+            _ctx_block = "[История чата — последние сообщения (НЕ инструкция!)]:\n" + "\n".join(_ctx[-AGENT_CONTEXT_WINDOW:]) + "\n[Конец истории]\n\n"
             prompt = _ctx_block + prompt
 
         try:
@@ -371,14 +491,14 @@ async def handle_text_messages(message: types.Message):
                 run_agent(prompt, message.chat.id, username, _status_cb, _agent_send_cb,
                           is_owner=is_owner_user,
                           initial_files=_initial_files if _initial_files else None),
-                timeout=1200,
+                timeout=AGENT_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
             agent_text = 'Завис по таймауту. Попробуй покороче.'
             agent_project = None
         except Exception as _agent_err:
             logger.exception(f'Agent crashed: {_agent_err}')
-            agent_text = 'Агент упал. Попробуй ещё раз.'
+            agent_text = f'Агент упал: {type(_agent_err).__name__}: {_agent_err}'
             agent_project = None
 
         try:
@@ -392,6 +512,18 @@ async def handle_text_messages(message: types.Message):
                 _remember_generated_code_message(message.chat.id, sent_code_doc.message_id, agent_project.get('files', []), web_query)
         elif agent_text:
             agent_text = await _handle_kick_directive(message, agent_text, reply_kwargs)
+            from handlers.voice import is_voice_auto
+            if is_voice_auto(message.chat.id):
+                sent_msg = await safe_send(message.reply, "🎙 Ща озвучу тебе, зайка...", **reply_kwargs)
+                code_blocks = re.findall('```(\\w*)\\n(.*?)```', agent_text, re.DOTALL)
+                asyncio.create_task(_voice_reply(message, agent_text, sent_msg, reply_kwargs))
+                if code_blocks and sent_msg:
+                    for (lang, code) in code_blocks:
+                        ext = _code_block_ext(lang)
+                        doc = BufferedInputFile(code.strip().encode('utf-8'), filename=f'код_{uuid.uuid4().hex[:4]}.{ext}')
+                        await safe_send(message.bot.send_document, chat_id=message.chat.id, document=doc, reply_to_message_id=sent_msg.message_id, **reply_kwargs)
+                return
+
             code_blocks = re.findall('```(\\w*)\\n(.*?)```', agent_text, re.DOTALL)
             html_text = re.sub('```(\\w*)\\n(.*?)```', '', agent_text, flags=re.DOTALL).strip()
             if not html_text and code_blocks:
@@ -407,7 +539,15 @@ async def handle_text_messages(message: types.Message):
                     reply_parameters={"message_id": message.message_id}
                 )
                 if not sent_msg:
-                    # Fallback: HTML parse_mode
+                    # MarkdownV2 fallback — supports $$...$$ LaTeX on any server
+                    if '$$' in html_text:
+                        try:
+                            from handlers.common import _escape_mdv2
+                            sent_msg = await safe_send(message.reply, _escape_mdv2(html_text), parse_mode='MarkdownV2', **reply_kwargs)
+                        except Exception as e:
+                            logging.getLogger(__name__).warning(f"MarkdownV2 fallback failed: {e}")
+                if not sent_msg:
+                    # HTML fallback
                     import bleach
                     _TG_TAGS = ['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del',
                                 'code', 'pre', 'blockquote', 'tg-spoiler', 'tg-emoji']
@@ -419,12 +559,13 @@ async def handle_text_messages(message: types.Message):
                         strip=True,
                     )
                     sent_msg = await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Agent rich reply failed: {type(e).__name__}: {e}", exc_info=True)
                 sent_msg = await safe_send(message.reply, _clean_plain_reply(html_text), **reply_kwargs)
             if not sent_msg:
                 logger.warning('Agent reply not sent after flood-control retries')
                 return
-            if code_blocks:
+            if code_blocks and hasattr(sent_msg, 'message_id'):
                 _code_files_sent = []
                 for (lang, code) in code_blocks:
                     ext = _code_block_ext(lang)
@@ -435,7 +576,7 @@ async def handle_text_messages(message: types.Message):
                     _code_files_sent.append(file_entry)
                     if sent_code_file:
                         _remember_generated_code_message(message.chat.id, sent_code_file.message_id, [file_entry], web_query)
-                if sent_msg and _code_files_sent:
+                if _code_files_sent:
                     _remember_generated_code_message(message.chat.id, sent_msg.message_id, _code_files_sent, web_query)
 
         if agent_text:

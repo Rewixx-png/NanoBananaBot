@@ -2,41 +2,16 @@ import asyncio
 import base64
 import json
 import logging
-import re
 import aiohttp
 from typing import Tuple, Optional
 
 from config import NVIDIA_TIMEOUT
 from keys import load_nvidia_keys, remove_key
+from services.gemini_text import translate_to_english
 
 logger = logging.getLogger(__name__)
 
 
-async def translate_to_english(prompt: str) -> str:
-    """Translate a Russian image-generation prompt to English via Gemini."""
-    if not re.search('[а-яёА-ЯЁ]', prompt):
-        return prompt
-    from keys import load_keys
-    keys = await load_keys()
-    if not keys:
-        return prompt
-    key = keys[0]
-    url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={key}'
-    payload = {
-        'contents': [{'parts': [{'text': f'Translate this image generation prompt to English for an AI image generator. Return ONLY the translated prompt, no explanations:\n{prompt}'}]}],
-        'generationConfig': {'temperature': 0.1, 'thinkingConfig': {'thinkingBudget': 0}},
-    }
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=30) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    translated = data['candidates'][0]['content']['parts'][0]['text'].strip()
-                    logging.info(f"Промпт переведён: '{prompt}' → '{translated}'")
-                    return translated
-        except Exception as e:
-            logging.error(f'Ошибка перевода промпта: {e}')
-    return prompt
 
 
 async def generate_image_with_nvidia(

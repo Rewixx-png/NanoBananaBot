@@ -5,8 +5,15 @@ import aiohttp
 from typing import Tuple, Optional
 
 from keys import load_replicate_keys, remove_key
+from config import (
+    REPLICATE_API_TIMEOUT,
+    REPLICATE_COLLECTIONS_URL,
+    REPLICATE_DOWNLOAD_TIMEOUT,
+    REPLICATE_POLL_ATTEMPTS,
+    REPLICATE_POLL_INTERVAL,
+    REPLICATE_PREFER_WAIT,
+)
 
-logger = logging.getLogger(__name__)
 
 _DYNAMIC_REPLICATE_VERSIONS: dict = {}
 
@@ -22,7 +29,7 @@ _REPLICATE_MODELS = {
 
 async def fetch_replicate_image_models() -> list:
     """Fetch available Replicate models from the text-to-image collection."""
-    from ai_services import _models_cache, _MODELS_CACHE_TTL
+    from shared_types import _models_cache, _MODELS_CACHE_TTL
     cache_key = 'replicate_image'
     now = time.time()
     if cache_key in _models_cache and now - _models_cache[cache_key]['ts'] < _MODELS_CACHE_TTL:
@@ -32,7 +39,7 @@ async def fetch_replicate_image_models() -> list:
         return []
     result = []
     try:
-        url = 'https://api.replicate.com/v1/collections/text-to-image'
+        url = REPLICATE_COLLECTIONS_URL
         headers = {'Authorization': f'Bearer {keys[0]}'}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -78,10 +85,10 @@ async def generate_image_with_replicate(
     for idx, key in enumerate(keys):
         if state_data:
             state_data['status'] = f'Пробую ключ {idx+1}/{len(keys)} (Replicate)'
-        headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json', 'Prefer': 'wait=60'}
+        headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json', 'Prefer': f'wait={REPLICATE_PREFER_WAIT}'}
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.post('https://api.replicate.com/v1/predictions', json={'version': version, 'input': model_input}, headers=headers, timeout=aiohttp.ClientTimeout(total=90)) as resp:
+                async with session.post('https://api.replicate.com/v1/predictions', json={'version': version, 'input': model_input}, headers=headers, timeout=aiohttp.ClientTimeout(total=REPLICATE_API_TIMEOUT)) as resp:
                     if resp.status not in (200, 201, 202):
                         err = await resp.text()
                         logging.warning(f'Replicate create {resp.status}: {err[:150]}')
@@ -93,12 +100,12 @@ async def generate_image_with_replicate(
                 pred_id = prediction.get('id')
                 status = prediction.get('status')
                 output = prediction.get('output')
-                for _ in range(30):
+                for _ in range(REPLICATE_POLL_ATTEMPTS):
                     if status == 'succeeded' and output:
                         break
                     if status == 'failed':
                         return (None, prediction.get('error', 'Replicate: generation failed'))
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(REPLICATE_POLL_INTERVAL)
                     async with session.get(f'https://api.replicate.com/v1/predictions/{pred_id}', headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as poll:
                         prediction = await poll.json()
                         status = prediction.get('status')
@@ -108,7 +115,7 @@ async def generate_image_with_replicate(
                 urls = output if isinstance(output, list) else [output]
                 results = []
                 for img_url in urls:
-                    async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=30)) as dl:
+                    async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=REPLICATE_DOWNLOAD_TIMEOUT)) as dl:
                         if dl.status == 200:
                             results.append(await dl.read())
                 if results:

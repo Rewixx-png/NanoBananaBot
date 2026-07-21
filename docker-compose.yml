@@ -2,38 +2,42 @@ services:
   telegram-bot-api:
     image: aiogram/telegram-bot-api:latest
     container_name: telegram_bot_api
+    user: "0:0"
     restart: unless-stopped
     environment:
       TELEGRAM_API_ID: ${TELEGRAM_API_ID}
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
       TELEGRAM_LOCAL: 1
     ports:
-      - "18081:8081"
+      - "18082:8081"
     volumes:
       - tiktokhatanibot_telegram-bot-api-data:/var/lib/telegram-bot-api
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8081"]
+      interval: ${TELEGRAM_API_HEALTH_INTERVAL:-10s}
+      timeout: ${TELEGRAM_API_HEALTH_TIMEOUT:-5s}
+      retries: ${TELEGRAM_API_HEALTH_RETRIES:-5}
+      start_period: ${TELEGRAM_API_HEALTH_START_PERIOD:-10s}
 
   nano-hatani-bot:
     build: .
     container_name: nano_hatani_bot
     restart: unless-stopped
     depends_on:
-      - telegram-bot-api
+      telegram-bot-api:
+        condition: service_healthy
     env_file:
       - .env
-    network_mode: host
+    environment:
+      TELEGRAM_API_URL: http://telegram-bot-api:8081
+    ports:
+      - "7432:7432"
     working_dir: /root/Projects/NanoHatani
     volumes:
       - /root/Projects/NanoHatani:/root/Projects/NanoHatani
       - /root/RewTest:/root/RewTest
       - /root/cookies:/root/cookies
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /var/lib/docker/volumes/nanohatani_tiktokhatanibot_telegram-bot-api-data/_data:/var/lib/docker/volumes/tiktokhatanibot_telegram-bot-api-data/_data
+      - tiktokhatanibot_telegram-bot-api-data:/var/lib/telegram-bot-api:ro
 
 volumes:
   tiktokhatanibot_telegram-bot-api-data:

@@ -87,10 +87,3 @@ async def get_all_vip_users() -> dict:
         return {}
 
 
-async def set_vip_user_db(user_id: int, paid_until: float):
-    try:
-        async with get_db() as db:
-            await db.execute('INSERT OR REPLACE INTO vip_users (user_id, paid_until) VALUES (?, ?)', (user_id, paid_until))
-            await db.commit()
-    except Exception as e:
-        logger.error(f'Ошибка сохранения VIP-пользователя {user_id}: {e}')

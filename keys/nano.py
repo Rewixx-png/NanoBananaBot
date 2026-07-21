@@ -8,11 +8,7 @@ import time
 import logging
 import random
 
-from keys.manager import REWTEST_DB
-
-NANO_KEYS_DB = "/root/Projects/NanoHatani/nano_keys.db"
-_COOLDOWN_429 = 65.0
-_COOLDOWN_403 = 300.0
+from config import KEYHUNTER_DB, NANO_KEYS_DB, GEMINI_KEY_COOLDOWN_429, GEMINI_KEY_COOLDOWN_403
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +28,7 @@ async def init_db():
 async def sync_from_keyhunter() -> int:
     """Copy live gemini-3.5-flash keys from keyhunter DB. Returns count of keys after sync."""
     try:
-        async with aiosqlite.connect(REWTEST_DB, timeout=3) as src:
+        async with aiosqlite.connect(KEYHUNTER_DB, timeout=3) as src:
             async with src.execute(
                 "SELECT key FROM keys "
                 "WHERE service='Gemini' AND is_live=1 "
@@ -90,7 +86,7 @@ async def get_live_keys() -> list[str]:
 
 async def mark_cooldown(key: str, status_code: int):
     """Put key into cooldown after 429 or 403."""
-    seconds = _COOLDOWN_403 if status_code == 403 else _COOLDOWN_429
+    seconds = GEMINI_KEY_COOLDOWN_403 if status_code == 403 else GEMINI_KEY_COOLDOWN_429
     until = time.time() + seconds
     try:
         async with aiosqlite.connect(NANO_KEYS_DB, timeout=3) as db:
@@ -100,13 +96,3 @@ async def mark_cooldown(key: str, status_code: int):
         logger.warning(f"nano_keys mark_cooldown: {e}")
 
 
-async def live_count() -> int:
-    try:
-        async with aiosqlite.connect(NANO_KEYS_DB, timeout=3) as db:
-            async with db.execute(
-                "SELECT COUNT(*) FROM gemini_keys WHERE cooldown_until < ?", (time.time(),)
-            ) as cur:
-                n = (await cur.fetchone())[0]
-                return n
-    except Exception:
-        return 0

@@ -7,14 +7,15 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Message
 from aiogram.exceptions import TelegramRetryAfter
 from config import BOT_TOKEN_2, DUAL_HISTORY_SIZE, BANNED_USER_IDS, TELEGRAM_API_URL
-from keys import load_keys, load_firecrawl_keys, remove_key
+from keys import load_firecrawl_keys, remove_key
 from state import dual_histories, dual_tasks
 from aiogram.client.telegram import TelegramAPIServer
+from services.deepseek_service import deepseek_text
 from aiogram.client.session.aiohttp import AiohttpSession
 
 logger = logging.getLogger(__name__)
 
-session2 = AiohttpSession(api=TelegramAPIServer.from_base(TELEGRAM_API_URL))
+session2 = AiohttpSession(api=TelegramAPIServer.from_base(TELEGRAM_API_URL, is_local=True))
 bot2 = Bot(token=BOT_TOKEN_2, session=session2)
 dp2 = Dispatcher()
 router2 = Router()
@@ -148,43 +149,15 @@ async def _search_web(query: str) -> str:
     return ""
 
 
-async def _call_gemini(keys: list, system_prompt: str, prompt: str) -> str:
-    for key in list(keys):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={key}"
-        payload = {
-            "systemInstruction": {"parts": [{"text": system_prompt}]},
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 1.3, "thinkingConfig": {"thinkingLevel": "minimal"}},
-            "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
-            ],
-        }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if "candidates" not in data:
-                            logger.error(f"dual gen blocked: {data.get('promptFeedback') or data}")
-                            continue
-                        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    elif resp.status in [429, 403, 400]:
-                        remove_key(key)
-                        continue
-        except Exception as e:
-            logger.error(f"dual gen error: {e}")
-            continue
-    return ""
+async def _call_deepseek(system_prompt: str, prompt: str) -> str:
+    text = await deepseek_text(
+        prompt=prompt, system_prompt=system_prompt,
+        model="deepseek-v4-flash", temperature=1.3, max_tokens=600, timeout=30,
+    )
+    return text or ""
 
 
 async def _generate(system_prompt: str, speaker_name: str, chat_id: int) -> str:
-    keys = await load_keys()
-    if not keys:
-        return "ключей нет"
 
     hist = dual_histories.get(chat_id, [])
     bot_only = [m for m in hist if m["name"] in (BOT1_DUAL_NAME, BOT2_DUAL_NAME)]
@@ -195,7 +168,7 @@ async def _generate(system_prompt: str, speaker_name: str, chat_id: int) -> str:
     else:
         prompt = f"{_STYLE_HINT}\n{_SEARCH_HINT}\n{speaker_name}: начни диалог.\n{speaker_name}:"
 
-    raw = await _call_gemini(keys, system_prompt, prompt)
+    raw = await _call_deepseek(system_prompt, prompt)
 
     if raw.upper().startswith("ПОИСК:"):
         query = raw[6:].strip()
@@ -208,7 +181,7 @@ async def _generate(system_prompt: str, speaker_name: str, chat_id: int) -> str:
             prompt2 = f"Данные из интернета:\n{web_snippet}\n\n{base}"
         else:
             prompt2 = base
-        raw = await _call_gemini(keys, system_prompt, prompt2)
+        raw = await _call_deepseek(system_prompt, prompt2)
 
     if not raw:
         return "что-то сломалось"

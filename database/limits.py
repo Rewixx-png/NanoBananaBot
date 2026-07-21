@@ -39,13 +39,3 @@ async def get_all_daily_limits_usage() -> dict:
         return {}
 
 
-async def save_daily_limit_db(chat_id: int, user_id: int, period: str, count: int):
-    try:
-        async with get_db() as db:
-            await db.execute(
-                'INSERT OR REPLACE INTO daily_limits_usage (chat_id, user_id, period, count) VALUES (?, ?, ?, ?)',
-                (chat_id, user_id, period, count)
-            )
-            await db.commit()
-    except Exception as e:
-        logger.error(f'Ошибка сохранения лимита использования (chat={chat_id}, user={user_id}): {e}')

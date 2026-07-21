@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import re
-import time
 import uuid
 
 from aiogram import Router, types
@@ -11,10 +10,10 @@ from aiogram.types import BufferedInputFile, Message
 
 from config import FULL_ACCESS_CHAT_ID
 from dual_bot import BOT1_DUAL_NAME, BOT2_DUAL_NAME, start_dual, stop_dual
-from esrgan_model import upscale_anime
+from services.upscale_service import upscale_image
 from utils import check_membership, is_banned
 
-from ai_services import generate_text_with_gemini
+from services.gemini_text import generate_text_with_gemini
 from handlers.common import _track_user, safe_send
 
 logger = logging.getLogger(__name__)
@@ -25,66 +24,51 @@ commands_misc_router = Router()
 async def cmd_up(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
-        await message.reply('Доступ запрещен.')
+        await message.reply('Доступ закрыт: сначала вступи в обязательную беседу, потом улучшай фото.')
         return
     if not message.photo:
-        await message.reply("Прикрепи фото для апскейла.")
+        await message.reply('Фото не прикреплено. Отправь одно фото с подписью /up.')
         return
-    wait_msg = await message.reply("⏳ Скачиваю фото...")
+    wait_msg = await message.reply('Скачиваю исходное фото...')
     try:
         photo = message.photo[-1]
-        file_info = await message.bot.get_file(photo.file_id)
-        downloaded = await message.bot.download_file(file_info.file_path)
+        downloaded = await message.bot.download(photo.file_id)
         image_bytes = downloaded.read()
     except Exception as e:
-        logger.exception(f'/up download failed: {e}')
-        await wait_msg.edit_text(f'❌ Не смог скачать фото: {e}')
+        logger.error(f'/up download failed: {type(e).__name__}: {e}', exc_info=True)
+        await wait_msg.edit_text(f'❌ Telegram не отдал фото: {type(e).__name__}: {e}. Повтори /up с другим JPG или PNG.')
         return
 
-    loop = asyncio.get_running_loop()
-    last_update = [0.0]
-
-    async def _update_progress(text: str):
-        try:
-            await wait_msg.edit_text(text)
-        except Exception as e:
-            logger.warning(f'Ошибка обновления прогресса /up: {e}')
-
-    def _progress(current: int, total: int):
-        now = time.time()
-        if now - last_update[0] < 2.0 and current < total:
-            return
-        last_update[0] = now
-        pct = min(current * 100 // total, 100)
-        bar = '█' * (pct // 10) + '░' * (10 - pct // 10)
-        asyncio.run_coroutine_threadsafe(
-            _update_progress(f'⬆️ ESRGAN [{bar}] {pct}% — тайл {current}/{total}'),
-            loop,
-        )
+    await wait_msg.edit_text('Улучшаю фото в 2 раза. Не запускай второй апскейл, пока этот не закончен...')
+    upscaled, error = await upscale_image(image_bytes)
+    if not upscaled:
+        logger.error(f'/up upscale failed: {error}')
+        await wait_msg.edit_text(f'Апскейлер упал: {error}. Попробуй другое фото или повтори позже.')
+        return
 
     try:
-        await wait_msg.edit_text('⬆️ ESRGAN [░░░░░░░░░░] 0% — загружаю модель...')
-        upscaled = await asyncio.wait_for(
-            asyncio.to_thread(upscale_anime, image_bytes, progress_callback=_progress),
-            timeout=300,
+        await wait_msg.edit_text('Результат готов. Отправляю файл без сжатия...')
+    except Exception:
+        pass
+    try:
+        await asyncio.wait_for(
+            message.reply_document(
+                document=BufferedInputFile(upscaled, filename="upscaled.png"),
+                caption="Готово. Версия 2x без сжатия — забирай.",
+            ),
+            timeout=120,
         )
     except asyncio.TimeoutError:
-        logger.warning(f'/up timeout after 300s for user {message.from_user.id}')
-        await wait_msg.edit_text('❌ ESRGAN не уложился в 5 минут — фото слишком большое.')
+        await wait_msg.edit_text("Telegram не принял файл за 120 секунд. Попробуй фото поменьше.")
         return
     except Exception as e:
-        logger.exception(f'/up failed: {e}')
-        await wait_msg.edit_text(f'❌ Ошибка ESRGAN: {type(e).__name__}: {e}')
+        logger.error(f'/up send failed: {type(e).__name__}: {e}', exc_info=True)
+        await wait_msg.edit_text(f"Telegram не принял результат: {type(e).__name__}: {e}. Попробуй исходное фото поменьше или повтори /up позже.")
         return
-
     try:
         await wait_msg.delete()
     except Exception as e:
-        logger.warning(f'Ошибка удаления wait_msg в /up: {e}')
-    await message.reply_document(
-        document=BufferedInputFile(upscaled, filename="upscaled.png"),
-        caption="✨ Улучшенная версия 2x — без сжатия"
-    )
+        logger.warning(f'/up status cleanup failed after successful send: {type(e).__name__}: {e}')
 
 
 @commands_misc_router.message(Command('figma'))
@@ -95,7 +79,7 @@ async def cmd_figma(message: types.Message):
         return
     prompt = (message.text or '').replace('/figma', '', 1).strip()
     if not prompt:
-        await message.reply('Напиши что рисовать, дебил. Пример: /figma синяя кнопка с текстом ОК')
+        await message.reply('Описание пустое. Напиши, что собрать: /figma экран плеера в тёмной теме')
         return
     thread_id = message.message_thread_id if message.chat.is_forum else None
     reply_kwargs = {'message_thread_id': thread_id} if thread_id else {}
@@ -213,6 +197,7 @@ async def cmd_figma(message: types.Message):
 @commands_misc_router.message(Command("dual"))
 async def cmd_dual(message: Message):
     if message.chat.id != FULL_ACCESS_CHAT_ID:
+        await message.reply('Команда /dual работает только в специальной беседе с полным доступом. Здесь используй обычный чат или /help.')
         return
     chat_id = message.chat.id
     thread_id = message.message_thread_id

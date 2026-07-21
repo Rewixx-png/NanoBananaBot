@@ -3,12 +3,12 @@ import json
 import logging
 import re
 import aiohttp
-from typing import Tuple, List
+from typing import Tuple
 
-from keys import load_keys, load_firecrawl_keys, remove_key
-from shared_types import _TEXT_MODEL_FALLBACKS, _thinking_config
+from keys import load_keys, load_firecrawl_keys, remove_key, strip_code_fences
+from services.deepseek_service import deepseek_text
+from shared_types import _TEXT_MODEL_FALLBACKS, _WEB_SEARCH_DIRECTIVE, _gemini_headers, _gemini_url, _thinking_config
 
-logger = logging.getLogger(__name__)
 
 
 # ── Web search implementation ─────────────────────────────────────────────
@@ -122,8 +122,6 @@ def _web_query_variants(query: str) -> list[str]:
     return _dedupe_texts(variants)[:18]
 
 
-def _web_context_is_relevant(query: str, context: str) -> bool:
-    return _web_context_quality(query, context)[0] >= 55
 
 
 def _web_context_quality(query: str, context: str) -> tuple[int, str]:
@@ -166,9 +164,6 @@ def _protect_search_targets(query: str, source: str) -> str:
 
 
 async def _extract_search_query(user_message: str) -> str:
-    keys = await load_keys()
-    if not keys:
-        return _clean_web_query(user_message)
     system = (
         'Ты генератор поисковых запросов. '
         'Из сообщения пользователя пойми суть и верни ТОЛЬКО поисковый запрос — '
@@ -179,34 +174,14 @@ async def _extract_search_query(user_message: str) -> str:
         'Если ищут человека или аккаунт, добавь telegram OR vk OR social. '
         'Никаких markdown, никаких пояснений — только сам запрос.'
     )
-    contents = [{'role': 'user', 'parts': [{'text': user_message}]}]
-    dead_keys: set[str] = set()
-    for model_name in _TEXT_MODEL_FALLBACKS:
-        gen_config = {'temperature': 0, 'maxOutputTokens': 40, 'thinkingConfig': _thinking_config(model_name, 'minimal')}
-        payload = {'systemInstruction': {'parts': [{'text': system}]}, 'contents': contents, 'generationConfig': gen_config}
-        for key in keys:
-            if key in dead_keys:
-                continue
-            url = f'https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}'
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                        if resp.status == 404:
-                            break
-                        if resp.status == 200:
-                            data = await resp.json()
-                            q = data['candidates'][0]['content']['parts'][0]['text'].strip()
-                            q = re.sub(r'\s+', ' ', q).strip()
-                            if q and len(q) < 200:
-                                return _protect_search_targets(q, user_message)
-                        elif resp.status in [429, 403]:
-                            dead_keys.add(key)
-                            remove_key(key, resp.status)
-                        else:
-                            body = await resp.text()
-                            logging.warning(f'Query extraction [{model_name}] HTTP {resp.status}: {body[:200]}')
-            except Exception as e:
-                logging.warning(f'Query extraction [{model_name}] failed: {type(e).__name__}: {e}')
+    q = await deepseek_text(
+        user_message, system_prompt=system,
+        model='deepseek-chat', temperature=0.3, max_tokens=40, timeout=8,
+    )
+    if q:
+        q = re.sub(r'\s+', ' ', q).strip()
+        if q and len(q) < 200:
+            return _protect_search_targets(q, user_message)
     return _protect_search_targets(_clean_web_query(user_message), user_message)
 
 
@@ -259,10 +234,10 @@ async def _plan_firecrawl_queries(user_request: str, seed_query: str) -> list[st
         for key in keys:
             if key in dead_keys:
                 continue
-            url = f'https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}'
+            url = _gemini_url(f"models/{model_name}:generateContent")
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+                    async with session.post(url, json=payload, headers=_gemini_headers(key), timeout=aiohttp.ClientTimeout(total=12)) as resp:
                         if resp.status == 404:
                             break
                         if resp.status == 200:
@@ -374,10 +349,10 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
             for key in keys2:
                 if key in dead_keys2:
                     continue
-                url = f'https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}'
+                url = _gemini_url(f"models/{model_name}:generateContent")
                 try:
                     async with aiohttp.ClientSession() as session:
-                        async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        async with session.post(url, json=payload, headers=_gemini_headers(key), timeout=aiohttp.ClientTimeout(total=15)) as resp:
                             if resp.status == 404:
                                 break
                             if resp.status == 200:
@@ -610,9 +585,6 @@ def _fallback_web_answer(query: str, web_context: str) -> str:
 
 
 async def synthesize_web_answer(prompt: str, web_context: str) -> str:
-    keys = await load_keys()
-    if not keys:
-        return _fallback_web_answer(prompt, web_context)
     if not web_context or len(web_context.strip()) < 80:
         return f'Я искал «{_clean_web_query(prompt)}» — поиск вернул пустоту. Либо чел не светится в паблике, либо Firecrawl ничего не нашёл. Больше нихуя.'
     clean_query = _clean_web_query(prompt)
@@ -629,31 +601,10 @@ async def synthesize_web_answer(prompt: str, web_context: str) -> str:
         '- Ссылки вставляй голым URL-ом, только 1-2 самых полезных.'
     )
     user_text = f'Запрос пользователя: {clean_query}\n\nFirecrawl-контекст:\n{web_context[:14000]}'
-    contents = [{'role': 'user', 'parts': [{'text': user_text}]}]
-    dead_keys: set[str] = set()
-    for model_name in _TEXT_MODEL_FALLBACKS:
-        gen_config = {'temperature': 0.7, 'thinkingConfig': _thinking_config(model_name, 'minimal')}
-        payload = {'systemInstruction': {'parts': [{'text': system}]}, 'contents': contents, 'generationConfig': gen_config}
-        for key in keys:
-            if key in dead_keys:
-                continue
-            url = f'https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}'
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=25)) as resp:
-                        if resp.status == 404:
-                            break
-                        if resp.status == 200:
-                            data = await resp.json()
-                            answer = data['candidates'][0]['content']['parts'][0]['text'].strip()
-                            if answer and not answer.upper().startswith(_WEB_SEARCH_DIRECTIVE):
-                                return answer
-                        elif resp.status in [429, 403]:
-                            dead_keys.add(key)
-                            remove_key(key, resp.status)
-                        else:
-                            body = await resp.text()
-                            logging.warning(f'Web synthesis [{model_name}] HTTP {resp.status}: {body[:300]}')
-            except Exception as e:
-                logging.warning(f'Web synthesis [{model_name}] failed: {type(e).__name__}: {e}')
+    answer = await deepseek_text(
+        user_text, system_prompt=system,
+        model='deepseek-chat', temperature=0.3, max_tokens=800, timeout=25,
+    )
+    if answer and not answer.upper().startswith(_WEB_SEARCH_DIRECTIVE):
+        return answer
     return _fallback_web_answer(prompt, web_context)

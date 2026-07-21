@@ -1,7 +1,5 @@
 import asyncio
 import re
-import uuid
-import tempfile
 import os
 import time
 import io
@@ -12,70 +10,31 @@ import sys
 import logging
 import random
 import secrets
-import posixpath
-from urllib.parse import unquote
 from html.parser import HTMLParser
 from typing import Any
 
 from aiogram import types
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.types import BufferedInputFile, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, InputRichMessage
 
 from config import (
-    IMAGE_COOLDOWN_SECONDS,
-    TEXT_COOLDOWN_SECONDS,
-    DELETE_MESSAGE_DELAY_SECONDS,
     TEXT_ONLY_CHAT_ID,
-    FULL_ACCESS_CHAT_ID,
-    FULL_ACCESS_CHAT_IMAGE_COOLDOWN,
-    PAYMENT_PHONE,
-    ALLOWED_USER_IDS,
-    OWNER_USER_ID,
-    ADMIN_IDS,
-    DAILY_GEN_LIMIT,
-    PAYMENT_USERNAME,
-    CHAT_ID,
-    GEMINI_IMAGE_TIMEOUT,
 )
 
 from state import (
-    pending_image_requests,
-    pending_video_requests,
-    pending_media_groups,
-    user_image_cooldowns,
-    user_text_cooldowns,
-    user_video_cooldowns,
-    full_access_image_cooldowns,
-    paid_unlimited_until,
-    pending_prompt_requests,
     pending_nsfw_configs,
     chat_members_cache,
-    daily_gen_limits,
-    banned_user_ids,
-    chat_custom_limits,
-    pending_tts_requests,
     pending_tts_configs,
-    pending_file_tasks,
-    tts_voice_previews,
     generated_draw_messages,
     generated_code_messages,
 )
+from utils import check_membership
 
 logger = logging.getLogger(__name__)
 
 MAX_DOCUMENT_UPLOAD_BYTES = 5_000_000
 
 
-async def _ensure_image_generation_allowed(message: types.Message) -> bool:
-    from utils import check_membership
-    from handlers.admin import _check_daily_limit
-    if not await check_membership(message.bot, message.from_user.id, message.chat.id):
-        return False
-    allowed, limit_msg = _check_daily_limit(message.from_user.id, message.chat.id)
-    if not allowed:
-        await message.reply(limit_msg)
-        return False
-    return True
 
 
 async def _download_message_photo(bot, message: types.Message):
@@ -109,8 +68,6 @@ SAFE_TEXT_MIMES = {
 _MAX_TRACKED_DRAW_MESSAGES = 120
 _MAX_TRACKED_CODE_MESSAGES = 60
 
-_WEB_SEARCH_DIRECTIVE = 'WEB_SEARCH:'
-_KICK_DIRECTIVE = 'KICK_USER:'
 
 _KIRIESHKI_CHAT_ID = -1002830734467
 _KIRIESHKI_STICKER_SET = 'kirieshkikirieshki'
@@ -118,12 +75,12 @@ _KIRIESHKI_STICKER_CHANCE = 0.10
 _PERMA_STICKER_SET = 'SHCHperma9740'
 _PERMA_STICKER_CHANCE = 0.05
 _KIRIESHKI_STICKER_CACHE_TTL = 86400
-_kirieshki_sticker_file_ids: list[str] = []
-_kirieshki_sticker_cache_ts = 0.0
-_perma_sticker_file_ids: list[str] = []
-_perma_sticker_cache_ts = 0.0
+_sticker_caches: dict[str, dict] = {
+    'kirieshki': {'ids': [], 'ts': 0.0},
+    'perma':    {'ids': [], 'ts': 0.0},
+}
 _RANDOM_GIF_CHANCE = 0.05
-_RANDOM_MEDIA_MIN_INTERVAL = 30
+_RANDOM_MEDIA_MIN_INTERVAL = 10
 _random_media_last_ts_by_chat: dict[int, float] = {}
 
 _RANDOM_GIF_PATHS = [
@@ -211,10 +168,12 @@ _TTS_KEYBOARD_LAYOUT = (
 )
 
 async def safe_send(coro_func, *args, **kwargs):
-    for attempt in range(3):
+    last_error = None
+    for _ in range(3):
         try:
             return await coro_func(*args, **kwargs)
         except Exception as e:
+            last_error = e
             err_str = str(e).lower()
             if "retry after" in err_str or "flood" in err_str or "too many requests" in err_str:
                 import re as _re
@@ -224,50 +183,148 @@ async def safe_send(coro_func, *args, **kwargs):
                 await asyncio.sleep(secs)
             else:
                 raise
+    assert last_error is not None
+    raise last_error
+
+async def callback_has_access(callback: types.CallbackQuery) -> bool:
+    if callback.message is None:
+        await callback.answer("Сообщение меню уже недоступно. Открой /start заново.", show_alert=True)
+        return False
+    allowed = await check_membership(
+        callback.message.bot,
+        callback.from_user.id,
+        callback.message.chat.id,
+    )
+    if not allowed:
+        await callback.answer("Доступ закрыт. Сначала вступи в обязательную беседу.", show_alert=True)
+        return False
+    return True
 
 
 
 
-async def send_rich_message(bot, chat_id: int, text: str, **kwargs) -> bool:
-    """Send Rich Message via aiogram or direct HTTP."""
-    import logging
-    _log = logging.getLogger(__name__)
+_RICH_HTML_TAGS = [
+    "a", "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+    "code", "pre", "blockquote", "tg-spoiler", "tg-emoji", "mark", "sub", "sup",
+    "h1", "h2", "h3", "h4", "h5", "h6", "p", "aside", "ul", "ol", "li",
+    "table", "thead", "tbody", "tr", "th", "td", "details", "summary", "figure",
+    "figcaption", "tg-math", "tg-math-block", "footer", "hr", "cite", "input",
+]
+_REGULAR_HTML_TAGS = [
+    "a", "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+    "code", "pre", "blockquote", "tg-spoiler", "tg-emoji",
+]
+_HTML_ATTRIBUTES = {
+    "a": ["href", "name"],
+    "blockquote": ["expandable"],
+    "code": ["class"],
+    "details": ["open"],
+    "input": ["type", "checked"],
+    "table": ["bordered", "striped"],
+    "td": ["colspan", "rowspan", "align", "valign"],
+    "th": ["colspan", "rowspan", "align", "valign"],
+    "tg-emoji": ["emoji-id"],
+}
+_HTML_PROTOCOLS = ["http", "https", "mailto", "tel", "tg"]
+
+
+
+def _sanitize_rich_html(text: str) -> str:
+    import bleach
+    return bleach.clean(
+        text[:32768],
+        tags=_RICH_HTML_TAGS,
+        attributes=_HTML_ATTRIBUTES,
+        protocols=_HTML_PROTOCOLS,
+        strip=True,
+    )
+
+
+def _sanitize_regular_html(text: str) -> str:
+    import bleach
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<li(?:\s+[^>]*)?>", "• ", text, flags=re.IGNORECASE)
+    text = re.sub(r"</(?:td|th)>", " · ", text, flags=re.IGNORECASE)
+    text = re.sub(r"</tr>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</li>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</(?:p|h[1-6]|details|summary|footer|aside|figcaption)>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<hr\s*/?>", "\n", text, flags=re.IGNORECASE)
+    return bleach.clean(
+        text,
+        tags=_REGULAR_HTML_TAGS,
+        attributes=_HTML_ATTRIBUTES,
+        protocols=_HTML_PROTOCOLS,
+        strip=True,
+    )
+
+
+async def send_rich_message(bot, chat_id: int, text: str, **kwargs):
+    """Send sanitized Rich HTML with regular HTML and plain-text fallbacks."""
+    safe_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if key in ("message_thread_id", "reply_parameters", "reply_markup") and value is not None
+    }
+    rich_html = _sanitize_rich_html(text)
     try:
-        await bot.send_rich_message(
+        return await bot.send_rich_message(
             chat_id=chat_id,
-            rich_message={"markdown": text},
-            **{k: v for k, v in kwargs.items() if k in (
-                "message_thread_id", "reply_parameters", "reply_markup"
-            ) and v is not None}
+            rich_message=InputRichMessage(html=rich_html),
+            **safe_kwargs,
         )
-        _log.info(f"sendRichMessage OK ({len(text)} chars)")
-        return True
     except Exception as e:
-        _log.warning(f"sendRichMessage failed: {type(e).__name__}: {e}")
-    # Fallback: direct HTTP
-    from config import TELEGRAM_API_URL
-    import aiohttp
-    token = bot.token
-    payload = {"chat_id": chat_id, "rich_message": {"markdown": text}}
-    for k in ("message_thread_id", "reply_parameters", "reply_markup"):
-        if k in kwargs and kwargs[k] is not None:
-            payload[k] = kwargs[k]
-    for base_url in (f"{TELEGRAM_API_URL}/bot{token}", f"https://api.telegram.org/bot{token}"):
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(f"{base_url}/sendRichMessage", json=payload,
-                                  timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    body = await resp.text()
-                    if resp.status == 200:
-                        _log.info(f"sendRichMessage HTTP OK ({base_url})")
-                        return True
-                    _log.warning(f"sendRichMessage HTTP {resp.status}: {body[:120]}")
-        except Exception as e:
-            _log.warning(f"sendRichMessage HTTP {base_url}: {type(e).__name__}: {e}")
-    return False
+        logger.warning(f"sendRichMessage failed: {type(e).__name__}: {e}")
 
+    regular_html = _sanitize_regular_html(rich_html)
+    if len(regular_html) <= 4000:
+        try:
+            return await bot.send_message(
+                chat_id=chat_id,
+                text=regular_html,
+                parse_mode="HTML",
+                **safe_kwargs,
+            )
+        except Exception as e:
+            logger.warning(f"sendMessage HTML fallback failed: {type(e).__name__}: {e}")
+
+    plain_text = _clean_plain_reply(regular_html) or " "
+    chunks = [plain_text[index:index + 4000] for index in range(0, len(plain_text), 4000)]
+    last_message = None
+    for index, chunk in enumerate(chunks):
+        chunk_kwargs = {"message_thread_id": safe_kwargs["message_thread_id"]} if "message_thread_id" in safe_kwargs else {}
+        if index == 0 and "reply_parameters" in safe_kwargs:
+            chunk_kwargs["reply_parameters"] = safe_kwargs["reply_parameters"]
+        if index == len(chunks) - 1 and "reply_markup" in safe_kwargs:
+            chunk_kwargs["reply_markup"] = safe_kwargs["reply_markup"]
+        try:
+            last_message = await safe_send(
+                bot.send_message,
+                chat_id=chat_id,
+                text=chunk,
+                parse_mode=None,
+                **chunk_kwargs,
+            )
+        except Exception as e:
+            logger.error(f"sendMessage plain fallback failed on chunk {index + 1}/{len(chunks)}: {type(e).__name__}: {e}", exc_info=True)
+            return None
+    return last_message
+
+
+
+def _escape_mdv2(text: str) -> str:
+    """Escape MarkdownV2 reserved chars outside $$...$$ blocks."""
+    RESERVED = r'_*[]()~`>#+-=|{}.!'
+    parts = re.split(r'(\$\$.*?\$\$)', text, flags=re.DOTALL)
+    result = []
+    for part in parts:
+        if part.startswith('$$') and part.endswith('$$'):
+            result.append(part)  # LaTeX block — don't escape
+        else:
+            escaped = ''.join('\\' + c if c in RESERVED else c for c in part)
+            result.append(escaped)
+    return ''.join(result)
 def _clean_plain_reply(text: str) -> str:
-    text = re.sub(r'</?(?:b|strong|i|em|u|s|code|pre|blockquote|a)(?:\s+[^>]*)?>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'</?(?:a|b|strong|i|em|u|ins|s|strike|del|code|pre|blockquote|tg-spoiler|tg-emoji)(?:\s+[^>]*)?>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'^\s{0,3}#{1,6}\s*', '', text, flags=re.MULTILINE)
     text = text.replace('```', '').replace('`', '')
     text = re.sub(r'\*\*([^*\n]+)\*\*', r'\1', text)
@@ -493,17 +550,6 @@ def _has_kick_execution_signal(message, reason: str, rest: str) -> bool:
     severe_words = ('спам', 'флуд', 'скам', 'реклама', 'бот-спам', 'докс', 'деанон', 'угроз', 'рейд')
     return any(word in source for word in owner_words) or any(word in source for word in severe_words) or (explicit_target and any(word in source for word in kick_words))
 
-def _is_code_generation_request(prompt: str) -> bool:
-    lower_prompt = prompt.lower()
-    direct_phrases = ['напиши код', 'напиши скрипт', 'сделай скрипт', 'напиши программу', 'напиши функцию', 'создай скрипт', 'создай код', 'напиши бота', 'сделай бота', 'напиши сайт', 'сделай сайт', 'напиши программу', 'создай сайт', 'создай приложение', 'создай проект', 'сделай проект', 'напиши проект', 'собери проект', 'новый мессенджер', 'напиши парсер', 'сделай парсер', 'напиши апи', 'сделай апи', 'напиши api', 'напиши хэндлер', 'реализуй', 'write code', 'write a script', 'write a bot', 'write a site', 'write a website', 'write an app', 'create project', 'build project']
-    if any(phrase in lower_prompt for phrase in direct_phrases):
-        return True
-    talk_only_markers = ['что такое', 'как работает', 'объясни', 'расскажи', 'найди', 'поищи', 'загугли', 'что нового', 'почему', 'зачем', 'кто такой', 'что за']
-    if any(marker in lower_prompt for marker in talk_only_markers):
-        return False
-    actions = ['напиши', 'сделай', 'создай', 'собери', 'накидай', 'скинь', 'кинь', 'дай', 'нужен', 'нужна', 'нужно']
-    artifacts = ['код', 'скрипт', 'проект', 'сайт', 'бот', 'приложение', 'прогу', 'программа', 'zip', 'зип', 'архив', 'pydroid', 'pydroid3', '.py']
-    return any(action in lower_prompt for action in actions) and any(artifact in lower_prompt for artifact in artifacts)
 
 def _remember_generated_draw_message(chat_id: int, message_id: int, image_bytes: bytes, prompt: str, user_id: int, username: str='', first_name: str='Аноним'):
     if not image_bytes:
@@ -533,12 +579,6 @@ def _remember_generated_code_message(chat_id: int, message_id: int, files: list[
         oldest_key = min(generated_code_messages, key=lambda k: generated_code_messages[k].get('created_at', 0))
         generated_code_messages.pop(oldest_key, None)
 
-async def delete_message_after_delay(bot, chat_id: int, message_id: int, delay: int=DELETE_MESSAGE_DELAY_SECONDS):
-    await asyncio.sleep(delay)
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception as e:
-        logger.warning(f'Не удалось удалить сообщение {message_id}: {e}')
 
 async def run_progress_bar(bot, chat_id: int, message_id: int, model_label: str, state_data: dict = None):
     BAR_LEN = 10
@@ -561,8 +601,8 @@ async def run_progress_bar(bot, chat_id: int, message_id: int, model_label: str,
         await asyncio.sleep(random.uniform(3.5, 5.5))
         pos += 1
 
-async def _send_kirieshki_sticker(message: types.Message) -> bool:
-    global _kirieshki_sticker_file_ids, _kirieshki_sticker_cache_ts
+async def _send_sticker_from_cache(message: types.Message, cache_key: str, sticker_set_name: str) -> bool:
+    cache = _sticker_caches[cache_key]
     if message.chat.id != _KIRIESHKI_CHAT_ID:
         return False
     bot = message.bot
@@ -570,36 +610,22 @@ async def _send_kirieshki_sticker(message: types.Message) -> bool:
         return False
     try:
         now = time.monotonic()
-        if not _kirieshki_sticker_file_ids or now - _kirieshki_sticker_cache_ts > _KIRIESHKI_STICKER_CACHE_TTL:
-            sticker_set = await bot.get_sticker_set(name=_KIRIESHKI_STICKER_SET)
-            _kirieshki_sticker_file_ids = [sticker.file_id for sticker in sticker_set.stickers if sticker.file_id]
-            _kirieshki_sticker_cache_ts = now
-        if _kirieshki_sticker_file_ids:
-            sent = await safe_send(message.reply_sticker, sticker=random.choice(_kirieshki_sticker_file_ids))
+        if not cache['ids'] or now - cache['ts'] > _KIRIESHKI_STICKER_CACHE_TTL:
+            sticker_set = await bot.get_sticker_set(name=sticker_set_name)
+            cache['ids'] = [sticker.file_id for sticker in sticker_set.stickers if sticker.file_id]
+            cache['ts'] = now
+        if cache['ids']:
+            sent = await safe_send(message.reply_sticker, sticker=random.choice(cache['ids']))
             return bool(sent)
     except Exception as e:
-        logging.warning(f'Kirieshki sticker reply failed: {type(e).__name__}: {e}')
+        logging.warning(f'{cache_key} sticker reply failed: {type(e).__name__}: {e}')
     return False
 
+async def _send_kirieshki_sticker(message: types.Message) -> bool:
+    return await _send_sticker_from_cache(message, 'kirieshki', _KIRIESHKI_STICKER_SET)
+
 async def _send_perma_sticker(message: types.Message) -> bool:
-    global _perma_sticker_file_ids, _perma_sticker_cache_ts
-    if message.chat.id != _KIRIESHKI_CHAT_ID:
-        return False
-    bot = message.bot
-    if bot is None:
-        return False
-    try:
-        now = time.monotonic()
-        if not _perma_sticker_file_ids or now - _perma_sticker_cache_ts > _KIRIESHKI_STICKER_CACHE_TTL:
-            sticker_set = await bot.get_sticker_set(name=_PERMA_STICKER_SET)
-            _perma_sticker_file_ids = [sticker.file_id for sticker in sticker_set.stickers if sticker.file_id]
-            _perma_sticker_cache_ts = now
-        if _perma_sticker_file_ids:
-            sent = await safe_send(message.reply_sticker, sticker=random.choice(_perma_sticker_file_ids))
-            return bool(sent)
-    except Exception as e:
-        logging.warning(f'Perma sticker reply failed: {type(e).__name__}: {e}')
-    return False
+    return await _send_sticker_from_cache(message, 'perma', _PERMA_STICKER_SET)
 
 async def _send_random_gif(message: types.Message) -> bool:
     if message.chat.id != _KIRIESHKI_CHAT_ID:
@@ -651,13 +677,21 @@ def _temp_message() -> str:
 
 def _temp_keyboard(request_id: str) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=f'{label} ({val})', callback_data=f'ptmp:{request_id}:{i}')] for (i, (val, label, _)) in enumerate(_TEMP_OPTIONS)]
+    rows.append([
+        InlineKeyboardButton(text='← Назад', callback_data=f'imgback:{request_id}'),
+        InlineKeyboardButton(text='Отмена', callback_data=f'imgcancel:{request_id}'),
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def _providers_keyboard(request_id: str, chat_id: int, photo_count: int=0) -> InlineKeyboardMarkup:
-    providers = ['gemini', 'flux', 'nsfw'] if chat_id == TEXT_ONLY_CHAT_ID else ['gemini', 'gpt', 'flux', 'nsfw']
+    from handlers.media_gen import PROVIDER_MODELS
+    all_providers = ['gemini', 'flux', 'nsfw'] if chat_id == TEXT_ONLY_CHAT_ID else ['gemini', 'gpt', 'flux', 'nsfw']
+    providers = [p for p in all_providers if PROVIDER_MODELS.get(p)]
     labels = {'gemini': 'Gemini', 'gpt': 'GPT', 'flux': 'FLUX', 'nsfw': 'Replicate'}
     photo_label = f' 📎{photo_count} фото' if photo_count > 1 else ''
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=labels[p] + (photo_label if p not in ('flux', 'nsfw') else ''), callback_data=f'imgprov:{request_id}:{p}') for p in providers]])
+    rows = [[InlineKeyboardButton(text=labels[p] + (photo_label if p not in ('flux', 'nsfw') else ''), callback_data=f'imgprov:{request_id}:{p}') for p in providers]]
+    rows.append([InlineKeyboardButton(text='Отмена', callback_data=f'imgcancel:{request_id}')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def _nsfw_default_cfg(model: str) -> dict:
     if 'flux' in model:
@@ -678,14 +712,12 @@ def _nsfw_cfg_text(request_id: str) -> str:
         extra = f"\n\nКол-во: {cfg.get('batch', 1)} шт  |  Планировщик: {cfg.get('scheduler', 'DPM++ 2M Karras')}\nCLIP Skip: {cfg.get('clip_skip', 2)}  |  PAG: {cfg.get('pag_scale', 0)}  |  Rescale: {cfg.get('rescale', 1.0)}\nПрепромпт: {('✅' if cfg.get('prepend', True) else '❌')}  |  Seed: {cfg.get('seed', -1)}"
     return f'''⚙️ {label}\n\n📝 Промпт:\n"{prompt}"\n\n🚫 Негативный промпт:\n{neg_display}\n\nШаги: {cfg.get('steps', 28)}  |  CFG: {cfg.get('cfg', 7.0)}  |  Размер: {cfg.get('size', '896x1152')}{extra}'''
 
-def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
-    """Build NSFW config keyboard from layout data."""
-    d = pending_nsfw_configs.get(request_id, {})
+def _cfg_keyboard(request_id: str, pending_dict: dict, layout: tuple, defaults: dict, prefix: str, is_wai: bool = True) -> InlineKeyboardMarkup:
+    """Build config keyboard from layout data."""
+    d = pending_dict.get(request_id, {})
     cfg = d.get('cfg', {})
-    is_wai = 'flux' not in d.get('model', '')
 
     def _norm_opt(v):
-        """Normalise an option value to (display, callback_value)."""
         return v if isinstance(v, tuple) else (str(v), v)
 
     def _checked(cb_val, current):
@@ -694,24 +726,24 @@ def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
     def _option_row(field, values, current):
         return [InlineKeyboardButton(
             text=f'{_checked(_norm_opt(v)[1], current)}{_norm_opt(v)[0]}',
-            callback_data=f'nsfwcfg:{request_id}:{field}:{_norm_opt(v)[1]}',
+            callback_data=f'{prefix}cfg:{request_id}:{field}:{_norm_opt(v)[1]}',
         ) for v in values]
 
     rows: list[list[InlineKeyboardButton]] = []
-    for kind, wai_only, payload in _NSFW_KEYBOARD_LAYOUT:
+    for kind, wai_only, payload in layout:
         if wai_only and not is_wai:
             continue
         if kind == 'actions':
-            rows.append([InlineKeyboardButton(text=t, callback_data=f'nsfwinput:{request_id}:{s}')
+            rows.append([InlineKeyboardButton(text=t, callback_data=f'{prefix}input:{request_id}:{s}')
                          for t, s in payload])
         elif kind == 'header':
             rows.append([InlineKeyboardButton(text=payload, callback_data='noop')])
         elif kind == 'options':
             field, values = payload
-            rows.append(_option_row(field, values, cfg.get(field, _NSFW_CFG_DEFAULTS[field])))
+            rows.append(_option_row(field, values, cfg.get(field, defaults[field])))
         elif kind == 'chunked':
             field, values, chunk = payload
-            cur = cfg.get(field, _NSFW_CFG_DEFAULTS[field])
+            cur = cfg.get(field, defaults[field])
             for i in range(0, len(values), chunk):
                 rows.append(_option_row(field, values[i:i + chunk], cur))
         elif kind == 'special_wai':
@@ -720,19 +752,39 @@ def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
             rows.append([
                 InlineKeyboardButton(
                     text=f"{'✅' if cur_pre else '❌'} Препромпт качества",
-                    callback_data=f"nsfwcfg:{request_id}:prepend:{'0' if cur_pre else '1'}",
+                    callback_data=f"{prefix}cfg:{request_id}:prepend:{'0' if cur_pre else '1'}",
                 ),
                 InlineKeyboardButton(
                     text=f'🎲 Seed: {cur_seed}',
-                    callback_data=f'nsfwinput:{request_id}:seed',
+                    callback_data=f'{prefix}input:{request_id}:seed',
                 ),
             ])
+        elif kind == 'preview':
+            rows.append([InlineKeyboardButton(text=payload, callback_data=f'{prefix}prev:{request_id}')])
         elif kind == 'generate':
-            rows.append([InlineKeyboardButton(text=payload, callback_data=f'nsfwgen:{request_id}')])
+            rows.append([InlineKeyboardButton(text=payload, callback_data=f'{prefix}gen:{request_id}')])
+    if prefix == 'tts':
+        rows.append([
+            InlineKeyboardButton(text='← Назад', callback_data=f'ttsback:{request_id}'),
+            InlineKeyboardButton(text='Отмена', callback_data=f'ttsabort:{request_id}'),
+        ])
+    elif prefix == 'nsfw':
+        rows.append([
+            InlineKeyboardButton(text='← Назад', callback_data=f'nsfwback:{request_id}'),
+            InlineKeyboardButton(text='Отмена', callback_data=f'imgcancel:{request_id}'),
+        ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    d = pending_nsfw_configs.get(request_id, {})
+    is_wai = 'flux' not in d.get('model', '')
+    return _cfg_keyboard(request_id, pending_nsfw_configs, _NSFW_KEYBOARD_LAYOUT, _NSFW_CFG_DEFAULTS, 'nsfw', is_wai)
+
+def _tts_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    return _cfg_keyboard(request_id, pending_tts_configs, _TTS_KEYBOARD_LAYOUT, _TTS_CFG_DEFAULTS, 'tts')
+
 def _prompt_ai_keyboard(request_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Использовать этот промт', callback_data=f'puse:{request_id}')], [InlineKeyboardButton(text='🔄 Другой вариант', callback_data=f'pother:{request_id}'), InlineKeyboardButton(text='📝 Мой промт', callback_data=f'pbase:{request_id}')]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Использовать этот промт', callback_data=f'puse:{request_id}')], [InlineKeyboardButton(text='🔄 Другой вариант', callback_data=f'pother:{request_id}'), InlineKeyboardButton(text='📝 Мой промт', callback_data=f'pbase:{request_id}')], [InlineKeyboardButton(text='Отмена', callback_data=f'imgcancel:{request_id}')]])
 
 def _tts_cfg_text(request_id: str) -> str:
     d = pending_tts_configs.get(request_id, {})
@@ -753,42 +805,43 @@ def _tts_cfg_text(request_id: str) -> str:
     if accent:
         extra += f'\n🎭 Акцент: "{accent}..."'
     return f'''🎙️ {label}\n\n📝 Текст:\n"{prompt}"\n\nГолос: {cfg.get('voice', 'Puck')}\nТемпература: {cfg.get('temp', 1.0)}\nЯзык: {cfg.get('lang', 'ru-RU')}{extra}'''
+def make_status_cb(thinking_msg, *, min_interval=1.5, parse_mode='HTML'):
+    """Factory: returns an async status callback that edits thinking_msg with throttling.
 
-def _tts_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
-    """Build TTS config keyboard from layout data."""
-    d = pending_tts_configs.get(request_id, {})
-    cfg = d.get('cfg', {})
+    The returned callback is suitable for passing as a ``status_cb`` to ``run_agent``
+    or ``generate_text_with_gemini``.
 
-    def _norm_opt(v):
-        """Normalise an option value to (display, callback_value)."""
-        return v if isinstance(v, tuple) else (str(v), v)
+    Parameters
+    ----------
+    thinking_msg : types.Message
+        The "thinking..." placeholder message to edit with status updates.
+    min_interval : float
+        Minimum seconds between edits.  Shorter calls are silently dropped.
+    parse_mode : str | None
+        Telegram parse_mode for ``edit_text``.  When set and an HTML parse error
+        occurs the callback retries with tags stripped.
+    """
+    last_edit = 0.0
+    last_text = ''
 
-    def _checked(cb_val, current):
-        return '✅' if str(cb_val) == str(current) else ''
+    async def _status_cb(text: str):
+        nonlocal last_edit, last_text
+        now = time.monotonic()
+        if text == last_text or now - last_edit < min_interval:
+            return
+        try:
+            await thinking_msg.edit_text(text, parse_mode=parse_mode)
+            last_edit = time.monotonic()
+            last_text = text
+        except TelegramRetryAfter as e:
+            last_edit = time.monotonic() + float(getattr(e, 'retry_after', 3) or 3)
+        except Exception:
+            if parse_mode:
+                try:
+                    await thinking_msg.edit_text(re.sub(r'<[^>]+>', '', text))
+                except Exception:
+                    pass
 
-    def _option_row(field, values, current):
-        return [InlineKeyboardButton(
-            text=f'{_checked(_norm_opt(v)[1], current)}{_norm_opt(v)[0]}',
-            callback_data=f'ttscfg:{request_id}:{field}:{_norm_opt(v)[1]}',
-        ) for v in values]
+    return _status_cb
 
-    rows: list[list[InlineKeyboardButton]] = []
-    for kind, _wai, payload in _TTS_KEYBOARD_LAYOUT:
-        if kind == 'actions':
-            rows.append([InlineKeyboardButton(text=t, callback_data=f'ttsinput:{request_id}:{s}')
-                         for t, s in payload])
-        elif kind == 'header':
-            rows.append([InlineKeyboardButton(text=payload, callback_data='noop')])
-        elif kind == 'options':
-            field, values = payload
-            rows.append(_option_row(field, values, cfg.get(field, _TTS_CFG_DEFAULTS[field])))
-        elif kind == 'chunked':
-            field, values, chunk = payload
-            cur = cfg.get(field, _TTS_CFG_DEFAULTS[field])
-            for i in range(0, len(values), chunk):
-                rows.append(_option_row(field, values[i:i + chunk], cur))
-        elif kind == 'preview':
-            rows.append([InlineKeyboardButton(text=payload, callback_data=f'ttsprev:{request_id}')])
-        elif kind == 'generate':
-            rows.append([InlineKeyboardButton(text=payload, callback_data=f'ttsgen:{request_id}')])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+

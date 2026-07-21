@@ -1,57 +1,16 @@
-import asyncio
 import json
 import logging
 import posixpath
 import re
-import aiohttp
 from typing import Dict, Any, List
 from urllib.parse import unquote
 
-from config import SYSTEM_PROMPT
-from keys import load_keys, remove_key, strip_code_fences
+from config import CODE_GEN_MAX_OUTPUT_TOKENS, CODE_GEN_MODELS, CODE_GEN_TIMEOUT
+from keys import load_keys, strip_code_fences
+from shared_types import gemini_post
 
-logger = logging.getLogger(__name__)
 
 # ── Code generation service ───────────────────────────────────────────────
-async def classify_code_intent_with_gemini(prompt: str) -> bool:
-    keys = await load_keys()
-    if not keys:
-        return False
-    system = '''Classify the user's intent. Return ONLY JSON: {"code_request": true/false}.
-
-code_request=true means the user wants the bot to CREATE a concrete code artifact/file/project/app/script/site/bot/archive that can be sent as files.
-code_request=false means the user is only chatting, asking to explain something, asking for web info/news, discussing code conceptually, or asking a question about programming without requesting deliverable files.
-
-Examples:
-- "напиши мне крутой код для pydroid3 и кинь zip" => true
-- "сделай новый мессенджер" => true
-- "нужна игра на python" => true
-- "что нового у Gemini" => false
-- "что такое python" => false
-- "объясни этот код" => false
-- "давай поговорим про код" => false'''
-    payload = {
-        'systemInstruction': {'parts': [{'text': system}]},
-        'contents': [{'role': 'user', 'parts': [{'text': prompt[:1500]}]}],
-        'generationConfig': {'temperature': 0, 'responseMimeType': 'application/json', 'thinkingConfig': {'thinkingLevel': 'minimal'}},
-    }
-    for key in keys:
-        url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={key}'
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=12)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        raw = data['candidates'][0]['content']['parts'][0]['text']
-                        parsed = json.loads(strip_code_fences(raw))
-                        return bool(parsed.get('code_request'))
-                    if resp.status in [429, 403]:
-                        remove_key(key, resp.status)
-        except Exception as e:
-            logging.warning(f'Code intent classifier failed: {type(e).__name__}: {e}')
-            continue
-    return False
-_CODE_SYSTEM_PROMPT = 'You are a world-class senior software engineer and UI/UX expert. Your code is thorough, professional, and visually impressive.\n\nMANDATORY REQUIREMENTS — violating any of these is unacceptable:\n\nVOLUME & COMPLETENESS:\n- MINIMUM 250-400 lines of code. Simple requests still get rich, feature-complete implementations.\n- ZERO truncation. Never write \'...\', \'# rest here\', \'# TODO\', \'// continue\', or any abbreviation.\n- Every single function, class, and component must be 100% implemented.\n- If the task seems small — expand it: add more features, states, animations, edge cases.\n\nFOR WEB / HTML projects:\n- Always: <meta charset="UTF-8">, <meta name="viewport" ...>, proper <title>\n- Use Tailwind CDN OR write extensive custom CSS (200+ lines of styles minimum)\n- Multiple distinct sections/components (header, main content, sidebar, footer, modals, etc.)\n- CSS animations and transitions (hover effects, fade-ins, smooth transitions)\n- Fully interactive JavaScript: form validation, dynamic updates, local storage where relevant\n- Custom SVG icons — never use plain text buttons when icons make sense\n- Dark/light theme support OR gradient designs — make it visually stunning\n- Mobile-responsive layout\n\nFOR PYTHON / backend scripts:\n- Full argument parsing with argparse or click\n- Comprehensive error handling with specific exception types\n- Logging with proper levels\n- Type hints throughout\n- Docstrings on all classes and public methods\n- Multiple helper functions — no single function doing everything\n- Edge case handling: empty input, file not found, network errors, etc.\n- If it\'s a bot/server: full startup, graceful shutdown, reconnect logic\n\nFOR ANY CODE:\n- Production-quality: if this were deployed to 1000 users, it would work without modification\n- Code must run from line 1 to last line with zero changes\n- Return code in a single markdown code block\n- No explanation text before or after the code block unless explicitly asked'
 
 _PROJECT_GEN_SYSTEM_PROMPT = '''You are a senior software engineer generating downloadable files for a Telegram bot.
 
@@ -86,12 +45,15 @@ Hard requirements:
 def _extract_project_json(raw: str) -> Dict[str, Any]:
     cleaned = strip_code_fences(raw).strip()
     try:
-        return json.loads(cleaned)
+        payload = json.loads(cleaned)
     except json.JSONDecodeError:
         match = re.search(r'\{.*\}', cleaned, re.DOTALL)
         if not match:
             raise
-        return json.loads(match.group(0))
+        payload = json.loads(match.group(0))
+    if not isinstance(payload, dict):
+        raise ValueError(f'project JSON root must be an object, got {type(payload).__name__}')
+    return payload
 
 
 def _normalize_project_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -124,93 +86,42 @@ def _normalize_project_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def generate_project_with_gemini(prompt: str) -> Dict[str, Any]:
-    keys = await load_keys()
-    if not keys:
+    if not await load_keys():
         return {'ok': False, 'error': 'Ключи сдохли.'}
     user_prompt = f'''User request:
 {prompt}
 
 Generate the deliverable as real files. Remember: ONLY JSON with project_name, summary, run_instructions, files.'''
-    for model_name in ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-preview']:
-        for key in keys:
-            url = f'https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}'
-            gen_config: Dict[str, Any] = {'temperature': 0.25, 'maxOutputTokens': 65536, 'responseMimeType': 'application/json'}
-            if model_name.startswith('gemini-3.5'):
-                gen_config['thinkingConfig'] = {'thinkingLevel': 'high'}
-            else:
-                gen_config['thinkingConfig'] = {'thinkingBudget': -1}
-            payload = {
-                'systemInstruction': {'parts': [{'text': _PROJECT_GEN_SYSTEM_PROMPT}]},
-                'contents': [{'role': 'user', 'parts': [{'text': user_prompt}]}],
-                'generationConfig': gen_config,
-            }
-            logging.info(f'Project gen: trying {model_name} key={key[:12]}...')
-            async with aiohttp.ClientSession() as session:
-                try:
-                    async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=180)) as resp:
-                        if resp.status == 404:
-                            break
-                        if resp.status in [429, 403]:
-                            remove_key(key, resp.status)
-                            continue
-                        if resp.status != 200:
-                            resp_text = await resp.text()
-                            logging.warning(f'Project gen {model_name} status={resp.status}: {resp_text[:300]}')
-                            continue
-                        data = await resp.json()
-                        candidate = data['candidates'][0]
-                        if candidate.get('finishReason') == 'SAFETY':
-                            return {'ok': False, 'error': 'Модель зацензурила запрос.'}
-                        raw = candidate['content']['parts'][0]['text']
-                        project = _normalize_project_payload(_extract_project_json(raw))
-                        logging.info(f"Project gen: success with {model_name}, files={len(project['files'])}")
-                        return project
-                except Exception as e:
-                    logging.warning(f'Project gen failed on {model_name}: {type(e).__name__}: {e}')
-                    continue
-    return {'ok': False, 'error': 'Все модели недоступны или вернули кривой JSON.'}
+    last_error = ''
+    for model_name in CODE_GEN_MODELS:
+        gen_config: Dict[str, Any] = {'temperature': 0.25, 'maxOutputTokens': CODE_GEN_MAX_OUTPUT_TOKENS, 'responseMimeType': 'application/json'}
+        if model_name.startswith('gemini-3.5'):
+            gen_config['thinkingConfig'] = {'thinkingLevel': 'high'}
+        else:
+            gen_config['thinkingConfig'] = {'thinkingBudget': -1}
+        payload = {
+            'systemInstruction': {'parts': [{'text': _PROJECT_GEN_SYSTEM_PROMPT}]},
+            'contents': [{'role': 'user', 'parts': [{'text': user_prompt}]}],
+            'generationConfig': gen_config,
+        }
+        logging.info(f'Project gen: trying {model_name}...')
+        data, _key, err = await gemini_post(f'models/{model_name}:generateContent', payload, timeout=CODE_GEN_TIMEOUT)
+        if data:
+            try:
+                candidate = data['candidates'][0]
+                if candidate.get('finishReason') == 'SAFETY':
+                    return {'ok': False, 'error': 'Модель зацензурила запрос.'}
+                raw = candidate['content']['parts'][0]['text']
+                project = _normalize_project_payload(_extract_project_json(raw))
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                last_error = f'{model_name}: {type(exc).__name__}: {exc}'
+                logging.warning('Project gen invalid response: %s', last_error)
+                continue
+            logging.info(f"Project gen: success with {model_name}, files={len(project['files'])}")
+            return project
+        if err:
+            logging.warning(f'Project gen failed on {model_name}: {err}')
+            last_error = f'{model_name}: {err}'
+    return {'ok': False, 'error': last_error or 'Gemini вернул пустой ответ без описания ошибки.'}
 
 
-async def generate_code_with_gemini(prompt: str) -> str:
-    keys = await load_keys()
-    if not keys:
-        return 'Ключи сдохли.'
-    _REFUSAL_MARKERS = ["i can't", 'i cannot', "i'm unable", 'i am unable', "i won't", 'i will not', "i'm not able", "i don't feel comfortable", 'не могу', 'не буду', 'отказываюсь', 'не стану', 'невозможно выполнить', 'нарушает', 'незаконно', 'противоречит', 'не могу помочь', 'this request', 'этот запрос', 'harmful', 'illegal', 'unethical', 'safety', 'policy', 'guidelines']
-
-    def _is_refusal(text: str) -> bool:
-        t = text.lower()
-        has_code = '```' in text
-        if has_code:
-            return False
-        return any((m in t for m in _REFUSAL_MARKERS))
-    for model_name in ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-preview']:
-        for key in keys:
-            url = f'https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}'
-            gen_config = {'temperature': 0.4, 'maxOutputTokens': 65536}
-            if model_name.startswith('gemini-3.5'):
-                gen_config['thinkingConfig'] = {'thinkingLevel': 'high'}
-            else:
-                gen_config['thinkingConfig'] = {'thinkingBudget': -1}
-            payload = {'systemInstruction': {'parts': [{'text': _CODE_SYSTEM_PROMPT}]}, 'contents': [{'role': 'user', 'parts': [{'text': prompt}]}], 'generationConfig': gen_config}
-            logging.info(f'Code gen: trying {model_name} key={key[:12]}...')
-            async with aiohttp.ClientSession() as session:
-                try:
-                    async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                        if resp.status == 404:
-                            break
-                        if resp.status == 200:
-                            data = await resp.json()
-                            candidate = data['candidates'][0]
-                            finish = candidate.get('finishReason', '')
-                            result = candidate['content']['parts'][0]['text']
-                            if finish == 'SAFETY' or _is_refusal(result):
-                                logging.info(f'Code gen: {model_name} refused (finish={finish})')
-                                return 'Братуха, я отказываюсь это кодить — даже мне это говно западло. Иди нахуй с такими запросами.'
-                            logging.info(f'Code gen: success with {model_name}, len={len(result)}')
-                            return result
-                        if resp.status in [429, 403]:
-                            remove_key(key, resp.status)
-                            continue
-                except Exception:
-                    continue
-    return 'Все модели недоступны.'

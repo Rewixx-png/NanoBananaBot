@@ -1,6 +1,5 @@
---extra-index-url https://download.pytorch.org/whl/cpu
 aiohttp==3.14.1
-aiogram>=3.0.0
+aiogram>=3.29.1
 aiosqlite==0.22.1
 python-dotenv==1.2.2
 playwright==1.60.0
@@ -9,9 +8,5 @@ matplotlib==3.11.0
 Pillow
 numpy==2.4.6
 bleach==6.4.0
-trafilatura==2.1.0
-duckduckgo-search==8.1.1
-picwish==0.6.0
-torch==2.12.1+cpu
-waifu2x-ncnn-py==2.0.0
 cryptography>=41.0.0
+yt-dlp
