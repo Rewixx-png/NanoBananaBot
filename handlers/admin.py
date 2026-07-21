@@ -1,6 +1,5 @@
 import time
 import logging
-import asyncio
 from datetime import date
 from aiogram import Router, F, types
 from aiogram.filters import Command
@@ -24,35 +23,40 @@ from database import (
 
 admin_router = Router()
 
-@admin_router.message(Command('unban'))
-async def cmd_unban(message: types.Message):
-    if message.from_user.id != OWNER_USER_ID:
-        return
+async def _resolve_target_id(message: types.Message, cmd_name: str) -> int | None:
+    """Extract user ID from reply, @username, or numeric argument. Replies on failure; returns None."""
     target_id = None
     parts = (message.text or '').split()
     if message.reply_to_message and message.reply_to_message.from_user:
         target_id = message.reply_to_message.from_user.id
-    else:
-        if len(parts) > 1:
-            if parts[1].startswith('@'):
-                target_username = parts[1][1:]
-                for (cid, mems) in chat_members_cache.items():
-                    for (uid, (_, un)) in mems.items():
-                        if un and un.lower() == target_username.lower():
-                            target_id = uid
-                            break
-                    if target_id:
+    elif len(parts) > 1:
+        if parts[1].startswith('@'):
+            target_username = parts[1][1:]
+            for (_cid, mems) in chat_members_cache.items():
+                for (uid, (_, un)) in mems.items():
+                    if un and un.lower() == target_username.lower():
+                        target_id = uid
                         break
-            else:
-                try:
-                    target_id = int(parts[1])
-                except ValueError:
-                    pass
+                if target_id:
+                    break
+        else:
+            try:
+                target_id = int(parts[1])
+            except ValueError:
+                pass
     if not target_id:
         if parts and len(parts) > 1 and parts[1].startswith('@'):
             await message.reply(f'Я не знаю юзера {parts[1]} (нет в кэше). Пусть напишет что-то в чат, или укажи его числовой ID.')
         else:
-            await message.reply('Ответь на сообщение юзера или укажи /unban <user_id> или @username')
+            await message.reply(f'Ответь на сообщение юзера или укажи /{cmd_name} <user_id> или @username')
+    return target_id
+
+@admin_router.message(Command('unban'))
+async def cmd_unban(message: types.Message):
+    if message.from_user.id != OWNER_USER_ID:
+        return
+    target_id = await _resolve_target_id(message, 'unban')
+    if not target_id:
         return
     await remove_banned_user_db(target_id)
     if target_id in banned_user_ids:
@@ -63,31 +67,8 @@ async def cmd_unban(message: types.Message):
 async def cmd_ban(message: types.Message):
     if message.from_user.id != OWNER_USER_ID:
         return
-    target_id = None
-    parts = (message.text or '').split()
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_id = message.reply_to_message.from_user.id
-    else:
-        if len(parts) > 1:
-            if parts[1].startswith('@'):
-                target_username = parts[1][1:]
-                for (cid, mems) in chat_members_cache.items():
-                    for (uid, (_, un)) in mems.items():
-                        if un and un.lower() == target_username.lower():
-                            target_id = uid
-                            break
-                    if target_id:
-                        break
-            else:
-                try:
-                    target_id = int(parts[1])
-                except ValueError:
-                    pass
+    target_id = await _resolve_target_id(message, 'ban')
     if not target_id:
-        if parts and len(parts) > 1 and parts[1].startswith('@'):
-            await message.reply(f'Я не знаю юзера {parts[1]} (нет в кэше). Пусть напишет что-то в чат, или укажи его числовой ID.')
-        else:
-            await message.reply('Ответь на сообщение юзера или укажи /ban <user_id> или @username')
         return
     await add_banned_user_db(target_id)
     banned_user_ids.add(target_id)

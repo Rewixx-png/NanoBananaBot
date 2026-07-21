@@ -6,10 +6,9 @@ import aiohttp
 from typing import Tuple, Optional, List, Dict, Any
 
 from config import OPENAI_TIMEOUT
-from keys import load_openai_keys, load_openrouter_keys, remove_key
+from keys import load_openai_keys, remove_key
 from services.openrouter import generate_image_with_openrouter
 
-logger = logging.getLogger(__name__)
 
 
 async def parse_openai_image_response(resp) -> Tuple[Optional[bytes], Optional[str]]:
@@ -46,7 +45,7 @@ async def generate_image_with_gpt(
     images_bytes: Optional[List[bytes]] = None,
     state_data: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[bytes], Optional[str]]:
-    """Generate an image via OpenAI (DALL-E 3 / GPT-Image-2) with automatic fallback to OpenRouter."""
+    """Generate an image via OpenAI with dynamic model discovery from API key — no OpenRouter fallback."""
     if model.startswith('openai/'):
         logging.info(f'Модель {model} — OpenRouter, пропускаю OpenAI ключи.')
         if state_data:
@@ -84,10 +83,7 @@ async def generate_image_with_gpt(
                             logging.warning(f"edits error: {err_body[:300]}")
                         (result, error) = await parse_openai_image_response(resp)
                 else:
-                    if model == 'dall-e-3':
-                        payload = {'model': model, 'prompt': prompt_text, 'n': 1, 'size': '1024x1024'}
-                    else:
-                        payload = {'model': model, 'prompt': prompt_text}
+                    payload = {'model': model, 'prompt': prompt_text}
                     async with session.post('https://api.openai.com/v1/images/generations', json=payload, headers={**headers, 'Content-Type': 'application/json'}, timeout=request_timeout) as resp:
                         (result, error) = await parse_openai_image_response(resp)
                 if result:
@@ -126,7 +122,10 @@ async def generate_image_with_gpt(
                                     last_error = fb_error
                             except Exception:
                                 pass
-                    elif 'billing' in lowered_err or 'quota' in lowered_err or 'limit' in lowered_err or '(401)' in error or 'unauthorized' in lowered_err or 'hard limit' in lowered_err or 'not active' in lowered_err:
+                    elif '(429)' in error:
+                        logging.warning(f'Rate limit (429) на ключе {api_key[:12]}..., кулдаун 65с.')
+                        remove_key(api_key, 429)
+                    elif 'billing' in lowered_err or 'quota' in lowered_err or 'hard limit' in lowered_err or '(401)' in error or 'unauthorized' in lowered_err or 'not active' in lowered_err:
                         logging.warning(f'Удаляю нерабочий OpenAI ключ {api_key[:12]}... Ошибка: {error}')
                         remove_key(api_key)
                     else:
@@ -141,41 +140,21 @@ async def generate_image_with_gpt(
             except Exception as e:
                 logging.warning(f'Неожиданная ошибка OpenAI на ключе {api_key[:12]}...: {type(e).__name__}: {e}, пробую следующий.')
                 continue
-    logging.info('Все OpenAI ключи упали, пробую через OpenRouter (openai/gpt-5.4-image-2)...')
-    if state_data:
-        state_data['status'] = 'Переключаюсь на OpenRouter...'
-        state_data['fallback_openrouter'] = True
-    (or_result, or_error) = await generate_image_with_openrouter(prompt, model='openai/gpt-5.4-image-2', images_bytes=all_ref_images or None, state_data=state_data)
-    if or_result:
-        return (or_result, None)
-    logging.warning(f'OpenRouter тоже не помог: {or_error}')
-    return (None, f'GPT недоступен: OpenAI ключи не сработали; OpenRouter: {or_error or last_error or "нет рабочих ключей"}.')
+    return (None, f'GPT недоступен: все OpenAI ключи не сработали. {last_error or "нет рабочих ключей"}')
 
 
-def is_openai_verification_error(error_msg: str) -> bool:
-    """Check if an OpenAI error is due to organization verification requirement."""
-    if not error_msg:
-        return False
-    lowered = error_msg.lower()
-    return 'organization must be verified' in lowered or 'must be verified' in lowered or 'verify organization' in lowered
 
 
-def is_openai_timeout_error(error_msg: str) -> bool:
-    """Check if an error message indicates a timeout."""
-    if not error_msg:
-        return False
-    lowered = error_msg.lower()
-    return 'timeout' in lowered or 'timed out' in lowered or 'timed_out' in lowered
 
 
 async def fetch_openai_image_models() -> list:
     """Fetch available OpenAI image-generation models from API."""
-    from ai_services import _models_cache, _MODELS_CACHE_TTL, _pretty_model_name
+    from shared_types import _models_cache, _MODELS_CACHE_TTL, _pretty_model_name
     cache_key = 'openai_image'
     now = __import__('time').time()
     if cache_key in _models_cache and now - _models_cache[cache_key]['ts'] < _MODELS_CACHE_TTL:
         return _models_cache[cache_key]['data']
-    skip = {'dall-e-2', 'gpt-image-1-mini'}
+    skip = {'dall-e-2', 'dall-e-3', 'gpt-image-1-mini'}
     result = []
     seen = set()
     api_keys = await load_openai_keys()
@@ -196,12 +175,16 @@ async def fetch_openai_image_models() -> list:
         except Exception as e:
             logging.warning(f'fetch_openai_image_models key {key[:12]}: {e}')
             continue
-    # No OpenRouter fallback — GPT=models from OpenAI API only
-    # Merge API results with known defaults (deduplicate by model ID)
-    defaults = [('GPT-Image-2', 'gpt-image-2'), ('DALL-E 3', 'dall-e-3')]
-    seen_ids = {mid for (_, mid) in result}
-    for label, mid in defaults:
-        if mid not in seen_ids:
+    # Fallback: if no key returned models via API, use known defaults so the GPT button still appears
+    if not result:
+        defaults = [
+            ('GPT-Image-2', 'gpt-image-2'),
+            ('GPT-Image-2 (Apr)', 'gpt-image-2-2026-04-21'),
+            ('GPT-Image-1.5', 'gpt-image-1.5'),
+            ('GPT-Image-1', 'gpt-image-1'),
+            ('ChatGPT Image', 'chatgpt-image-latest'),
+        ]
+        for label, mid in defaults:
             result.append((label, mid))
     _models_cache[cache_key] = {'ts': now, 'data': result}
     return result

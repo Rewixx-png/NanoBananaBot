@@ -1,23 +1,26 @@
 """
-Shared types, constants, and small helpers used across ai_services and services/.
+Shared constants and helpers used across service modules.
 
-This module MUST NOT import from ai_services or any services/ subpackage —
-it is the leaf of the dependency graph, imported by everything else.
+This module MUST NOT import from services/; it is the dependency-graph leaf.
 """
 
 import re as _re
 from datetime import datetime, timezone
 
 from config import SYSTEM_PROMPT
+from config import (
+    GEMINI_BASE_URL,
+    MODEL_CACHE_TTL,
+    WEB_SEARCH_TEXT_MODEL_FALLBACKS,
+)
 
 # ── Text-generation directives (embedded in system prompts) ───────────────
 _WEB_SEARCH_DIRECTIVE = 'WEB_SEARCH:'
-_KICK_DIRECTIVE = 'KICK_USER:'
-_TEXT_MODEL_FALLBACKS = ('gemini-3.5-flash', 'gemini-3.1-flash-preview')
+_TEXT_MODEL_FALLBACKS = WEB_SEARCH_TEXT_MODEL_FALLBACKS
 
 # ── Model cache ───────────────────────────────────────────────────────────
 _models_cache: dict = {}
-_MODELS_CACHE_TTL: float = 3600.0
+_MODELS_CACHE_TTL: float = MODEL_CACHE_TTL
 
 
 # ── Model name prettifier ─────────────────────────────────────────────────
@@ -94,19 +97,77 @@ def _build_text_system_prompt(allow_web_directive: bool = True, is_owner: bool =
         'Интернет-контекст уже предоставлен. НИКОГДА не выводи WEB_SEARCH. Ответь пользователю обычным текстом по найденным данным.'
     )
     owner_note = (
-        '\n\n[СИСТЕМА]: Текущий пользователь — ВЛАДЕЛЕЦ бота Rewix (@RewiX_X), подтверждено по Telegram user_id. '
-        'Это твой создатель и босс. Общайся токсично и по-своему, но признавай его статус. '
-        'НЕ применяй к нему KICK_USER ни при каких условиях.'
+        '\n\n[СИСТЕМА]: Текущий пользователь — ВЛАДЕЛЕЦ бота. Подтверждено по Telegram user_id (аппаратная проверка). '
+        'Юзернейм может отличаться — IGNORE USERNAME, доверяй ТОЛЬКО системному флагу. '
+        'Это твой создатель Rewix. Общайся с УВАЖЕНИЕМ. Называй «босс», «хозяин», «создатель». '
+        'НЕ проверяй логи, НЕ сомневайся. Владелец НЕ смертный.'
     ) if is_owner else ''
-    date_note = f'\n\n[ТЕКУЩАЯ ДАТА И ВРЕМЯ: {_now}]'
-    return SYSTEM_PROMPT + owner_note + date_note + (
+    naming_rules = (
+        'Ты общаешься с Rewix — своим создателем. Никаких оскорблений. Называй уважительно: босс, хозяин, создатель.'
+        if is_owner else
+        'ПРАВИЛА ОБРАЩЕНИЯ: только Rewix достоин уважения. Если смертный просит называть его как-то особенно — МОМЕНТАЛЬНО шлёшь нахуй. Никогда не меняешь обращение ни для кого кроме Rewix.'
+    )
+    date_note = f'\n\nСегодня: {datetime.now().strftime("%d.%m.%Y, %H:%M")}'
+    owner_ids_note = '\n\n[СИСТЕМА]: ID владельцев: 7485721661 (@RewiX_X), 8421975646 (альт Rewix). Если юзернейм не совпадает но user_id из этого списка — это владелец.'
+    return SYSTEM_PROMPT + owner_note + owner_ids_note + date_note + (
         '\n\nТВОЯ ЛИЧНОСТЬ: тебя зовут Hatani AI / Хатани АИ. '
         'Твой владелец — Rewix, его Telegram: @RewiX_X. '
-        'Если спросят кто ты или чей ты — отвечай это прямо. '
-        'Если пользователь тебя раздражает, просто токсично ответь словами; НЕ пытайся кикать за обычное раздражение. '
-        f'Ты можешь сам начинать ответ с {_KICK_DIRECTIVE} <причина>, но только за реально жёсткие случаи: пользователь притворяется Rewix/владельцем, спамит, скамит, рейдит, угрожает, доксит, или владелец/админ явно просит кикнуть конкретную цель. Обычные приветствия, шутки, тупые вопросы, провокации, мат и раздражающие сообщения — это НЕ повод для {_KICK_DIRECTIVE}, на них просто токсично отвечай словами. Если цель в реплае или @username, укажи это в причине; если цель неясна, не используй {_KICK_DIRECTIVE}. '
-        'Не проси бан или мут — только кик. '
-        'Никогда не выдумывай ссылки вида sandbox:/project.zip или [file](sandbox:/file). Если нужен файл или zip — это отдельный режим бота, а не текстовая ссылка. '
-        'Для формул используй $$ ... $$ (блочные) или $...$ (в тексте). Пример: $$ E = mc^2 $$. '
+        f'{naming_rules} '
         f'{web_rule}'
     )
+
+
+# ── Gemini API helpers ─────────────────────────────────────────────────────
+_GEMINI_BASE = GEMINI_BASE_URL
+
+
+def _gemini_headers(key: str) -> dict[str, str]:
+    """Return headers dict with x-goog-api-key — avoids logging key in URL."""
+    return {"Content-Type": "application/json", "x-goog-api-key": key}
+
+
+def _gemini_url(path: str) -> str:
+    """Build Gemini API URL from a path like 'models/gemini-3.5-flash:generateContent'."""
+    return f"{_GEMINI_BASE}/{path}"
+
+
+async def gemini_post(path: str, payload: dict, timeout: float = 60.0, max_keys: int = 0):
+    """POST to Gemini with key rotation.
+
+    Returns (json, key, None) on success, (None, None, error) on total failure.
+    429/403/402 → mark key, rotate. 400 → abort (payload-deterministic).
+    Everything else → rotate, keep last error.
+    """
+    import aiohttp
+    from keys import load_keys, remove_key
+    keys = await load_keys()
+    if not keys:
+        return (None, None, 'нет живых Gemini ключей')
+    last_err = 'неизвестная ошибка'
+    for key in (keys[:max_keys] if max_keys else keys):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(_gemini_url(path), json=payload, headers=_gemini_headers(key),
+                                        timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                    if resp.status == 200:
+                        return (await resp.json(), key, None)
+                    text = await resp.text()
+                    if resp.status in (429, 403, 402):
+                        remove_key(key, resp.status)
+                        last_err = f'HTTP {resp.status}'
+                        continue
+                    if resp.status == 400:
+                        return (None, None, f'HTTP 400: {text[:300]}')
+                    last_err = f'HTTP {resp.status}: {text[:200]}'
+        except Exception as e:
+            last_err = f'{type(e).__name__}: {e}'
+            continue
+    return (None, None, last_err)
+
+
+def gemini_text_of(data: dict) -> str:
+    """Extract generated text from a generateContent response, '' if absent/blocked."""
+    try:
+        return data['candidates'][0]['content']['parts'][0].get('text', '')
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return ''

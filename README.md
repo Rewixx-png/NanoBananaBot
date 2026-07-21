@@ -264,16 +264,14 @@ pm2 save
 ```
 main.py          — точка входа, 2 бота, BanMiddleware, DualHistoryMiddleware
 config.py        — константы, токены из env, SYSTEM_PROMPT
-handlers.py      — все команды и обработчики (~2800 строк)
-ai_services.py   — AI-вызовы: Gemini/GPT/NVIDIA/Replicate/Veo/TTS/Firecrawl
-agent.py         — ReAct-агент с 21 инструментом и Docker-сэндбоксом
-state.py         — in-memory state (cooldowns, pending requests, context buffers)
-database.py      — aiosqlite: история, статистика, баны, лимиты, логи промптов
-keys_manager.py  — ротация ключей из r.txt + keyhunter.db
+handlers/        — команды, callback и обработчики входящих сообщений
+services/        — AI-сервисы: Gemini/GPT/NVIDIA/Replicate/Veo/TTS/Firecrawl
+agent/           — ReAct-агент и инструменты изолированного workspace
+state.py         — in-memory state: cooldown, pending requests, context buffers
+database/        — aiosqlite: миграции, история, статистика, лимиты и промпты
+keys/            — ротация ключей из r.txt, nano_keys.db и keyhunter.db
 dual_bot.py      — второй бот (Банан/Нано), дуэльный AI-диалог
 figma_bridge.py  — HTTP-сервер на порту 7432 для Figma Plugin
-esrgan_model.py  — ESRGAN (anime.pth) — запасной апскейлер
-Dockerfile.sandbox — Python 3.11-slim образ для агентного сэндбокса
 ```
 
 ---

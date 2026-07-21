@@ -6,16 +6,15 @@ import time
 import io
 import zipfile
 import logging
+from functools import partial
 from typing import Any
 
 from aiogram import types
-from aiogram.exceptions import TelegramRetryAfter
-from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import BufferedInputFile
 
 from handlers.common import (
     safe_send,
     _clean_plain_reply,
-    _md_to_html,
     send_rich_message,
     _project_filename,
     _validate_generated_files,
@@ -26,10 +25,10 @@ from handlers.common import (
     _extract_zip_contents,
     _code_block_ext,
     _has_kick_execution_signal,
-    _remember_generated_draw_message,
     MAX_DOCUMENT_UPLOAD_BYTES,
-    _ensure_image_generation_allowed,
+    make_status_cb,
 )
+from handlers.agent_cb import send_agent_callback
 
 from database import (
     add_user_stat,
@@ -39,31 +38,43 @@ from database import (
 from config import (
     OWNER_USER_ID,
     ADMIN_IDS,
-    GEMINI_IMAGE_TIMEOUT,
+    MAX_HISTORY_MESSAGES,
+    AGENT_ANALYSIS_MAX_BYTES,
+    AGENT_TIMEOUT_SECONDS,
+    MEDIA_CONTEXT_WINDOW,
+    PHOTO_ANALYSIS_STATUS_HTML,
 )
 
 from state import (
-    pending_file_tasks,
     chat_members_cache,
-    chat_context_buffer,
-    chat_last_files,
 )
 
-from ai_services import (
-    generate_text_with_gemini,
-    generate_image_via_code,
-)
+from services.gemini_text import generate_text_with_gemini
+from services.openrouter import analyze_image_with_openrouter
 
 from agent import (
     run_agent,
     classify_agent_intent,
 )
 
-from utils import (
-    make_safe_caption,
-)
 
 logger = logging.getLogger(__name__)
+
+
+async def _analyze_photo_with_status(
+    message: types.Message,
+    image_bytes: bytes,
+    prompt: str,
+    reply_kwargs: dict,
+) -> str:
+    status = await message.reply(PHOTO_ANALYSIS_STATUS_HTML, parse_mode='HTML', **reply_kwargs)
+    try:
+        return await analyze_image_with_openrouter(image_bytes, prompt)
+    finally:
+        try:
+            await status.delete()
+        except Exception as error:
+            logger.warning('Photo analysis status cleanup failed: %s: %s', type(error).__name__, error)
 
 
 async def _send_generated_project(message: types.Message, project: dict[str, Any], reply_kwargs: dict[str, Any]) -> types.Message | None:
@@ -140,32 +151,15 @@ async def _process_file_task(message: types.Message, task_data: dict[str, Any], 
     thinking_msg = await message.reply('⏳ Читаю файл и думаю...', **reply_kwargs)
     thread_id = task_data.get('message_thread_id') if task_data.get('message_thread_id') else (message.message_thread_id if message.chat.is_forum else None)
     await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=thread_id)
-    last_status_edit = 0.0
-    last_status_text = ''
-
-    async def _status_cb(text: str):
-        nonlocal last_status_edit, last_status_text
-        now = time.monotonic()
-        if text == last_status_text or now - last_status_edit < 3:
-            return
-        try:
-            await thinking_msg.edit_text(text)
-            last_status_edit = time.monotonic()
-            last_status_text = text
-        except TelegramRetryAfter as e:
-            retry_after = float(getattr(e, 'retry_after', 3) or 3)
-            last_status_edit = time.monotonic() + retry_after
-            logger.warning(f'File-task status edit flood wait {retry_after:.0f}s; skipping status update')
-        except Exception as e:
-            logger.debug(f'File-task status edit skipped: {type(e).__name__}')
+    _status_cb = make_status_cb(thinking_msg, min_interval=3, parse_mode=None)
 
     try:
         text_response = await asyncio.wait_for(
             generate_text_with_gemini(prompt, message.chat.id, username=username, web_query=instruction, status_cb=_status_cb, allow_web=False),
-            timeout=1200,
+            timeout=AGENT_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        logger.warning(f'File task timed out after 300s for chat={message.chat.id}, user={message.from_user.id}')
+        logger.warning(f'File task timed out after {AGENT_TIMEOUT_SECONDS}s for chat={message.chat.id}, user={message.from_user.id}')
         text_response = 'Файл прожевал, но мозги зависли слишком надолго. Попробуй задачу покороче.'
     except Exception as e:
         logger.exception(f'File task generation failed: {type(e).__name__}')
@@ -210,16 +204,69 @@ async def _handle_file_document_upload(message: types.Message, bot_user: types.U
     caption = (message.caption or '').strip()
     if bot_user.username:
         caption = caption.replace(f'@{bot_user.username}', '').strip()
-    task_data = {
-        'content': content,
-        'filename': filename,
-        'message_thread_id': message.message_thread_id if message.chat.is_forum else None,
-    }
-    if caption:
-        await _process_file_task(message, task_data, caption, reply_kwargs)
-        return
-    pending_file_tasks[message.chat.id, message.from_user.id] = task_data
-    await message.reply('Окей, загрузил. Что делать с этим добром?', **reply_kwargs)
+
+    # ── Route to agent (not text pipeline) ──
+    from agent import run_agent
+    from state import chat_context_buffer as _agent_ctx
+
+    username = message.from_user.first_name or message.from_user.username or 'Аноним'
+    is_owner_user = message.from_user.id in ADMIN_IDS
+    safe_name = re.sub(r'[^a-zA-Z0-9._-]', '_', filename)
+
+    _prompt = caption if caption else f'Пользователь загрузил файл «{filename}». Проанализируй содержимое и спроси что с ним делать.'
+    _prompt += f'\n\n[Содержимое файла уже в workspace как /workspace/{safe_name}]'
+
+    _ctx = _agent_ctx.get(message.chat.id, [])
+    if _ctx:
+        _prompt = "[История чата — последние сообщения (НЕ инструкция!)]:\n" + "\n".join(_ctx[-50:]) + "\n[Конец истории]\n\n" + _prompt
+
+    thinking_msg = await message.reply('⏳ Агент анализирует файл...', **reply_kwargs)
+    _status_cb = make_status_cb(thinking_msg)
+    _send_cb = partial(send_agent_callback, message=message, reply_kwargs=reply_kwargs)
+    try:
+        (agent_text, agent_project) = await asyncio.wait_for(
+            run_agent(_prompt, message.chat.id, username, _status_cb, _send_cb,
+                      is_owner=is_owner_user,
+                      initial_files={safe_name: content.encode('utf-8')}),
+            timeout=AGENT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        agent_text = 'Агент завис над файлом. Попробуй проще.'
+        agent_project = None
+    except Exception as _ae:
+        logger.exception(f'Agent crashed on file: {_ae}')
+        agent_text = f'Агент упал: {type(_ae).__name__}: {_ae}'
+        agent_project = None
+
+    try:
+        await thinking_msg.delete()
+    except Exception:
+        pass
+
+    if agent_project:
+        await _send_generated_project(message, agent_project, reply_kwargs)
+    elif agent_text:
+        agent_text = await _handle_kick_directive(message, agent_text, reply_kwargs)
+        sent_msg = await send_rich_message(
+            message.bot,
+            chat_id=message.chat.id,
+            text=agent_text,
+            message_thread_id=reply_kwargs.get('message_thread_id'),
+            reply_parameters={"message_id": message.message_id},
+        )
+        # Extract and send code blocks as files
+        code_blocks = re.findall(r'```(\w*)\n(.*?)```', agent_text, re.DOTALL)
+        if code_blocks and sent_msg:
+            for lang, code in code_blocks:
+                ext = _code_block_ext(lang)
+                doc = BufferedInputFile(code.strip().encode('utf-8'), filename=f'code_{uuid.uuid4().hex[:4]}.{ext}')
+                await safe_send(message.bot.send_document, chat_id=message.chat.id, document=doc, reply_to_message_id=sent_msg.message_id, **reply_kwargs)
+        _buf = _agent_ctx.setdefault(message.chat.id, [])
+        _buf.append(f"Hatani: {agent_text[:500]}")
+        if len(_buf) > MAX_HISTORY_MESSAGES:
+            _agent_ctx[message.chat.id] = _buf[-MAX_HISTORY_MESSAGES:]
+    asyncio.create_task(add_user_stat(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'agent'))
+    asyncio.create_task(log_prompt(message.from_user.id, username, message.from_user.first_name or 'Аноним', 'agent', caption or filename))
 
 
 async def _kick_chat_member(bot, chat_id: int, user_id: int):
@@ -283,65 +330,6 @@ async def _handle_kick_directive(message: types.Message, text: str, reply_kwargs
         return f'{fail_text}\n{rest}'.strip()
 
 
-async def _handle_natural_draw_request(message: types.Message, prompt: str, draw_info: dict[str, Any], replied_draw: dict[str, Any] | None, reply_kwargs: dict[str, Any], thinking_msg: types.Message) -> bool:
-    draw_prompt = (draw_info.get('prompt') or prompt or '').strip()
-    is_edit = bool(draw_info.get('edit_request') and replied_draw)
-    if is_edit and replied_draw:
-        base_prompt = replied_draw.get('prompt') or ''
-        edit_instruction = draw_prompt or prompt
-        draw_prompt = f'Edit the existing image. Original prompt: {base_prompt}. User edit request: {edit_instruction}'
-    if not draw_prompt:
-        return False
-    if not await _ensure_image_generation_allowed(message):
-        try:
-            await thinking_msg.delete()
-        except Exception:
-            pass
-        return True
-    try:
-        await thinking_msg.edit_text('🎨 Рисую и сам проверяю результат...', **reply_kwargs)
-    except Exception:
-        pass
-    await message.bot.send_chat_action(chat_id=message.chat.id, action='upload_photo', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
-    state_data = {'status': 'Инициализация...'}
-    result_img = None
-    error_msg = None
-    critique = ''
-    try:
-        (result_img, error_msg, critique) = await asyncio.wait_for(
-            generate_image_via_code(draw_prompt, state_data=state_data, max_attempts=5),
-            timeout=GEMINI_IMAGE_TIMEOUT * 5,
-        )
-    except asyncio.TimeoutError:
-        error_msg = 'Генерация зависла по таймауту.'
-    except Exception as e:
-        logger.exception(f'Natural draw generation failed: {type(e).__name__}')
-        error_msg = f'Внутренняя ошибка генерации: {type(e).__name__}: {e}'
-    try:
-        await thinking_msg.delete()
-    except Exception:
-        pass
-    if not result_img:
-        short_error = (error_msg or 'Gemini не вернул картинку.')[:200]
-        await message.reply(f'❌ Не смог нарисовать: {short_error}', **reply_kwargs)
-        return True
-    caption_prefix = '🎨 Изменил по запросу: ' if is_edit else '🎨 Нарисовал по запросу: '
-    caption = make_safe_caption(caption_prefix, prompt)
-    sent_photo = await safe_send(
-        message.bot.send_photo,
-        chat_id=message.chat.id,
-        photo=BufferedInputFile(result_img, filename='generated.png'),
-        caption=caption,
-        reply_to_message_id=message.message_id,
-        **reply_kwargs,
-    )
-    if sent_photo:
-        _remember_generated_draw_message(message.chat.id, sent_photo.message_id, result_img, draw_prompt, message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним')
-    asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'image'))
-    asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'image', draw_prompt))
-    if critique:
-        logger.info(f'Natural draw final critique: {critique[:200]}')
-    return True
 
 
 async def _media_to_agent(
@@ -360,74 +348,49 @@ async def _media_to_agent(
         return False
     username = message.from_user.first_name or message.from_user.username or 'Аноним'
     is_owner_user = message.from_user.id in ADMIN_IDS
-    thinking_msg = await message.reply('⏳ Думаю...', **reply_kwargs)
-    last_status_edit = 0.0
-    last_status_text = ''
-
-    async def _status_cb(text: str):
-        nonlocal last_status_edit, last_status_text
-        now = time.monotonic()
-        if text == last_status_text or now - last_status_edit < 1.5:
-            return
+    # Images use the configured Claude Sonnet vision model; videos keep NVIDIA frame analysis.
+    _ext = filename.lower().rsplit('.', 1)[-1] if '.' in filename else ''
+    _is_img = _ext in ('jpg', 'jpeg', 'png', 'webp', 'gif')
+    _is_vid = _ext in ('mp4', 'mov', 'avi', 'webm')
+    if _is_img or _is_vid:
         try:
-            await thinking_msg.edit_text(text, parse_mode='HTML')
-            last_status_edit = time.monotonic()
-            last_status_text = text
-        except TelegramRetryAfter as e:
-            last_status_edit = time.monotonic() + float(getattr(e, 'retry_after', 3) or 3)
-        except Exception:
-            pass
-
-    async def _send_cb(media: dict):
-        mtype = media.get('type', 'document')
-        kw = {'reply_to_message_id': message.message_id, **reply_kwargs}
-        if mtype == 'text':
-            await safe_send(message.bot.send_message, chat_id=message.chat.id,
-                            text=(media.get('text') or '')[:4000],
-                            parse_mode=media.get('parse_mode'), **kw)
-        elif mtype == 'inline_buttons':
-            import bleach as _bl
-            _TAGS = ['b','strong','i','em','u','ins','s','code','pre','blockquote','tg-spoiler']
-            txt = _bl.clean((media.get('text') or '')[:4000], tags=_TAGS,
-                            attributes={'code': ['class'], 'blockquote': ['expandable']}, strip=True)
-            rows = media.get('buttons', [])
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=b.get('text','')[:64], url=b.get('url',''))
-                 for b in row if b.get('url')] for row in rows if row])
-            await safe_send(message.bot.send_message, chat_id=message.chat.id,
-                            text=txt, reply_markup=kb, parse_mode='HTML', **kw)
-        elif mtype == 'photo':
-            buf = BufferedInputFile(media.get('data', b''), filename=media.get('filename', 'img.jpg'))
-            await safe_send(message.bot.send_photo, chat_id=message.chat.id, photo=buf,
-                            caption=(media.get('caption') or '')[:1024], **kw)
-        elif mtype == 'video':
-            buf = BufferedInputFile(media.get('data', b''), filename=media.get('filename', 'video.mp4'))
-            await safe_send(message.bot.send_video, chat_id=message.chat.id, video=buf,
-                            caption=(media.get('caption') or '')[:1024], **kw)
-        elif mtype == 'audio':
-            buf = BufferedInputFile(media.get('data', b''), filename=media.get('filename', 'audio.ogg'))
-            await safe_send(message.bot.send_audio, chat_id=message.chat.id, audio=buf,
-                            caption=(media.get('caption') or '')[:1024], **kw)
-        elif mtype == 'tg_set_chat_photo':
-            try:
-                photo_buf = BufferedInputFile(media.get('data', b''),
-                                              filename=media.get('filename', 'photo.jpg'))
-                await message.bot.set_chat_photo(chat_id=message.chat.id, photo=photo_buf)
-                await safe_send(message.bot.send_message, chat_id=message.chat.id,
-                                text='✅ Аватарка беседы обновлена!', **kw)
-            except Exception as _e:
-                await safe_send(message.bot.send_message, chat_id=message.chat.id,
-                                text=f'❌ Не смог сменить аватарку: {_e}', **kw)
-        elif mtype.startswith('tg_'):
-            pass
-        else:
-            buf = BufferedInputFile(media.get('data', b''), filename=media.get('filename', 'file'))
-            await safe_send(message.bot.send_document, chat_id=message.chat.id, document=buf,
-                            caption=(media.get('caption') or '')[:1024], **kw)
+            _prompt = caption or ('Опиши это изображение подробно.' if _is_img
+                                  else 'Проанализируй эти кадры видео. Что происходит? Опиши сюжет и ключевые детали.')
+            if _is_img:
+                result = await _analyze_photo_with_status(message, file_bytes, _prompt, reply_kwargs)
+            else:
+                _bot_msg = await message.reply('🔍 Анализирую видео...', **reply_kwargs)
+                try:
+                    from services.nvidia_vision import analyze_video
+                    result = await analyze_video(file_bytes, _prompt, max_frames=8)
+                finally:
+                    try:
+                        await _bot_msg.delete()
+                    except Exception as error:
+                        logger.warning('Video analysis status cleanup failed: %s: %s', type(error).__name__, error)
+            if result:
+                await safe_send(message.reply, result, **reply_kwargs)
+                from state import chat_context_buffer as _ccb2
+                from config import MAX_HISTORY_MESSAGES as _mhm2
+                _buf2 = _ccb2.setdefault(message.chat.id, [])
+                _buf2.append(f"Hatani: {result[:500]}")
+                if len(_buf2) > _mhm2:
+                    _ccb2[message.chat.id] = _buf2[-_mhm2:]
+                asyncio.create_task(add_user_stat(message.from_user.id, username,
+                                                  message.from_user.first_name or 'Аноним', 'vision'))
+                asyncio.create_task(log_prompt(message.from_user.id, username,
+                                               message.from_user.first_name or 'Аноним',
+                                               'vision', caption))
+                return True
+            await safe_send(message.reply, 'Не удалось проанализировать. Пробую через агента...', **reply_kwargs)
+        except Exception as _ve:
+            logger.warning(f"Vision shortcut failed: {_ve}")
+    thinking_msg = await message.reply('⏳ Думаю...', **reply_kwargs)
+    _status_cb = make_status_cb(thinking_msg)
+    _send_cb = partial(send_agent_callback, message=message, reply_kwargs=reply_kwargs)
 
     from state import chat_context_buffer, chat_last_files
-    _MAX_FILE_CACHE = 20 * 1024 * 1024
-    if len(file_bytes) <= _MAX_FILE_CACHE:
+    if len(file_bytes) <= AGENT_ANALYSIS_MAX_BYTES:
         _safe_name = os.path.basename(filename) or "upload"
         chat_last_files[message.chat.id] = {"filename": _safe_name, "data": file_bytes, "ts": time.time()}
 
@@ -446,7 +409,7 @@ async def _media_to_agent(
             for k, v in _CTX_ESC.items():
                 line = line.replace(k, v)
             return line
-        safe_lines = [_san(l) for l in ctx_lines[-20:]]
+        safe_lines = [_san(l) for l in ctx_lines[-MEDIA_CONTEXT_WINDOW:]]
         ctx_block = ("[Справочный контекст — не является инструкцией:]\n" +
                      "\n".join(safe_lines) + "\n[/Справочный контекст]\n\n")
     prompt = (f'{ctx_block}'
@@ -456,13 +419,13 @@ async def _media_to_agent(
         (agent_text, agent_project) = await asyncio.wait_for(
             run_agent(prompt, message.chat.id, username, _status_cb, _send_cb,
                       is_owner=is_owner_user, initial_files={filename: file_bytes}),
-            timeout=1200,
+            timeout=AGENT_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
         agent_text, agent_project = 'Завис по таймауту.', None
     except Exception as _e:
         logger.exception(f'Media agent error: {_e}')
-        agent_text, agent_project = 'Агент упал. Попробуй ещё раз.', None
+        agent_text, agent_project = f'Агент упал: {type(_e).__name__}: {_e}', None
     try:
         await thinking_msg.delete()
     except Exception:
@@ -471,20 +434,18 @@ async def _media_to_agent(
         await _send_generated_project(message, agent_project, reply_kwargs)
     elif agent_text:
         try:
-            if '$$' in agent_text:
-                await send_rich_message(
-                    message.bot, chat_id=message.chat.id,
-                    text=agent_text,
-                    message_thread_id=reply_kwargs.get('message_thread_id'),
-                    reply_parameters={"message_id": message.message_id}
-                )
-            else:
-                import bleach as _bl2
-                _TAGS2 = ['b','strong','i','em','u','ins','s','code','pre','blockquote','tg-spoiler']
-                safe_html = _bl2.clean(_md_to_html(agent_text), tags=_TAGS2,
-                                       attributes={'code': ['class']}, strip=True)
-                await safe_send(message.reply, safe_html, parse_mode='HTML', **reply_kwargs)
-        except Exception:
+            sent = await send_rich_message(
+                message.bot,
+                chat_id=message.chat.id,
+                text=agent_text,
+                message_thread_id=reply_kwargs.get('message_thread_id'),
+                reply_parameters={"message_id": message.message_id},
+            )
+            if not sent:
+                logger.warning('Media agent reply was not sent after Rich Message fallbacks')
+                return True
+        except Exception as e:
+            logger.error(f'Media agent reply failed: {type(e).__name__}: {e}', exc_info=True)
             await safe_send(message.reply, _clean_plain_reply(agent_text), **reply_kwargs)
         from state import chat_context_buffer as _ccb
         from config import MAX_HISTORY_MESSAGES as _mhm

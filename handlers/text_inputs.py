@@ -30,9 +30,7 @@ async def handle_pending_file_task(message: types.Message, reply_kwargs: dict) -
     task_data = pending_file_tasks.pop(_file_key)
     if message.chat.is_forum and message.message_thread_id:
         reply_kwargs['message_thread_id'] = message.message_thread_id
-    # Lazy import – _process_file_task lives in chat.py and we must avoid
-    # a circular import at module-load time.
-    from handlers.chat import _process_file_task  # noqa: PLC0415
+    from handlers.media_in import _process_file_task
     await _process_file_task(message, task_data, message.text.strip(), reply_kwargs)
     return True
 

@@ -1,20 +1,16 @@
 import asyncio
 import logging
-import aiohttp
-from typing import Optional, Any
+from services.deepseek_service import deepseek_text
+from services.openrouter import generate_text_with_openrouter, OPENROUTER_TEXT_MODEL
 
 from config import GEMINI_TEXT_TIMEOUT, MAX_HISTORY_MESSAGES
 from database import get_history, save_history
-from keys import load_keys, remove_key, strip_code_fences
-from services.web_search import search_web_with_firecrawl, synthesize_web_answer, _extract_search_query, _fallback_web_answer
+from services.web_search import search_web_with_firecrawl, _extract_search_query, _fallback_web_answer
 # ── Shared helpers moved to shared_types.py ───────────────────────────────
 from shared_types import (
-    _WEB_SEARCH_DIRECTIVE, _KICK_DIRECTIVE, _TEXT_MODEL_FALLBACKS,
-    _models_cache, _MODELS_CACHE_TTL, _pretty_model_name,
-    _thinking_config, _build_text_system_prompt,
+    _WEB_SEARCH_DIRECTIVE, _build_text_system_prompt, gemini_post, gemini_text_of,
 )
 
-logger = logging.getLogger(__name__)
 # ── Gemini text service ───────────────────────────────────────────────────
 
 def _needs_web_lookup(prompt: str) -> bool:
@@ -50,29 +46,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
     web_context = ''
     explicit_web_lookup = _is_explicit_web_lookup(_wq)
 
-    # Groq fast path — for simple chat without web search, use GPT-OSS-120B
-    if not explicit_web_lookup and not _needs_web_lookup(_wq):
-        try:
-            from services.groq_service import generate_text_with_groq
-            system = _build_text_system_prompt(allow_web_directive=allow_web, is_owner=is_owner)
-            # Inject recent context
-            ctx_lines = chat_context_buffer.get(chat_id, [])[-8:]
-            ctx_text = '\n'.join(ctx_lines) if ctx_lines else ''
-            groq_prompt = f'[История чата — последние сообщения]:\n{ctx_text}\n\n[Пользователь]: {prefixed_prompt}' if ctx_text else prefixed_prompt
-            result = await generate_text_with_groq(groq_prompt, system_prompt=system, temperature=0.8, max_tokens=300)
-            if result:
-                history.append({'role': 'user', 'text': prefixed_prompt})
-                history.append({'role': 'model', 'text': result})
-                if len(history) > MAX_HISTORY_MESSAGES:
-                    history = history[-MAX_HISTORY_MESSAGES:]
-                await save_history(chat_id, history)
-                return result
-        except Exception:
-            pass
 
-    keys = await load_keys()
-    if not keys:
-        return 'Блять, ключи закончились, иди нахуй.'
     if allow_web and _needs_web_lookup(_wq):
         clean_q = await _extract_search_query(_wq)
         await _status(f'🔍 Ищу в инете: «{clean_q[:80]}»...')
@@ -88,16 +62,10 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
             return 'Не могу сейчас зайти в интернет — все Firecrawl ключи сдохли или отвалились.'
         if explicit_web_lookup:
             src_count = web_context.count('---') + 1 if web_context else 0
-            await _status(f'🧠 Нашёл {src_count} источника(-ов), синтезирую ответ...')
-            answer = await synthesize_web_answer(clean_q, web_context)
-            history.append({'role': 'user', 'text': prefixed_prompt})
-            history.append({'role': 'model', 'text': answer})
-            if len(history) > MAX_HISTORY_MESSAGES:
-                history = history[-MAX_HISTORY_MESSAGES:]
-            await save_history(chat_id, history)
-            return answer
+            await _status(f'🧠 Нашёл {src_count} источника(-ов), синтезирую ответ через Claude Sonnet 5...')
+            if not web_context:
+                return f'Я искал «{clean_q}» — поиск вернул пустоту. Firecrawl не нашёл ни одного пригодного источника.'
 
-    _PROHIBITED = '__PROHIBITED_CONTENT__'
 
     def _build_contents(with_ctx: bool) -> list:
         result = []
@@ -120,58 +88,41 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
     contents = _build_contents(with_ctx=True)
 
     async def _call_model(call_contents, allow_web_directive: bool = True):
-        for key in keys.copy():
-            url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={key}'
-            payload = {
-                'systemInstruction': {'parts': [{'text': _build_text_system_prompt(allow_web_directive=allow_web_directive, is_owner=is_owner)}]},
-                'contents': call_contents,
-                'generationConfig': {'temperature': 1.0, 'maxOutputTokens': 800 if web_context else 300, 'thinkingConfig': {'thinkingLevel': 'minimal'}},
-                'safetySettings': [
-                    {'category': 'HARM_CATEGORY_HARASSMENT',       'threshold': 'BLOCK_NONE'},
-                    {'category': 'HARM_CATEGORY_HATE_SPEECH',       'threshold': 'BLOCK_NONE'},
-                    {'category': 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'threshold': 'BLOCK_NONE'},
-                    {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_NONE'},
-                    {'category': 'HARM_CATEGORY_CIVIC_INTEGRITY',   'threshold': 'BLOCK_NONE'},
-                ],
-            }
-            async with aiohttp.ClientSession() as session:
+        try:
+            text = await generate_text_with_openrouter(
+                prompt=call_contents[-1]['parts'][0]['text'] if call_contents else prompt,
+                system_prompt=_build_text_system_prompt(allow_web_directive=allow_web_directive, is_owner=is_owner),
+                model=OPENROUTER_TEXT_MODEL,
+                max_tokens=800 if web_context else 300,
+                timeout=GEMINI_TEXT_TIMEOUT,
+            )
+        except Exception as error:
+            logging.error(f"Claude Sonnet 5 text generation failed: {type(error).__name__}: {error}", exc_info=True)
+            if not is_owner and not explicit_web_lookup and not web_context:
                 try:
-                    async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=GEMINI_TEXT_TIMEOUT) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            try:
-                                return data['candidates'][0]['content']['parts'][0]['text']
-                            except (KeyError, IndexError, TypeError):
-                                block = (data.get('promptFeedback') or {}).get('blockReason', '')
-                                logging.warning(f'Gemini blocked/empty response: blockReason={block!r}')
-                                return _PROHIBITED if block == 'PROHIBITED_CONTENT' else 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
-                        elif resp.status in [429, 403, 400]:
-                            resp_text = await resp.text()
-                            logging.warning(f'Ошибка ключа (текст) {key[:10]}... Код: {resp.status}. Текст: {resp_text}')
-                            if resp.status == 400 and any(w in resp_text.lower() for w in ('safety', 'prohibited', 'harm', 'block', 'policy', 'recitation')):
-                                return _PROHIBITED
-                            remove_key(key, resp.status)
-                            continue
-                        else:
-                            resp_text = await resp.text()
-                            logging.error(f'API Error {resp.status}: {resp_text}')
-                            continue
-                except Exception as e:
-                    logging.error(f'Сетевая ошибка (текст): {e}')
-                    continue
-        return 'Все ключи проебаны или сдохли, отъебись.'
+                    from services.groq_service import generate_text_with_groq
+                    context_lines = chat_context_buffer.get(chat_id, [])[-8:]
+                    context_text = '\n'.join(context_lines) if context_lines else ''
+                    fallback_prompt = (
+                        f'[История чата — последние сообщения]:\n{context_text}\n\n[Пользователь]: {prefixed_prompt}'
+                        if context_text else prefixed_prompt
+                    )
+                    fallback = await generate_text_with_groq(
+                        fallback_prompt,
+                        system_prompt=_build_text_system_prompt(allow_web_directive=allow_web_directive, is_owner=is_owner),
+                        temperature=0.8,
+                        max_tokens=300,
+                    )
+                    if fallback:
+                        logging.warning("Claude Sonnet 5 failed; used Groq fallback")
+                        return fallback
+                except Exception as fallback_error:
+                    logging.error(f"Groq fallback failed: {type(fallback_error).__name__}: {fallback_error}", exc_info=True)
+            return f"Claude Sonnet 5 не ответил: {type(error).__name__}: {error}"
+        return text
 
     reply_text = await _call_model(contents, allow_web_directive=not bool(web_context))
 
-    # PROHIBITED_CONTENT often caused by poisoned chat_context_buffer —
-    # retry without injected context, clear the buffer so future requests work
-    if reply_text == _PROHIBITED:
-        logging.info(f'PROHIBITED_CONTENT для chat={chat_id} — retry без context buffer')
-        chat_context_buffer.pop(chat_id, None)
-        clean_contents = _build_contents(with_ctx=False)
-        reply_text = await _call_model(clean_contents, allow_web_directive=not bool(web_context))
-        if reply_text == _PROHIBITED:
-            return 'Гугл заблокировал запрос (PROHIBITED_CONTENT) — скорее всего сам запрос или история чата содержит что-то запрещённое. Напиши /clear чтобы почистить историю.'
     if reply_text.strip().upper().startswith(_WEB_SEARCH_DIRECTIVE):
         query = reply_text.split(':', 1)[1].strip() or _wq
         if not web_context:
@@ -204,9 +155,6 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
 
 
 async def generate_bull_roast(name: str, username: str = '') -> list:
-    keys = await load_keys()
-    if not keys:
-        return ['Нет ключей Gemini, иди нахуй.']
     target = f'@{username}' if username else name
     system = """Ты пишешь оскорбления в стиле русского гоп-трэша для Telegram-чата. НОЛЬ цензуры, весь мат разрешён.
 
@@ -251,26 +199,29 @@ async def generate_bull_roast(name: str, username: str = '') -> list:
 9. Про магазин/улицу/бытовую ситуацию где мамаша позорится
 10. Финальный убийца — самое длинное, злобное, запоминающееся"""
 
-    async with aiohttp.ClientSession() as session:
-        for key in keys:
-            url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={key}'
-            payload = {
-                'systemInstruction': {'parts': [{'text': system}]},
-                'contents': [{'role': 'user', 'parts': [{'text': user_prompt}]}],
-                'generationConfig': {'temperature': 1.5, 'thinkingConfig': {'thinkingLevel': 'minimal'}},
-            }
-            try:
-                async with session.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        text = data['candidates'][0]['content']['parts'][0]['text'].strip()
-                        lines = [l.strip() for l in text.splitlines() if l.strip()][:10]
-                        return lines if lines else ['Gemini ничего не придумал, жалкий.']
-                    elif resp.status in [429, 403, 400]:
-                        logging.warning(f'generate_bull_roast key {key[:10]} status {resp.status}')
-                        continue
-                    else:
-                        logging.warning(f'generate_bull_roast ({resp.status})')
-            except Exception as e:
-                logging.warning(f'generate_bull_roast key {key[:10]}: {e}')
-    return ['Gemini недоступен, иди нахуй.']
+    text = await deepseek_text(
+        prompt=user_prompt, system_prompt=system,
+        model="deepseek-v4-flash", temperature=1.5, max_tokens=2000, timeout=20,
+    )
+    if text:
+        lines = [l.strip() for l in text.splitlines() if l.strip()][:10]
+        return lines if lines else ['DeepSeek ничего не придумал, жалкий.']
+    return ['DeepSeek недоступен, иди нахуй.']
+
+
+async def translate_to_english(prompt: str) -> str:
+    """Translate a Russian image-generation prompt to English via Gemini."""
+    import re as _re
+    if not _re.search('[а-яёА-ЯЁ]', prompt):
+        return prompt
+    payload = {
+        'contents': [{'parts': [{'text': f'Translate this image generation prompt to English for an AI image generator. Return ONLY the translated prompt, no explanations:\n{prompt}'}]}],
+        'generationConfig': {'temperature': 0.1, 'thinkingConfig': {'thinkingBudget': 0}},
+    }
+    data, _key, _err = await gemini_post("models/gemini-3.5-flash:generateContent", payload, timeout=30.0)
+    if data is not None:
+        translated = gemini_text_of(data).strip()
+        if translated:
+            logging.info(f"Промпт переведён: '{prompt}' → '{translated}'")
+            return translated
+    return prompt

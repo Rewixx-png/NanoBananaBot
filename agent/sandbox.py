@@ -1,17 +1,22 @@
 """
 Sandbox execution tools — Python, shell, Playwright, media analysis, and output sanitizers.
+
+Runs commands via AgentWorkspace.run_as_user() under the hatani system user.
 """
 import logging
+
 import os
 import re
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 
 import aiohttp
 
 from keys import load_keys, remove_key
 from keys import get_live_keys as _nk_get_live, mark_cooldown as _nk_cooldown
 
-from .workspace import AgentWorkspace
+if TYPE_CHECKING:
+    from .workspace import AgentWorkspace
+
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +65,8 @@ async def _tool_run_python(code: str, ws: "AgentWorkspace", status_cb: Callable 
                     f"<pre><code>{live}</code></pre>"
                 )
             except Exception:
-                pass
-
-    stdout, stderr, rc = await ws.docker_run(["python", "-c", code], output_cb=_live_cb)
+                pass  # status_cb is non-critical; logging every failure would spam
+    stdout, stderr, rc = await ws.run_as_user(["python3", "-c", code], output_cb=_live_cb)
     out = _snip_output(_mask_cookies((stdout + ("\n" + stderr if stderr.strip() else "")).strip()))
     if status_cb:
         safe_out = _html.escape(out[:2300]) if out else "<i>(нет вывода)</i>"
@@ -72,7 +76,7 @@ async def _tool_run_python(code: str, ws: "AgentWorkspace", status_cb: Callable 
             f"\n<b>Вывод:</b>\n"
             f"<pre><code>{safe_out}</code></pre>"
         )
-    return out[:2000] or f"(exit {rc}, no output)"
+    return out[:2000] or f"(выполнено успешно, exit 0 — объясни пользователю что сделано)"
 
 
 async def _tool_run_shell(command: str, ws: "AgentWorkspace", status_cb: Callable = None) -> str:
@@ -95,9 +99,9 @@ async def _tool_run_shell(command: str, ws: "AgentWorkspace", status_cb: Callabl
                     f"<pre><code>{live}</code></pre>"
                 )
             except Exception:
-                pass
+                pass  # status_cb is non-critical; logging every failure would spam
 
-    stdout, stderr, rc = await ws.docker_run(["bash", "-c", command], output_cb=_live_cb)
+    stdout, stderr, rc = await ws.run_as_user(["bash", "-c", command], output_cb=_live_cb)
     out = _snip_output(_mask_cookies((stdout + ("\n" + stderr if stderr.strip() else "")).strip()))
     if status_cb:
         safe_out = _html.escape(out[:2300]) if out else "<i>(нет вывода)</i>"
@@ -107,7 +111,7 @@ async def _tool_run_shell(command: str, ws: "AgentWorkspace", status_cb: Callabl
             f"\n<b>Вывод:</b>\n"
             f"<pre><code>{safe_out}</code></pre>"
         )
-    return out[:2000] or f"(exit {rc}, no output)"
+    return out[:2000] or f"(выполнено успешно, exit {rc} — объясни пользователю что сделано)"
 
 
 async def _tool_analyze_image(
@@ -118,7 +122,7 @@ async def _tool_analyze_image(
     """Send workspace image to Gemini vision and return its response."""
     import base64, mimetypes
     safe_path = os.path.join(ws.host_path, os.path.basename(path))
-    if not os.path.exists(safe_path):
+    if not os.path.exists(safe_path) or not os.path.isfile(safe_path):
         return f"Файл не найден: {path}"
     with open(safe_path, "rb") as f:
         img_bytes = f.read()
@@ -137,6 +141,7 @@ async def _tool_analyze_image(
         "generationConfig": {"temperature": 0.4, "mediaResolution": "MEDIA_RESOLUTION_HIGH"},
     }
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    last_err = ""
     for key in keys:
         try:
             async with aiohttp.ClientSession() as s:
@@ -152,10 +157,12 @@ async def _tool_analyze_image(
                         return " ".join(p.get("text", "") for p in parts).strip() or "Нет ответа."
                     if resp.status in (429, 403):
                         remove_key(key, resp.status)
+                        last_err = f"HTTP {resp.status}"
                         continue
         except Exception as e:
             logger.warning(f"analyze_image: {e}")
-    return "Gemini не ответил."
+            last_err = f"{type(e).__name__}: {e}"
+    return f"Gemini не ответил. Последняя ошибка: {last_err}" if last_err else "Gemini не ответил."
 
 
 async def _tool_analyze_audio(
@@ -166,7 +173,7 @@ async def _tool_analyze_audio(
     """Send workspace audio to Gemini for quality analysis."""
     import base64, mimetypes
     safe_path = os.path.join(ws.host_path, os.path.basename(path))
-    if not os.path.exists(safe_path):
+    if not os.path.exists(safe_path) or not os.path.isfile(safe_path):
         return f"Файл не найден: {path}"
     with open(safe_path, "rb") as f:
         audio_bytes = f.read()
@@ -188,6 +195,7 @@ async def _tool_analyze_audio(
         "generationConfig": {"temperature": 0.4},
     }
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    last_err = ""
     for key in keys[:5]:
         try:
             async with aiohttp.ClientSession() as s:
@@ -203,9 +211,11 @@ async def _tool_analyze_audio(
                         return " ".join(p.get("text", "") for p in parts).strip() or "Нет ответа."
                     if resp.status in (429, 403):
                         await _nk_cooldown(key, resp.status)
+                        last_err = f"HTTP {resp.status}"
         except Exception as e:
             logger.warning(f"analyze_audio: {type(e).__name__}: {e}")
-    return "Gemini не ответил."
+            last_err = f"{type(e).__name__}: {e}"
+    return f"Gemini не ответил. Последняя ошибка: {last_err}" if last_err else "Gemini не ответил."
 
 
 async def _tool_playwright_browse(
@@ -227,7 +237,7 @@ async def _tool_playwright_browse(
     })
     script = f"""
 import json, sys, os
-params  = {params_json!r}
+params  = json.loads({params_json!r})
 url     = params["url"]
 action  = params["action"]
 sel     = params["selector"]
@@ -240,7 +250,6 @@ from playwright.sync_api import sync_playwright
 with sync_playwright() as p:
     browser = p.chromium.launch(
         headless=True,
-        executable_path="/usr/bin/chromium",
         args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
     )
     ctx  = browser.new_context(viewport={{"width": 1280, "height": 900}})
@@ -252,7 +261,7 @@ with sync_playwright() as p:
         print(f"goto error: {{e}}", file=sys.stderr)
 
     if action == "screenshot":
-        page.screenshot(path="/workspace/_pw_screen.png", full_page=True)
+        page.screenshot(path="_pw_screen.png", full_page=True)
         print("SCREENSHOT_DONE")
     elif action == "scrape":
         if sel:
@@ -262,7 +271,7 @@ with sync_playwright() as p:
             print(page.inner_text("body")[:6000])
     elif action == "click":
         page.click(sel)
-        page.screenshot(path="/workspace/_pw_screen.png")
+        page.screenshot(path="_pw_screen.png")
         print("SCREENSHOT_DONE")
     elif action == "fill":
         page.fill(sel, val)
@@ -274,14 +283,16 @@ with sync_playwright() as p:
     browser.close()
 """
     ws.write("_pw_script.py", script)
-    stdout, stderr, rc = await ws.docker_run(["python", "_pw_script.py"])
+    stdout, stderr, rc = await ws.run_as_user(["python3", "_pw_script.py"])
     out = (stdout + ("\n" + stderr if stderr.strip() else "")).strip()
 
     if "SCREENSHOT_DONE" in out and send_cb:
         screen_host = os.path.join(ws.host_path, "_pw_screen.png")
         if os.path.exists(screen_host):
-            await send_cb({"type": "tg_send_photo", "path": screen_host,
-                           "caption": f"📸 {url[:80]}"})
+            with open(screen_host, "rb") as image:
+                data = image.read()
+            await send_cb({"type": "photo", "data": data,
+                           "caption": f"📸 {url[:80]}", "filename": "screenshot.png"})
         out = f"Скриншот отправлен | {url}"
 
     if status_cb:

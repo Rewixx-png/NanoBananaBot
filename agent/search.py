@@ -8,13 +8,14 @@ from typing import Optional
 import aiohttp
 
 from keys import load_firecrawl_keys, remove_key
-from ai_services import analyze_photo_with_gemini
+from services.gemini_image import analyze_photo_with_gemini
 
+from config import AGENT_SCRAPE_TIMEOUT, AGENT_SEARCH_TIMEOUT, TELEGRAM_MEDIA_MAX_BYTES
 logger = logging.getLogger(__name__)
 
-_SEARCH_TIMEOUT = 20.0
-_SCRAPE_TIMEOUT = 25.0
-_TG_MAX_BYTES   = 48 * 1024 * 1024
+_SEARCH_TIMEOUT = AGENT_SEARCH_TIMEOUT
+_SCRAPE_TIMEOUT = AGENT_SCRAPE_TIMEOUT
+_TG_MAX_BYTES = TELEGRAM_MEDIA_MAX_BYTES
 
 
 async def _fc_search(query: str) -> str:
@@ -38,6 +39,8 @@ async def _fc_search(query: str) -> str:
                 return "\n\n".join(parts)
     except Exception as e:
         logger.warning(f"DDG search {query!r}: {e}")
+    # Fallback: Firecrawl
+    last_err = ""
 
     # Fallback: Firecrawl if keys available
     keys = await load_firecrawl_keys()
@@ -69,11 +72,13 @@ async def _fc_search(query: str) -> str:
                         remove_key(key, resp.status)
         except Exception as e:
             logger.warning(f"Firecrawl search {query!r}: {e}")
-    return "Search unavailable."
+            last_err = f"{type(e).__name__}: {e}"
+    return f"Поиск недоступен. Ошибка: {last_err}" if last_err else "Поиск недоступен."
 
 
 async def _fc_scrape(url: str) -> str:
-    """Scrape page content. Primary: Jina Reader. Fallback: Trafilatura."""
+    last_err = ""
+
     # Primary: Jina Reader (free, no key, handles JS-rendered pages)
     jina_url = f"https://r.jina.ai/{url}"
     try:
@@ -90,34 +95,8 @@ async def _fc_scrape(url: str) -> str:
                         return text[:8000]
     except Exception as e:
         logger.warning(f"Jina Reader scrape {url!r}: {e}")
+        last_err = f"Jina: {type(e).__name__}"
 
-    # Fallback: Trafilatura (local, no network dependency)
-    try:
-        import socket, ipaddress, trafilatura
-        from urllib.parse import urlparse as _up
-        _p = _up(url)
-        _safe = _p.scheme in ("http", "https")
-        if _safe:
-            try:
-                for _info in socket.getaddrinfo(_p.hostname, None):
-                    _ip = ipaddress.ip_address(_info[4][0])
-                    if _ip.is_loopback or _ip.is_private or _ip.is_link_local:
-                        _safe = False; break
-            except Exception:
-                _safe = False
-        if not _safe:
-            logger.warning(f"Trafilatura SSRF blocked: {url!r}")
-        else:
-            downloaded = await asyncio.get_event_loop().run_in_executor(
-                None, trafilatura.fetch_url, url
-            )
-        if downloaded:
-            text = trafilatura.extract(downloaded, output_format="markdown",
-                                       include_links=False, no_fallback=False)
-            if text and len(text) > 100:
-                return text[:8000]
-    except Exception as e:
-        logger.warning(f"Trafilatura scrape {url!r}: {e}")
 
     # Last resort: Firecrawl if keys available
     keys = await load_firecrawl_keys()
@@ -137,8 +116,9 @@ async def _fc_scrape(url: str) -> str:
                         remove_key(key, resp.status)
         except Exception as e:
             logger.warning(f"Firecrawl scrape {url!r}: {e}")
+            last_err = f"{type(e).__name__}: {e}"
 
-    return "Could not read page."
+    return f"Не смог прочитать страницу. Ошибка: {last_err}" if last_err else "Не смог прочитать страницу."
 
 
 async def _search_image_urls(query: str) -> list[str]:

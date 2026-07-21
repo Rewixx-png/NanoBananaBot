@@ -1,8 +1,8 @@
 """Lyria music generation command handler — /music."""
 
 import asyncio
-import logging
 import uuid
+from html import escape
 
 from aiogram import Router, F, types
 from aiogram.filters import Command
@@ -12,17 +12,15 @@ from aiogram.types import (
     InlineKeyboardMarkup,
 )
 
-from config import FULL_ACCESS_CHAT_ID
-from handlers.common import safe_send, _track_user, _maybe_send_random_chat_media
+from handlers.common import safe_send, _track_user
 from services.music_service import generate_music, MUSIC_MODELS, MUSIC_MODEL_LIST
 
-logger = logging.getLogger(__name__)
 
 music_router = Router()
 
-# Cooldown (per-user, 60 seconds)
+# Cooldown (per-user, 20 seconds)
 _cooldowns: dict[int, float] = {}
-_COOLDOWN = 60
+_COOLDOWN = 20
 
 # Pending requests: request_id → {chat_id, user_id, prompt, msg_id}
 _pending_music: dict[str, dict] = {}
@@ -64,13 +62,12 @@ async def cmd_music(message: types.Message):
 
     if not prompt:
         await message.reply(
-            "🎵 <b>Lyria Music Generator</b>\n\n"
-            "Напиши текст песни или опиши что хочешь услышать.\n"
+            "<b>Музыка</b>\n"
+            "Описание пустое. Напиши жанр, настроение, инструменты или текст песни.\n\n"
             "Примеры:\n"
-            "<code>/music Рэп про то как Нано взломал пентагон</code>\n"
-            "<code>/music Грустная поп-баллада о несчастной любви и пиве</code>\n"
-            "<code>/music Orchestral cinematic piece, 2 minutes</code>\n\n"
-            "Можно указать: жанр, настроение, инструменты, темп, структуру.",
+            "<code>/music мрачный synthwave без вокала</code>\n"
+            "<code>/music рэп про Нано, который взломал Пентагон</code>\n\n"
+            "Чем точнее запрос, тем меньше музыкальной каши получишь.",
             parse_mode="HTML",
         )
         return
@@ -96,7 +93,7 @@ async def cmd_music(message: types.Message):
     sent = await safe_send(
         message.bot.send_message,
         chat_id=message.chat.id,
-        text=f"🎵 <b>Текст:</b> {prompt[:500]}\n\nВыбери модель генерации:",
+        text=f"<b>Задача:</b> {escape(prompt[:500])}\n\nВыбирай модель. Для короткого результата бери Clip.",
         reply_markup=_music_model_keyboard(request_id),
         parse_mode="HTML",
         **reply_kwargs,
@@ -108,21 +105,23 @@ async def cmd_music(message: types.Message):
 @music_router.callback_query(F.data.startswith("musicsel:"))
 async def music_model_callback(callback: types.CallbackQuery):
     """Handle Lyria model selection and trigger generation."""
-    try:
-        await callback.answer()
-    except Exception:
-        pass
 
     _, request_id, choice = callback.data.split(":", 2)
     data = _pending_music.get(request_id)
     if not data:
+        await callback.answer("Запрос устарел. Отправь /music заново.", show_alert=True)
         try:
             await callback.message.edit_text("🎵 Запрос устарел. Отправь /music заново.")
         except Exception:
             pass
         return
 
+    if callback.from_user.id != data["user_id"]:
+        await callback.answer("Эту кнопку может нажать только автор запроса.", show_alert=True)
+        return
+
     if choice == "cancel":
+        await callback.answer()
         _pending_music.pop(request_id, None)
         try:
             await callback.message.edit_text("🎵 Генерация отменена.")
@@ -131,6 +130,7 @@ async def music_model_callback(callback: types.CallbackQuery):
         return
 
     if choice not in MUSIC_MODELS:
+        await callback.answer(f"Неизвестная модель: {choice}", show_alert=True)
         try:
             await callback.message.edit_text(f"🎵 Неизвестная модель: {choice}")
         except Exception:
@@ -138,7 +138,7 @@ async def music_model_callback(callback: types.CallbackQuery):
         return
     # Cooldown check
     now = asyncio.get_event_loop().time()
-    uid = callback.from_user.id
+    uid = data["user_id"]
     if uid in _cooldowns and now - _cooldowns[uid] < _COOLDOWN:
         remaining = int(_COOLDOWN - (now - _cooldowns[uid]))
         try:
@@ -146,7 +146,9 @@ async def music_model_callback(callback: types.CallbackQuery):
         except Exception:
             pass
         return
+    await callback.answer()
     _cooldowns[uid] = now
+    _pending_music.pop(request_id, None)
 
     model_info = MUSIC_MODELS[choice]
     prompt = data["prompt"]
@@ -154,8 +156,8 @@ async def music_model_callback(callback: types.CallbackQuery):
     try:
         await callback.message.edit_text(
             f"🎵 <b>Генерирую музыку...</b>\n"
-            f"Модель: {model_info['label']}\n"
-            f"Промпт: {prompt[:300]}",
+            f"Модель: {escape(str(model_info['label']))}\n"
+            f"Промпт: {escape(prompt[:300])}",
             parse_mode="HTML",
         )
     except Exception:
@@ -170,7 +172,7 @@ async def music_model_callback(callback: types.CallbackQuery):
     if error:
         try:
             await callback.message.edit_text(
-                f"🎵 <b>Ошибка генерации:</b>\n{error}",
+                f"🎵 <b>Ошибка генерации:</b>\n{escape(str(error))}",
                 parse_mode="HTML",
             )
         except Exception:
@@ -185,7 +187,7 @@ async def music_model_callback(callback: types.CallbackQuery):
     if audio_bytes:
         caption = ""
         if lyrics:
-            caption = f"<b>Текст песни:</b>\n<blockquote expandable>{lyrics[:1000]}</blockquote>"
+            caption = f"<b>Текст песни:</b>\n<blockquote expandable>{escape(lyrics[:1000])}</blockquote>"
 
         try:
             await callback.message.delete()

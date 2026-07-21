@@ -5,19 +5,15 @@ import logging
 
 from aiogram import F, types
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from state import (
     pending_video_requests,
     user_video_cooldowns,
 )
 from database import save_pending_gen, delete_pending_gen
-from ai_services import (
-    start_veo_generation,
-    poll_veo_operation,
-    generate_video_with_omni,
-    explain_generation_error,
-)
+from services.video_service import start_veo_generation, poll_veo_operation, generate_video_with_omni
+from services.error_explainer import explain_generation_error
 from utils import check_membership, make_safe_caption
 from handlers.common import (
     safe_send,
@@ -28,54 +24,71 @@ from handlers.media_gen import media_router, VEO_MODELS, VIDEO_COOLDOWN
 
 logger = logging.getLogger(__name__)
 
+def _video_model_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=label, callback_data=f'veosel:{request_id}:{model_id}')] for (model_id, (label, _)) in VEO_MODELS.items()]
+    rows.append([InlineKeyboardButton(text='Отмена', callback_data=f'veocancel:{request_id}')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 @media_router.message(Command('video'))
 async def cmd_video(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
-        await message.reply('Доступ запрещен.')
+        await message.reply('Доступ закрыт: сначала вступи в обязательную беседу, потом снимай кино.')
         return
-    current_time = time.time()
-    last_time = user_video_cooldowns.get(message.from_user.id, 0)
-    if current_time - last_time < VIDEO_COOLDOWN:
-        await message.reply(f'Не спамь блять видосами, подожди еще {int(VIDEO_COOLDOWN - (current_time - last_time))} сек.')
-        return
-    user_video_cooldowns[message.from_user.id] = current_time
     prompt = (message.text or '').replace('/video', '').strip()
     if message.caption:
         prompt = message.caption.replace('/video', '').strip()
     if not prompt and (not message.photo):
-        await message.reply('Напиши промпт после команды, например:\n/video закат над морем\n\nИли прикрепи фото/видео с подписью /video анимируй это.\nOmni Flash поддерживает редактирование видео!')
+        await message.reply('Промпт пустой. Напиши: /video закат над морем. Или прикрепи фото с подписью /video анимируй это.')
         return
+    current_time = time.time()
+    last_time = user_video_cooldowns.get(message.from_user.id, 0)
+    if current_time - last_time < VIDEO_COOLDOWN:
+        await message.reply(f'Не спамь видео. Подожди ещё {int(VIDEO_COOLDOWN - (current_time - last_time))} сек. и запускай один рендер за раз.')
+        return
+    user_video_cooldowns[message.from_user.id] = current_time
     image_bytes = None
     video_bytes = None
     if message.photo:
-        photo = message.photo[-1]
         try:
-            file_info = await message.bot.get_file(photo.file_id)
-            downloaded = await message.bot.download_file(file_info.file_path)
+            downloaded = await message.bot.download(message.photo[-1].file_id)
             image_bytes = downloaded.read()
         except Exception as e:
-            logger.warning(f"Failed to download photo: {e}")
-            await message.reply(f"❌ Не удалось скачать фото: {e}")
+            logger.error(f"Failed to download photo: {type(e).__name__}: {e}", exc_info=True)
+            await message.reply(f"❌ Telegram не отдал фото: {type(e).__name__}: {e}. Повтори /video с другим JPG или PNG.")
             return
     if message.video:
-        vid = message.video
         try:
-            file_info = await message.bot.get_file(vid.file_id)
-            downloaded = await message.bot.download_file(file_info.file_path)
+            downloaded = await message.bot.download(message.video.file_id)
             video_bytes = downloaded.read()
-        except Exception:
-            logger.warning("Video download failed, continuing without video attachment")
+        except Exception as e:
+            logger.error(f"Failed to download video: {type(e).__name__}: {e}", exc_info=True)
+            await message.reply(f"❌ Telegram не отдал видео: {type(e).__name__}: {e}. Повтори /video с MP4 поменьше.")
+            return
     request_id = uuid.uuid4().hex[:10]
     pending_video_requests[request_id] = {'user_id': message.from_user.id, 'chat_id': message.chat.id, 'source_message_id': message.message_id, 'message_thread_id': message.message_thread_id if message.chat.is_forum else None, 'prompt': prompt, 'image_bytes': image_bytes, 'video_bytes': video_bytes}
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-    rows = [[InlineKeyboardButton(text=label, callback_data=f'veosel:{request_id}:{mid}')] for (mid, (label, _)) in VEO_MODELS.items()]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+    keyboard = _video_model_keyboard(request_id)
     reply_kwargs = {}
     if message.chat.is_forum and message.message_thread_id:
         reply_kwargs['message_thread_id'] = message.message_thread_id
-    await message.reply('Выберите модель Veo для генерации видео:', reply_markup=keyboard, **reply_kwargs)
+    await message.reply('Выбирай видеомодель. Не знаешь разницу — бери быструю.', reply_markup=keyboard, **reply_kwargs)
+
+@media_router.callback_query(F.data.startswith('veocancel:'))
+async def handle_video_cancel(callback: types.CallbackQuery):
+    request_id = (callback.data or '').removeprefix('veocancel:')
+    request_data = pending_video_requests.get(request_id)
+    if not request_data:
+        await callback.answer('Запрос уже завершён.', show_alert=True)
+        return
+    if callback.from_user.id != request_data['user_id']:
+        await callback.answer('Только автор запроса может его отменить.', show_alert=True)
+        return
+    pending_video_requests.pop(request_id, None)
+    await callback.answer('Отменено')
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='← К созданию', callback_data='menu:create')]])
+    await callback.message.edit_text('Генерация видео отменена.', reply_markup=keyboard)
+
 
 @media_router.callback_query(F.data.startswith('veosel:'))
 async def handle_veo_model_select(callback: types.CallbackQuery):

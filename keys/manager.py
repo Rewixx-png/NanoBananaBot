@@ -50,12 +50,18 @@ def normalize_key_list(value):
 
 def load_api_config():
     default_config = {'gemini': [], 'openai': '', 'firecrawl': []}
+    enc_path = API_KEYS_FILE + ".enc"
     try:
-        with open(API_KEYS_FILE, 'r') as f:
-            raw_content = f.read()
+        from keys.crypto import decrypt_keys_file
+        raw_content = decrypt_keys_file(enc_path).decode("utf-8")
     except Exception as e:
-        logging.error(f'Ошибка загрузки ключей: {e}')
-        return default_config
+        logging.warning(f'Encrypted keys not available ({e}), trying plaintext fallback')
+        try:
+            with open(API_KEYS_FILE, 'r') as f:
+                raw_content = f.read()
+        except Exception as e2:
+            logging.error(f'Ошибка загрузки ключей: {e2}')
+            return default_config
     content = strip_code_fences(raw_content)
     data = {}
     try:
@@ -111,13 +117,16 @@ def save_api_config(config):
             elif isinstance(val, str) and val.strip():
                 out_data[key] = val.strip()
     out_json = '```json\n' + json.dumps(out_data, ensure_ascii=False, indent=2) + '\n```\n'
-    tmp_file = API_KEYS_FILE + ".tmp"
+    enc_path = API_KEYS_FILE + ".enc"
+    tmp_file = enc_path + ".tmp"
     try:
-        with open(tmp_file, 'w', encoding='utf-8') as f:
-            f.write(out_json)
+        from keys.crypto import encrypt_bytes
+        encrypted = encrypt_bytes(out_json.encode("utf-8"))
+        with open(tmp_file, 'wb') as f:
+            f.write(encrypted)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_file, API_KEYS_FILE)
+        os.replace(tmp_file, enc_path)
     except Exception as e:
         logging.error(f'Ошибка при атомарном сохранении API-конфига: {e}')
         if os.path.exists(tmp_file):
@@ -149,33 +158,38 @@ async def load_keys(model_filter: str = None):
     return [k for k in load_api_config().get('gemini', []) if not _is_dead(k)]
 
 async def load_openai_keys():
+    # 1. Keyhunter DB first (most reliable, most keys)
+    try:
+        async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
+            async with db.execute(
+                "SELECT key, info FROM keys WHERE service='OpenAI' AND is_live=1 AND (info NOT LIKE '%quota%' AND info NOT LIKE '%QUOTA%') ORDER BY CASE WHEN info LIKE '%flagship%' THEN 0 ELSE 1 END"
+            ) as cur:
+                rows = await cur.fetchall()
+                keys = [row[0] for row in rows if not _is_dead(row[0]) and not row[1].startswith('⚠️')]
+                if keys:
+                    return keys
+    except Exception:
+        logging.exception('load_openai_keys: keyhunter query failed')
+    # 2. r.txt.enc fallback
+    try:
+        openai_data = load_api_config().get('openai', '')
+        if isinstance(openai_data, list):
+            keys = [k for k in openai_data if not _is_dead(k)]
+            if keys:
+                return keys
+        elif isinstance(openai_data, str) and openai_data.strip():
+            if not _is_dead(openai_data.strip()):
+                return [openai_data.strip()]
+    except Exception as e:
+        logging.error(f'Ошибка загрузки OpenAI ключей из r.txt: {e}')
+    # 3. Environment variables (lowest priority — often stale/bogus)
     key = os.getenv('OPENAI_API_KEY', '').strip()
     if key:
         return [key]
     if OPENAI_API_KEY.strip():
         return [OPENAI_API_KEY.strip()]
-    try:
-        async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
-            async with db.execute("SELECT key FROM keys WHERE service='OpenAI' AND is_live=1") as cur:
-                rows = await cur.fetchall()
-                keys = [row[0] for row in rows if not _is_dead(row[0])]
-                if keys:
-                    return keys
-    except Exception:
-        pass
-    try:
-        openai_data = load_api_config().get('openai', '')
-        if isinstance(openai_data, list) and openai_data:
-            return openai_data
-        if isinstance(openai_data, str) and openai_data.strip():
-            return [openai_data.strip()]
-    except Exception as e:
-        logging.error(f'Ошибка загрузки OpenAI ключей: {e}')
     return []
 
-async def load_openai_key():
-    keys = await load_openai_keys()
-    return keys[0] if keys else ''
 
 def load_nvidia_keys():
     try:
@@ -236,30 +250,37 @@ async def load_groq_keys():
     return []
 
 async def load_firecrawl_keys():
+    """Load Firecrawl keys sorted by remaining credits (highest first)."""
+    import re
     env_keys = normalize_key_list(os.getenv('FIRECRAWL_KEYS', ''))
     single_env_key = os.getenv('FIRECRAWL_API_KEY', '').strip()
     if single_env_key:
-        env_keys.append(single_env_key)
-    if env_keys:
-        return list(dict.fromkeys([k for k in env_keys if not _is_dead(k)]))
+        env_keys.insert(0, single_env_key)
+    env_keys = list(dict.fromkeys([k for k in env_keys if not _is_dead(k)]))
     try:
         async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
-            async with db.execute("SELECT key FROM keys WHERE service='Firecrawl' AND is_live=1") as cur:
+            async with db.execute(
+                "SELECT key, info FROM keys WHERE service='Firecrawl' AND is_live=1"
+            ) as cur:
                 rows = await cur.fetchall()
-                keys = [row[0] for row in rows if not _is_dead(row[0])]
-                if keys:
-                    return keys
     except Exception as e:
         logging.warning(f'load_firecrawl_keys DB error: {e}')
-    try:
-        fc_data = load_api_config().get('firecrawl', [])
-        if isinstance(fc_data, list) and fc_data:
-            return [k for k in fc_data if not _is_dead(k)]
-        if isinstance(fc_data, str) and fc_data.strip() and not _is_dead(fc_data.strip()):
-            return [fc_data.strip()]
-    except Exception as e:
-        logging.error(f'Ошибка загрузки Firecrawl ключей: {e}')
-    return []
+        return env_keys or []
+    # Parse credits from info (e.g. "Firecrawl LIVE · 85585/100000 credits")
+    def _credits(info: str) -> int:
+        m = re.search(r'(\d+)/\d+\s*credits', info or '')
+        return int(m.group(1)) if m else 0
+    pairs = [(r[0], _credits(r[1] or '')) for r in rows if not _is_dead(r[0])]
+    pairs.sort(key=lambda x: x[1], reverse=True)
+    result = [k for k, _ in pairs]
+    # Append env keys as fallback (deduplicated)
+    seen = set(result)
+    for k in env_keys:
+        if k not in seen:
+            result.append(k)
+            seen.add(k)
+    return result if result else []
+
 
 def remove_key(key_to_remove, status_code=None):
     if status_code == 429:

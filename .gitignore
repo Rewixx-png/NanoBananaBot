@@ -2,7 +2,7 @@ __pycache__/
 *.pyc
 bot_data.db
 r.txt
-test_*.py
+/test_*.py
 .opencode/
 .aider*
 bot.log
@@ -26,3 +26,5 @@ models/
 *.swp
 *.swo
 *~
+test_*_results.json
+thoughts/

@@ -4,7 +4,6 @@ import logging
 import random
 import aiohttp
 from typing import List, Optional
-from urllib.parse import quote
 
 from services.security_utils import is_safe_url
 

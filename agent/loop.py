@@ -1,136 +1,104 @@
 """
-Agent orchestration loop — _gemini_call, _execute_tool, run_agent, classify_agent_intent.
+Agent orchestration loop — _sonnet_call, _execute_tool, run_agent, classify_agent_intent.
 
 Supporting modules: workspace, safety, search, media, sandbox, tools, tg_api, prompts.
 """
 import asyncio
-import json
 import logging
+import html
 import os
 import re
-import shutil
-import uuid
 from typing import Any, Callable, Optional, Tuple
 
-import aiohttp
 
-from ai_services import generate_project_with_gemini
-from keys import load_keys, remove_key
-from keys import get_live_keys as _nk_get_live, sync_from_keyhunter as _nk_sync, init_db as _nk_init
+from services.code_service import generate_project_with_gemini
 
-from services.security_utils import is_safe_url
+from services.deepseek_service import _gemini_contents_to_openai_messages, _gemini_tools_to_openai, _openai_response_to_gemini
+from services.openrouter import generate_text_with_openrouter, openrouter_chat
 logger = logging.getLogger(__name__)
 
-MAX_STEPS       = 60
-_SEARCH_TIMEOUT = 20.0
-_SCRAPE_TIMEOUT = 25.0
-_LLM_TIMEOUT    = 60.0
-_PROJECT_TIMEOUT= 180.0
+from config import (
+    AGENT_CLASSIFY_MAX_TOKENS,
+    AGENT_CLASSIFY_TIMEOUT,
+    AGENT_MAX_STEPS,
+    AGENT_PROJECT_TIMEOUT,
+    AGENT_SONNET_MAX_TOKENS,
+    AGENT_SONNET_TIMEOUT,
+    AGENT_WORKSPACE_TTL,
+    NEWS_EMOJI_IDS,
+    OPENROUTER_TEXT_MODEL,
+)
+
+_E = NEWS_EMOJI_IDS
 
 
 from .workspace import AgentWorkspace
 from .safety import _DebounceHook, _ToolBudget
 
 # ── Firecrawl helpers ────────────────────────────────────────────
-from .search import _fc_search, _fc_scrape, _search_image_urls, _download_bytes, _image_is_relevant
+from .search import _fc_search, _fc_scrape
 from .tools import _tool_fetch_json, _ast_eval, _tool_read_bot_logs, _tool_send_workspace_file, _tool_create_file
 from .tg_api import _PRIVILEGED, handle_tg_tool
-from .sandbox import _snip_output, _mask_cookies, _tool_run_python, _tool_run_shell, _tool_analyze_image, _tool_analyze_audio, _tool_playwright_browse
+from .sandbox import _tool_run_python, _tool_run_shell, _tool_analyze_image, _tool_analyze_audio, _tool_playwright_browse
 
 # ── Media tools ─────────────────────────────────────────────────
 from .media import (
     _tool_search_image, _tool_generate_image, _tool_list_image_models,
-    _tool_download_image, _cookies_for_url, _tool_download_video,
-    _find_video_urls, _verify_video_creator, _tool_search_video,
+    _tool_download_image, _tool_download_video, _tool_search_video,
     _tool_tts, _tool_qr_code, _tool_create_chart, _tool_translate,
 )
 
 
 
 
-from .prompts import _TOOLS, _SYSTEM, _build_system
+from .prompts import _TOOLS, _build_system
 
 
-async def _gemini_call(keys: list, contents: list, is_owner: bool = False) -> dict:
-    """Call Gemini 3.5 Flash with tools — returns dict with '_error' on failure."""
+async def _sonnet_call(contents: list, is_owner: bool = False) -> dict:
     import time as _t
-    errors = []  # accumulate errors from all models
-
+    errors = []
     if len(contents) > 31:
         contents = [contents[0]] + contents[-30:]
 
-    for model_name in ("gemini-3.5-flash",):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-        payload = {
-            "systemInstruction": {"parts": [{"text": _build_system(is_owner)}]},
-            "contents": contents,
-            "tools": [{"functionDeclarations": _TOOLS}],
-            "generationConfig": {"temperature": 1.0, "thinkingConfig": {"thinkingLevel": "minimal"}},
-            "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ],
-        }
-        # Merge main keys with Nano pool for maximum coverage
-        all_keys = list(keys or [])
+    system = _build_system(is_owner)
+    tools = _gemini_tools_to_openai(_TOOLS)
+    messages = _gemini_contents_to_openai_messages(contents)
+
+    for attempt in range(3):
+        started = _t.monotonic()
         try:
-            nano_keys = await _nk_get_live()
-            if nano_keys:
-                all_keys.extend(nano_keys)
-        except Exception:
-            pass
-        for key in all_keys[:16]:
-            t0 = _t.monotonic()
-            try:
-                async with aiohttp.ClientSession() as s:
-                    async with s.post(url, json=payload,
-                            headers={"Content-Type": "application/json", "x-goog-api-key": key},
-                            timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            candidates = data.get("candidates", [])
-                            if candidates:
-                                c = candidates[0]
-                                parts = c.get("content", {}).get("parts", [])
-                                fc = [p.get("functionCall") for p in parts if "functionCall" in p]
-                                text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
-                                dt = _t.monotonic() - t0
-                                if fc:
-                                    logger.info(f"agent: Gemini tool calls [{dt:.1f}s]: {[f['name'] for f in fc]}")
-                                    return {"content": {"parts": parts, "role": "model"}, "_finish": c.get("finishReason", "")}
-                                if text:
-                                    logger.info(f"agent: Gemini text [{dt:.1f}s] ({len(text)} chars)")
-                                    return {"content": {"parts": [{"text": text}], "role": "model"}, "_finish": c.get("finishReason", "")}
-                                err_msg = f"{model_name}: empty response ({c.get('finishReason', '?')})"
-                                errors.append(err_msg); logger.warning(f"agent: {err_msg}")
-                        elif resp.status in (429, 403):
-                            body = await resp.text()
-                            remove_key(key, resp.status)
-                            errors.append(f"{model_name}: HTTP {resp.status} — {body[:120]}")
-                            continue
-                        else:
-                            body = await resp.text()
-                            errors.append(f"{model_name}: HTTP {resp.status}")
-                            logger.warning(f"agent: {model_name}: HTTP {resp.status}")
-            except Exception as e:
-                errors.append(f"{model_name}: {type(e).__name__}: {e}")
-                logger.warning(f"agent: {model_name}: {type(e).__name__}: {e}")
-        # If ALL errors are 429, wait 15s and retry once (keys recover from cooldown)
-        if errors and all("HTTP 429" in e for e in errors):
-            if not getattr(_gemini_call, '_retried', False):
-                _gemini_call._retried = True
-                await asyncio.sleep(15)
-                continue
-    _gemini_call._retried = False
-    # Concise error: first error only + count
-    if errors:
-        first = errors[0][:150]
-        rest = f" + ещё {len(errors)-1}" if len(errors) > 1 else ""
-        return {"_error": f"{first}{rest}"}
-    return {"_error": "Gemini: no keys available"}
-# ── Execute one tool ─────────────────────────────────────────────
+            data = await openrouter_chat(
+                messages=messages,
+                system_prompt=system,
+                model=OPENROUTER_TEXT_MODEL,
+                max_tokens=AGENT_SONNET_MAX_TOKENS,
+                tools=tools,
+                timeout=AGENT_SONNET_TIMEOUT,
+            )
+        except Exception as error:
+            errors.append(f"{type(error).__name__}: {error}")
+            if attempt < 2:
+                await asyncio.sleep(2)
+            continue
+
+        logger.info(f"agent: Sonnet raw finish={data.get('choices',[{}])[0].get('finish_reason','?')} has_tools={bool(data.get('choices',[{}])[0].get('message',{}).get('tool_calls'))}")
+        result = _openai_response_to_gemini(data)
+        elapsed = _t.monotonic() - started
+        function_calls = [part.get("functionCall") for part in result.get("content", {}).get("parts", []) if "functionCall" in part]
+        text = " ".join(part.get("text", "") for part in result.get("content", {}).get("parts", []) if "text" in part).strip()
+        if function_calls:
+            logger.info(f"agent: Sonnet tool calls [{elapsed:.1f}s]: {[call['name'] for call in function_calls]}")
+            return result
+        if text:
+            logger.info(f"agent: Sonnet text [{elapsed:.1f}s] ({len(text)} chars)")
+            return result
+        errors.append(f"Claude Sonnet 5: пустой ответ (finish={data.get('choices',[{}])[0].get('finish_reason','?')})")
+
+    first = errors[0][:300] if errors else "неизвестная ошибка"
+    rest = f" + ещё {len(errors) - 1}" if len(errors) > 1 else ""
+    return {"_error": f"Claude Sonnet 5: {first}{rest}"}
+
+ # ── Execute one tool ─────────────────────────────────────────────
 
 
 async def _execute_tool(
@@ -147,7 +115,7 @@ async def _execute_tool(
 
     async def _st(t):
         try: await status_cb(t)
-        except Exception: pass
+        except Exception as e: logger.debug(f"status_cb suppressed: {e}")
 
     async def _send(m):
         if send_cb:
@@ -161,26 +129,28 @@ async def _execute_tool(
     if e := budget.charge(name):        return e, None
 
     if name == "think":
-        import html as _html
-        t = args.get("thought", "")
-        logger.info(f"[think] {t[:300]}")
-        safe_t = _html.escape(t[:1200])
-        await _st(f"💭 <b>Размышляю:</b>\n<blockquote expandable>{safe_t}</blockquote>")
+        thought = str(args.get("thought", ""))
+        logger.info("[think] private plan recorded (%d chars)", len(thought))
+        await _st("Планирую следующий шаг...")
         return "ok", None
 
     if name == "web_search":
-        q = args.get("query", "")
-        await _st(f"🔎 Ищу: «{q[:80]}»")
+        q = (args.get("query") or "").strip()
+        if not q:
+            return "Ошибка: пустой поисковый запрос. Уточни что искать.", None
+        await _st(f"🔎 Ищу: «{html.escape(q[:80])}»")
         return await _fc_search(q), None
-
     if name == "scrape_url":
+        url = (args.get("url") or "").strip()
+        if not url:
+            return "Ошибка: пустой URL. Укажи ссылку для парсинга.", None
         await _st("📄 Читаю страницу...")
-        return await _fc_scrape(args.get("url", "")), None
+        return await _fc_scrape(url), None
 
     if name == "generate_project":
         await _st("⚙️ Генерирую проект...")
         try:
-            p = await asyncio.wait_for(generate_project_with_gemini(args.get("prompt", "")), timeout=_PROJECT_TIMEOUT)
+            p = await asyncio.wait_for(generate_project_with_gemini(args.get("prompt", "")), timeout=AGENT_PROJECT_TIMEOUT)
         except asyncio.TimeoutError:
             return "generate_project timed out.", None
         if p.get("ok"):
@@ -250,23 +220,6 @@ async def _execute_tool(
             return "Укажи URL.", None
         # SSRF guard: block private/loopback/link-local targets
         import socket as _sock, ipaddress as _ipa
-        def _ssrf_safe(u: str) -> bool:
-            from urllib.parse import urlparse as _up
-            p = _up(u)
-            if p.scheme not in ("http", "https") or not p.hostname:
-                return False
-            _BLOCKED = [_ipa.ip_network(n) for n in (
-                "127.0.0.0/8", "::1/128", "10.0.0.0/8",
-                "172.16.0.0/12", "192.168.0.0/16",
-                "169.254.0.0/16", "fd00::/8",
-            )]
-            try:
-                for *_, sa in _sock.getaddrinfo(p.hostname, None):
-                    if any(_ipa.ip_address(sa[0]) in net for net in _BLOCKED):
-                        return False
-            except Exception:
-                return False
-            return True
         def _ssrf_resolve(u: str):
             from urllib.parse import urlparse as _up2
             p2 = _up2(u)
@@ -364,11 +317,11 @@ async def _execute_tool(
         import html as _html
         code = args.get("code", "")
         safe_code = _html.escape(code[:300])
-        await _st(f"🐍 Запускаю Python в Docker:\n<pre><code class=\"language-python\">{safe_code}{'…' if len(code) > 300 else ''}</code></pre>")
+        await _st(f"🐍 Запускаю Python в sandbox:\n<pre><code class=\"language-python\">{safe_code}{'…' if len(code) > 300 else ''}</code></pre>")
         return await _tool_run_python(code, ws, _st), None
 
     if name == "analyze_audio":
-        await _st("🎧 Слушаю результат через Gemini...")
+        await _st("🎧 Анализирую аудио...")
         return await _tool_analyze_audio(
             path=args.get("path", ""), question=args.get("question", ""), ws=ws
         ), None
@@ -383,7 +336,7 @@ async def _execute_tool(
         import html as _html
         cmd = args.get("command", "")
         safe_cmd = _html.escape(cmd[:300])
-        await _st(f"💻 Выполняю команду в Docker:\n<pre><code class=\"language-bash\">{safe_cmd}</code></pre>")
+        await _st(f"💻 Выполняю команду в sandbox:\n<pre><code class=\"language-bash\">{safe_cmd}</code></pre>")
         return await _tool_run_shell(cmd, ws, _st), None
 
     if name == "playwright_browse":
@@ -452,6 +405,23 @@ async def _execute_tool(
             args.get("caption", ""), _send,
         ), None
 
+    if name == "vision":
+        path = args.get("path", "")
+        prompt = args.get("prompt", "Опиши это изображение.")
+        import os as _os2
+        if not path or not _os2.path.isfile(path):
+            return f"Файл не найден: {path}. Используй путь из workspace.", None
+        await _st("🔍 Анализирую изображение через NVIDIA Vision...")
+        try:
+            with open(path, "rb") as f:
+                img_bytes = f.read()
+        except Exception as e:
+            return f"Не могу прочитать файл: {e}", None
+        from services.nvidia_vision import analyze_image
+        result = await analyze_image(img_bytes, prompt)
+        if result:
+            return result, None
+        return "Vision анализ не дал результата.", None
     return f"Unknown tool: {name}", None
 
 
@@ -464,15 +434,12 @@ async def run_agent(
     status_cb: Callable[[str], Any],
     send_media_cb: Optional[Callable] = None,
     is_owner: bool = False,
-    initial_files: Optional[dict] = None,  # {filename: bytes} pre-loaded into workspace
+    initial_files: Optional[dict] = None,
 ) -> Tuple[Optional[str], Optional[dict]]:
-    keys = await load_keys()
-    if not keys:
-        return "Gemini keys are dead.", None
 
     import time as _time
     from state import chat_workspaces as _cws
-    _WS_TTL = 7200  # 2 часа
+    _WS_TTL = AGENT_WORKSPACE_TTL
     _existing = _cws.get(chat_id)
     _existing_path = ""
     if _existing and _time.time() - _existing["ts"] < _WS_TTL:
@@ -487,64 +454,79 @@ async def run_agent(
 
     async def _st(t):
         try: await status_cb(t)
-        except Exception: pass
+        except Exception as e: logger.debug(f"status_cb suppressed: {e}")
 
-    _TOOL_LABELS: dict[str, str] = {
-        "think": "Размышляю...", "web_search": "Ищу в интернете...",
-        "scrape_url": "Читаю страницу...", "fetch_json": "Запрашиваю данные...",
-        "generate_project": "Генерирую проект...", "list_image_models": "Запрашиваю модели...", "generate_image": "Рисую...",
-        "search_and_send_image": "Ищу картинку...", "download_image": "Скачиваю картинку...",
-        "search_and_send_video": "Ищу видео...", "download_video": "Скачиваю видео...",
-        "text_to_speech": "Озвучиваю...", "run_python": "Запускаю Python...",
-        "analyze_audio": "Слушаю результат...", "analyze_image": "Анализирую изображение...", "run_shell": "Выполняю команду...", "playwright_browse": "Открываю браузер...",
-        "write_file": "Записываю файл...",
-        "read_bot_logs": "Читаю логи бота...", "read_file": "Читаю файл...", "calculate": "Считаю...", "translate": "Перевожу...",
-        "qr_code": "Генерирую QR...", "create_chart": "Строю график...",
-        "create_file": "Создаю файл...", "send_workspace_file": "Отправляю файл...",
-        "send_with_buttons": "Отправляю кнопки...", "reply": "Формулирую ответ...",
+    _TOOL_STATUS: dict[str, tuple[str, str, str]] = {
+        "think": (_E["think"], "💭", "Формулирую план"),
+        "web_search": (_E["search"], "🔍", "Веб-поиск"),
+        "scrape_url": (_E["link"], "🔗", "Читаю страницу"),
+        "fetch_json": (_E["globe"], "🌐", "Запрашиваю данные"),
+        "generate_project": (_E["screen"], "🖥", "Генерирую проект"),
+        "list_image_models": (_E["info"], "ℹ️", "Запрашиваю модели"),
+        "generate_image": (_E["sparkle"], "✨", "Рисую"),
+        "search_and_send_image": (_E["eyes"], "👀", "Ищу картинку"),
+        "download_image": (_E["download"], "⬇️", "Скачиваю картинку"),
+        "search_and_send_video": (_E["play"], "▶️", "Ищу видео"),
+        "download_video": (_E["download"], "⬇️", "Скачиваю видео"),
+        "text_to_speech": (_E["microphone"], "🎙", "Озвучиваю"),
+        "run_python": (_E["screen"], "🖥", "Запускаю Python"),
+        "analyze_audio": (_E["music"], "🎵", "Анализирую аудио"),
+        "analyze_image": (_E["eyes"], "👀", "Анализирую фото"),
+        "run_shell": (_E["screen"], "🖥", "Выполняю команду"),
+        "playwright_browse": (_E["globe"], "🌐", "Открываю браузер"),
+        "write_file": (_E["pencil"], "✏️", "Записываю файл"),
+        "read_bot_logs": (_E["chart"], "📊", "Читаю логи бота"),
+        "read_file": (_E["attachment"], "📎", "Читаю файл"),
+        "calculate": (_E["idea"], "💡", "Считаю"),
+        "translate": (_E["globe"], "🌐", "Перевожу"),
+        "qr_code": (_E["link"], "🔗", "Генерирую QR"),
+        "create_chart": (_E["growth"], "📈", "Строю график"),
+        "create_file": (_E["pencil"], "✏️", "Создаю файл"),
+        "send_workspace_file": (_E["attachment"], "📎", "Отправляю файл"),
+        "send_with_buttons": (_E["chat"], "💬", "Отправляю кнопки"),
+        "reply": (_E["chat"], "💬", "Формулирую ответ"),
     }
-    last_action = "Формулирую план..."
-    import time as _time
+    _DETAIL_FIELDS = {
+        "web_search": "query", "scrape_url": "url", "fetch_json": "url",
+        "generate_project": "prompt", "playwright_browse": "url",
+        "write_file": "path", "read_file": "path",
+        "create_file": "filename", "send_workspace_file": "path",
+    }
+    last_tool, last_args = "think", {}
     _start_ts = _time.monotonic()
 
-    def _fmt_status(action: str, step: int) -> str:
+    def _fmt_status(name: str, args: dict) -> str:
+        emoji_id, emoji, label = _TOOL_STATUS.get(
+            name, (_E["lightning"], "⚡️", name.replace("_", " "))
+        )
         elapsed = int(_time.monotonic() - _start_ts)
-        m, s = divmod(elapsed, 60)
-        t = f"{m}м {s}с" if m else f"{s}с"
-        return f"🤖 Шаг {step+1}/{MAX_STEPS} · {t} · {action}"
+        minutes, seconds = divmod(elapsed, 60)
+        duration = f"{minutes}м {seconds}с" if minutes else f"{seconds}с"
+        detail = str(args.get(_DETAIL_FIELDS.get(name, ""), "")).strip()
+        detail = " ".join(detail.split())
+        if len(detail) > 120:
+            detail = detail[:119] + "…"
+        lines = [f'<tg-emoji emoji-id="{emoji_id}">{emoji}</tg-emoji> <b>{html.escape(label)}</b>']
+        if detail:
+            lines.append(f"└ <i>{html.escape(detail)}</i>")
+        lines.append(
+            '<tg-emoji emoji-id="5386367538735104399">⌛</tg-emoji> '
+            f"<i>Работаю · {duration}</i>"
+        )
+        return "\n".join(lines)
 
     try:
-        # ── Groq fast path: try to answer without tools first ──────────────
-        for step in range(MAX_STEPS):
-            await _st(_fmt_status(last_action, step))
+        # Claude Sonnet 5 drives every agent step, including tool calls.
+        for step in range(AGENT_MAX_STEPS):
+            await _st(_fmt_status(last_tool, last_args))
 
-            if MAX_STEPS - step <= 3:
+            if AGENT_MAX_STEPS - step <= 3:
                 contents.append({"role": "user", "parts": [{"text":
-                    f"\n[СИСТЕМА: осталось {MAX_STEPS - step} шагов. Завершай.]"
+                    f"\n[СИСТЕМА: осталось {AGENT_MAX_STEPS - step} шагов. Завершай.]"
                 }]})
 
-            candidate = await _gemini_call(keys, contents, is_owner=is_owner)
+            candidate = await _sonnet_call(contents, is_owner=is_owner)
 
-            # PROHIBITED_CONTENT — context is poisoned, retry with clean prompt
-            if candidate.get("_blocked") == "PROHIBITED_CONTENT":
-                from state import chat_context_buffer
-                chat_context_buffer.pop(chat_id, None)
-                # Rebuild contents without chat context
-                clean_task = task.split("[/Справочный контекст]")[-1].strip() or task
-                contents = [{"role": "user", "parts": [{"text": clean_task}]}]
-                if initial_files:
-                    for fname in initial_files:
-                        contents[0]["parts"].insert(0, {"text":
-                            f"[Файл загружен в workspace: /workspace/{fname}]"})
-                candidate = await _gemini_call(keys, contents, is_owner=is_owner)
-                if not candidate or candidate.get("_blocked"):
-                    return "Запрос заблокирован фильтром. Попробуй перефразировать.", None
-
-            if not candidate:
-                logger.warning("agent: Groq returned empty, retrying once...")
-                candidate = await _gemini_call(keys, contents, is_owner=is_owner)
-                if not candidate:
-                    return f"Модели недоступны: {candidate.get('_error', 'неизвестная ошибка')}", None
 
             if candidate.get("_error"):
                 return f"Модели недоступны: {candidate['_error']}", None
@@ -558,7 +540,6 @@ async def run_agent(
 
             if not fn_calls:
                 text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
-                # Strip hallucinated tool-call-as-text patterns (both Gemini and Groq formats)
                 text = re.sub(r'\b(?:call:default_api:)?\w+\(\w+="([^"]*)"\)', r'\1', text)
                 text = re.sub(r'<\w+\.?\w+="([^"]*)"\s*/?>', r'\1', text)
                 text = re.sub(r'<reply[^>]*>|</reply>', '', text)
@@ -569,12 +550,13 @@ async def run_agent(
             for fn in fn_calls:
                 name = fn.get("name", "")
                 args = fn.get("args", {})
+                last_tool, last_args = name, args
+                await _st(_fmt_status(name, args))
                 result, project = await _execute_tool(
                     name, args, debounce, budget, status_cb, send_media_cb, ws,
                     is_owner=is_owner, chat_id=chat_id,
                 )
-                last_action = _TOOL_LABELS.get(name, f"{name}...")
-                await _st(_fmt_status(last_action, step))
+                last_tool, last_args = name, args
                 if name == "generate_project" and project is not None:
                     return None, project
                 if name == "reply":
@@ -591,11 +573,7 @@ async def run_agent(
 
 async def classify_agent_intent(prompt: str) -> bool:
     """Returns True if this request should go through the agent loop.
-    Uses Gemini to understand intent — no keyword matching."""
-    keys = await load_keys()
-    if not keys:
-        return False
-
+    Uses Claude Sonnet 5 to understand ambiguous intent; explicit triggers stay local."""
     system = (
         "You decide if a Telegram message needs the AI agent tools.\n\n"
         "Answer TRUE when the user wants to:\n"
@@ -620,43 +598,21 @@ async def classify_agent_intent(prompt: str) -> bool:
         "- Wants a pure code project with no research needed\n\n"
         "Reply with ONLY one word: true or false"
     )
-    payload = {
-        "systemInstruction": {"parts": [{"text": system}]},
-        "contents": [{"role": "user", "parts": [{"text": prompt[:800]}]}],
-        "generationConfig": {
-            "temperature": 0,
-            # thinkingLevel "minimal" uses ~5-20 thinking tokens from the same budget.
-            # maxOutputTokens must be large enough to leave room for actual output.
-            "maxOutputTokens": 64,
-            "thinkingConfig": {"thinkingLevel": "minimal"},
-        },
-    }
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
-    live_keys = await _nk_get_live()
-    if not live_keys:
+    agent_triggers = [
+        'search', 'find', 'generate', 'create', 'make', 'draw', 'send', 'download',
+        'convert', 'продолжай', 'ищи дальше', 'скинь', 'дай', 'переведи',
+    ]
+    if any(t in prompt.lower() for t in agent_triggers):
+        return True
+    try:
+        text = await generate_text_with_openrouter(
+            prompt=prompt[:800],
+            system_prompt=system,
+            model=OPENROUTER_TEXT_MODEL,
+            max_tokens=AGENT_CLASSIFY_MAX_TOKENS,
+            timeout=AGENT_CLASSIFY_TIMEOUT,
+        )
+    except Exception as error:
+        logger.warning(f"Agent intent classification failed: {type(error).__name__}: {error}")
         return False
-    for key in live_keys:
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(
-                    url, json=payload,
-                    headers={"Content-Type": "application/json", "x-goog-api-key": key},
-                    timeout=aiohttp.ClientTimeout(total=8),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        try:
-                            candidate = data.get("candidates", [{}])[0]
-                            parts = candidate.get("content", {}).get("parts", [])
-                            text = (parts[0].get("text", "") if parts else "").strip().lower()
-                            logger.debug(f"classify_agent_intent({prompt[:60]!r}) → {text!r}")
-                            return text.startswith("true")
-                        except (IndexError, KeyError, TypeError) as e:
-                            logger.warning(f"classify_agent_intent parse error: {e} | data: {str(data)[:200]}")
-                            return False
-                    if resp.status in (429, 403):
-                        remove_key(key, resp.status)
-                        continue
-        except Exception as e:
-            logger.warning(f"classify_agent_intent request error: {type(e).__name__}: {e}")
-    return False
+    return text.strip().lower().startswith("true")

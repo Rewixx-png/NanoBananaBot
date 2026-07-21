@@ -4,56 +4,13 @@ import signal
 import sys
 from aiogram import Bot, Dispatcher, BaseMiddleware
 
-import re as _re
-import os as _os
-import io as _io
-import shutil as _shutil
-_orig_download_file = Bot.download_file
-async def _patched_download_file(self, file_path, destination=None, *args, **kwargs):
-    if file_path:
-        if file_path.startswith("/var/lib/telegram-bot-api/"):
-            host_path = file_path.replace(
-                "/var/lib/telegram-bot-api/",
-                "/var/lib/docker/volumes/tiktokhatanibot_telegram-bot-api-data/_data/"
-            )
-        else:
-            host_path = _os.path.join(
-                "/var/lib/docker/volumes/tiktokhatanibot_telegram-bot-api-data/_data/",
-                self.token,
-                file_path
-            )
-        if _os.path.exists(host_path):
-            if destination is None:
-                def _read_sync():
-                    with open(host_path, 'rb') as f:
-                        return _io.BytesIO(f.read())
-                return await asyncio.to_thread(_read_sync)
-            else:
-                if isinstance(destination, (str, _os.PathLike)):
-                    _os.makedirs(_os.path.dirname(destination), exist_ok=True)
-                    await asyncio.to_thread(_shutil.copy2, host_path, destination)
-                    return destination
-                else:
-                    def _write_sync():
-                        with open(host_path, 'rb') as f_src:
-                            _shutil.copyfileobj(f_src, destination)
-                    await asyncio.to_thread(_write_sync)
-                    return destination
-    if file_path and file_path.startswith("/var/lib/telegram-bot-api/"):
-        prefix = f"/var/lib/telegram-bot-api/{self.token}/"
-        if file_path.startswith(prefix):
-            file_path = file_path[len(prefix):]
-        else:
-            file_path = file_path.replace("/var/lib/telegram-bot-api/", "")
-            if file_path.startswith(self.token + "/"):
-                file_path = file_path[len(self.token) + 1:]
-    return await _orig_download_file(self, file_path, destination, *args, **kwargs)
-Bot.download_file = _patched_download_file
 
 from aiogram.types import TelegramObject, Message, CallbackQuery
 from config import BOT_TOKEN, BANNED_USER_IDS
 from database import init_db, get_all_pending_gens, delete_pending_gen, get_banned_users_db, get_all_chat_limits, get_all_vip_users, get_all_daily_limits_usage
 from handlers import router, refresh_models
+from handlers.core import PUBLIC_COMMANDS
+from handlers.common import callback_has_access
 from state import banned_user_ids, chat_custom_limits, paid_unlimited_until, daily_gen_limits
 from typing import Callable, Any, Awaitable
 
@@ -67,6 +24,25 @@ class BanMiddleware(BaseMiddleware):
             user_id = event.from_user.id
         if user_id and (user_id in BANNED_USER_IDS or user_id in banned_user_ids):
             return
+        return await handler(event, data)
+
+class CallbackAccessMiddleware(BaseMiddleware):
+    _SAFE_EXACT = {
+        "menu:home", "menu:close", "menu:chat", "menu:create", "menu:tools", "voice:cancel",
+    }
+    _SAFE_PREFIXES = ("help:", "guide:")
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict], Awaitable[Any]],
+        event: CallbackQuery,
+        data: dict,
+    ) -> Any:
+        callback_data = event.data or ""
+        if callback_data in self._SAFE_EXACT or callback_data.startswith(self._SAFE_PREFIXES):
+            return await handler(event, data)
+        if not await callback_has_access(event):
+            return None
         return await handler(event, data)
 
 class DualHistoryMiddleware(BaseMiddleware):
@@ -101,7 +77,13 @@ class DualHistoryMiddleware(BaseMiddleware):
                 chat_context_buffer[event.chat.id] = buf[-MAX_HISTORY_MESSAGES:]
         return await handler(event, data)
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.FileHandler('bot.log'), logging.StreamHandler(sys.stdout)])
+if not logging.root.handlers:
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.FileHandler('bot.log'), logging.StreamHandler(sys.stdout)])
+# Apply API key masking to file handler
+from log_filter import APIKeyMaskingFilter
+for h in logging.root.handlers:
+    if isinstance(h, logging.FileHandler):
+        h.addFilter(APIKeyMaskingFilter())
 logger = logging.getLogger(__name__)
 bot_instance = None
 dp_instance = None
@@ -111,7 +93,11 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 async def resume_pending_generations(bot: Bot):
-    from ai_services import poll_veo_operation, generate_image_with_gemini, generate_image_with_gpt, generate_image_with_nvidia, generate_image_with_openrouter
+    from services.video_service import poll_veo_operation
+    from services.gemini_image import generate_image_with_gemini
+    from services.openai_service import generate_image_with_gpt
+    from services.nvidia import generate_image_with_nvidia
+    from services.openrouter import generate_image_with_openrouter
     from aiogram.types import BufferedInputFile
     from utils import make_safe_caption
     pending = await get_all_pending_gens()
@@ -168,7 +154,15 @@ async def resume_pending_generations(bot: Bot):
             logger.error(f'Ошибка восстановления задачи {gen_id}: {e}')
             await delete_pending_gen(gen_id)
 
+
+
 async def on_startup(bot: Bot):
+    try:
+        await bot.set_my_commands(PUBLIC_COMMANDS)
+    except Exception as e:
+        logger.warning(f'Не удалось зарегистрировать меню команд: {type(e).__name__}: {e}', exc_info=True)
+    from agent.workspace import cleanup_stale_workspaces
+    cleanup_stale_workspaces()
     logger.info('Инициализация базы данных...')
     await init_db()
     banned = await get_banned_users_db()
@@ -196,14 +190,20 @@ async def on_shutdown():
         await bot2.session.close()
     except Exception:
         pass
+    try:
+        from services.elevenlabs_service import close_elevenlabs
+        await close_elevenlabs()
+    except Exception as e:
+        logger.warning(f"Error closing ElevenLabs: {e}")
     logger.info('Бот успешно остановлен')
 
 async def _nano_keys_sync_loop():
+    from config import NANO_KEY_SYNC_INTERVAL
     from keys import init_db, sync_from_keyhunter
     await init_db()
     await sync_from_keyhunter()
     while True:
-        await asyncio.sleep(300)  # каждые 5 минут
+        await asyncio.sleep(NANO_KEY_SYNC_INTERVAL)
         await sync_from_keyhunter()
 
 
@@ -218,13 +218,32 @@ async def main():
         from aiogram.client.session.aiohttp import AiohttpSession
         from config import TELEGRAM_API_URL
 
-        session = AiohttpSession(api=TelegramAPIServer.from_base(TELEGRAM_API_URL))
+        session = AiohttpSession(api=TelegramAPIServer.from_base(TELEGRAM_API_URL, is_local=True))
         bot_instance = Bot(token=BOT_TOKEN, session=session)
-        dp_instance = Dispatcher()
+        from aiogram.fsm.storage.memory import MemoryStorage
+        dp_instance = Dispatcher(storage=MemoryStorage())
         dp_instance.message.middleware(BanMiddleware())
         dp_instance.message.middleware(DualHistoryMiddleware())
         dp_instance.callback_query.middleware(BanMiddleware())
+        dp_instance.callback_query.middleware(CallbackAccessMiddleware())
         dp_instance.include_router(router)
+
+        # ── Global error handler: forward all exceptions to owner ──
+        from config import OWNER_USER_ID
+        async def _owner_error_handler(error_event):
+            exception = error_event.exception
+            import traceback as _tb
+            tb = ''.join(_tb.format_exception(type(exception), exception, exception.__traceback__))[-2000:]
+            try:
+                await bot_instance.send_message(
+                    OWNER_USER_ID,
+                    f"❌ <b>УПАЛО:</b> <code>{type(exception).__name__}: {exception}</code>\n"
+                    f"<pre>{tb[:1500]}</pre>",
+                    parse_mode='HTML',
+                )
+            except Exception:
+                logger.error(f"Failed to notify owner about error: {exception}")
+        dp_instance.errors.register(_owner_error_handler)
         dp2.include_router(router2)
         await on_startup(bot_instance)
         set_bot1_ref(bot_instance)

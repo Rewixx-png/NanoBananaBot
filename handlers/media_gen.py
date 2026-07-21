@@ -2,6 +2,7 @@ import time
 import asyncio
 import uuid
 import logging
+from html import escape
 from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
@@ -27,18 +28,12 @@ from state import (
     chat_custom_limits,
 )
 from database import save_pending_gen, delete_pending_gen
-from ai_services import (
-    generate_image_with_gemini,
-    generate_image_with_gpt,
-    generate_image_with_nvidia,
-    generate_image_with_replicate,
-    explain_generation_error,
-    upscale_image,
-    generate_image_prompt,
-    fetch_gemini_image_models,
-    fetch_openai_image_models,
-    fetch_replicate_image_models,
-)
+from services.gemini_image import generate_image_with_gemini, generate_image_prompt, fetch_gemini_image_models
+from services.openai_service import generate_image_with_gpt, fetch_openai_image_models
+from services.nvidia import generate_image_with_nvidia
+from services.replicate import generate_image_with_replicate, fetch_replicate_image_models
+from services.error_explainer import explain_generation_error
+from services.upscale_service import upscale_image
 from utils import check_membership, make_safe_caption
 from handlers.common import (
     safe_send,
@@ -53,14 +48,6 @@ from handlers.common import (
     _nsfw_cfg_keyboard,
     _prompt_ai_keyboard,
     _TEMP_OPTIONS,
-    _NSFW_STEPS,
-    _NSFW_CFG,
-    _NSFW_SIZES,
-    _NSFW_DEFAULT_NEG,
-    _NSFW_SCHEDULERS,
-    _NSFW_CLIP_SKIP,
-    _NSFW_PAG,
-    _NSFW_RESCALE,
 )
 from handlers.admin import _check_daily_limit
 
@@ -108,16 +95,13 @@ VEO_MODELS: dict = {
     'veo0': ('Veo 2 (deprecated)', 'veo-2.0-generate-001'),
 }
 
-VIDEO_COOLDOWN = 60
+VIDEO_COOLDOWN = 20
 
 TTS_MODELS: dict = {
     'tts0': ('Gemini 3.5 Flash TTS', 'gemini-3.5-flash-tts'),
     'tts1': ('Gemini 3.1 Flash TTS', 'gemini-3.1-flash-tts-preview'),
 }
 
-_TTS_LANGS = [('🇷🇺 RU', 'ru-RU'), ('🇬🇧 EN', 'en-US'), ('🇯🇵 JA', 'ja-JP')]
-_TTS_TEMPS = [0.1, 0.5, 1.0, 1.5, 2.0]
-TTS_VOICES = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Leda', 'Orus', 'Aoede', 'Callirrhoe', 'Autonoe', 'Enceladus', 'Iapetus', 'Umbriel', 'Algieba', 'Despina', 'Erinome', 'Algenib', 'Rasalgethi', 'Laomedeia', 'Achernar', 'Alnilam', 'Schedar', 'Gacrux', 'Pulcherrima', 'Achird', 'Zubenelgenubi', 'Vindemiatrix', 'Sadachbia', 'Sadaltager', 'Sulafat']
 
 _nsfw_awaiting_input: dict = {}
 
@@ -151,7 +135,8 @@ async def refresh_models():
         PROVIDER_MODELS['nsfw'] = [(label, f'rep{i}') for (i, (label, _)) in enumerate(all_models)]
         for (i, (_, model_id)) in enumerate(all_models):
             MODEL_TO_REAL[f'rep{i}'] = ('nsfw', model_id)
-    from ai_services import fetch_veo_models, fetch_gemini_tts_models
+    from services.video_service import fetch_veo_models
+    from services.audio_service import fetch_gemini_tts_models
     veo_models = await fetch_veo_models()
     if veo_models:
         for (i, (label, model_id)) in enumerate(veo_models):
@@ -187,24 +172,29 @@ async def cmd_image(message: types.Message):
     else:
         is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
         if not is_member:
-            await message.reply('Доступ запрещен. Вы не состоите в обязательной беседе.')
+            await message.reply('Доступ закрыт: сначала вступи в обязательную беседу, потом рисуй свою хрень.')
             return
+    prompt = message.text.replace('/image', '').strip() if message.text else ''
+    if message.caption:
+        prompt = message.caption.replace('/image', '').strip()
+    if not prompt and (not message.photo):
+        await message.reply('Промпт пустой. Напиши, что рисовать: /image рыжий кот-космонавт, кинопостер')
+        return
     current_time = time.time()
     uid = message.from_user.id
     if uid not in ALLOWED_USER_IDS:
         if message.chat.id == FULL_ACCESS_CHAT_ID:
             is_main_member = True
             try:
-                m = await message.bot.get_chat_member(chat_id=CHAT_ID, user_id=uid)
-                is_main_member = m.status in ('member', 'administrator', 'creator', 'restricted')
+                member = await message.bot.get_chat_member(chat_id=CHAT_ID, user_id=uid)
+                is_main_member = member.status in ('member', 'administrator', 'creator', 'restricted')
             except Exception as e:
                 logger.warning(f'is_main_member check failed for {uid}: {e}')
             if not is_main_member and current_time >= paid_unlimited_until.get(uid, 0):
-                last_fa = full_access_image_cooldowns.get(uid, 0)
-                remaining = FULL_ACCESS_CHAT_IMAGE_COOLDOWN - (current_time - last_fa)
+                last_full_access = full_access_image_cooldowns.get(uid, 0)
+                remaining = FULL_ACCESS_CHAT_IMAGE_COOLDOWN - (current_time - last_full_access)
                 if remaining > 0:
-                    secs = int(remaining)
-                    await message.reply(f'Не спамь блять картинками, подожди ещё {secs} сек.')
+                    await message.reply(f'Не спамь блять картинками, подожди ещё {int(remaining)} сек.')
                     return
             full_access_image_cooldowns[uid] = current_time
         else:
@@ -213,12 +203,6 @@ async def cmd_image(message: types.Message):
                 await message.reply(f'Не спамь блять картинками, подожди еще {int(IMAGE_COOLDOWN_SECONDS - (current_time - last_time))} сек.')
                 return
             user_image_cooldowns[uid] = current_time
-    prompt = message.text.replace('/image', '').strip() if message.text else ''
-    if message.caption:
-        prompt = message.caption.replace('/image', '').strip()
-    if not prompt and (not message.photo):
-        await message.reply('Напишите промпт после команды, например:\n/image красивый закат')
-        return
     images_bytes = []
     file_ids = []
     if message.photo:
@@ -228,9 +212,13 @@ async def cmd_image(message: types.Message):
             file_ids = group['file_ids']
         photo = message.photo[-1]
         file_ids.append(photo.file_id)
-        file_info = await message.bot.get_file(photo.file_id)
-        downloaded_file = await message.bot.download_file(file_info.file_path)
-        images_bytes.append(downloaded_file.read())
+        try:
+            downloaded_file = await message.bot.download(photo.file_id)
+            images_bytes.append(downloaded_file.read())
+        except Exception as e:
+            logger.error(f"cmd_image download failed: {type(e).__name__}: {e}", exc_info=True)
+            await message.reply(f"❌ Telegram не отдал фото: {type(e).__name__}: {e}. Повтори /image с другим JPG или PNG.")
+            return
         if message.media_group_id:
             await asyncio.sleep(2.5)
             group = pending_media_groups.pop(message.media_group_id, None)
@@ -246,10 +234,33 @@ async def cmd_image(message: types.Message):
     if images_bytes and prompt:
         pending_prompt_requests[request_id] = {'user_id': message.from_user.id, 'chat_id': message.chat.id, 'source_message_id': message.message_id, 'message_thread_id': thread_id, 'prompt': prompt, 'images_bytes': images_bytes, 'file_ids': file_ids, 'prev_prompts': [], 'current_ai_prompt': None}
         photo_word = 'фотки' if len(images_bytes) > 1 else 'фотку'
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🤖 Использовать шаблон промта', callback_data=f'pask:{request_id}')], [InlineKeyboardButton(text='⚡ Генерировать с моим промтом', callback_data=f'pbase:{request_id}')]])
-        await message.reply(f"Слышь, {photo_word} вижу. Твой промт — ну такое. Могу через Gemini Pro сделать нормальный промт по {('этим' if len(images_bytes) > 1 else 'этому')} {('фоткам' if len(images_bytes) > 1 else 'фото')} и твоей идее. Жмякай кнопку или генерируй со своим мусором.", reply_markup=keyboard, **reply_kwargs)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Исправить промпт', callback_data=f'pask:{request_id}')], [InlineKeyboardButton(text='Оставить мой промпт', callback_data=f'pbase:{request_id}')], [InlineKeyboardButton(text='Отмена', callback_data=f'imgcancel:{request_id}')]])
+        await message.reply(f"Вижу {photo_word}. Могу улучшить твой промпт по референсу или запустить генерацию как есть. Выбирай, а не гадай.", reply_markup=keyboard, **reply_kwargs)
         return
-    await message.reply('Через какую модель хотите сгенерировать фото?', reply_markup=_providers_keyboard(request_id, message.chat.id, len(images_bytes)), **reply_kwargs)
+    await message.reply('Выбирай модель. Не знаешь разницу — бери Gemini.', reply_markup=_providers_keyboard(request_id, message.chat.id, len(images_bytes)), **reply_kwargs)
+
+@media_router.callback_query(F.data.startswith('imgcancel:'))
+async def handle_image_cancel(callback: types.CallbackQuery):
+    request_id = (callback.data or '').removeprefix('imgcancel:')
+    request_data = (
+        pending_image_requests.get(request_id)
+        or pending_prompt_requests.get(request_id)
+        or pending_nsfw_configs.get(request_id)
+    )
+    if not request_data:
+        await callback.answer('Запрос уже завершён.', show_alert=True)
+        return
+    if callback.from_user.id != request_data['user_id']:
+        await callback.answer('Только автор запроса может его отменить.', show_alert=True)
+        return
+    pending_image_requests.pop(request_id, None)
+    pending_prompt_requests.pop(request_id, None)
+    pending_nsfw_configs.pop(request_id, None)
+    _nsfw_awaiting_input.pop((request_data['chat_id'], request_data['user_id']), None)
+    await callback.answer('Отменено')
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='← К созданию', callback_data='menu:create')]])
+    await callback.message.edit_text('Генерация изображения отменена.', reply_markup=keyboard)
+
 
 @media_router.callback_query(F.data.startswith('ptmp:'))
 async def handle_temp_select(callback: types.CallbackQuery):
@@ -448,13 +459,14 @@ async def handle_nsfw_generate(callback: types.CallbackQuery):
     if len(parts) != 2:
         return
     (_, request_id) = parts
-    d = pending_nsfw_configs.pop(request_id, None)
+    d = pending_nsfw_configs.get(request_id)
     if not d:
         await callback.answer('Запрос устарел.', show_alert=True)
         return
     if callback.from_user.id != d['user_id']:
         await callback.answer('Только автор.', show_alert=True)
         return
+    pending_nsfw_configs.pop(request_id, None)
     await callback.answer()
     message_thread_id = d['message_thread_id']
     reply_kwargs = {'message_thread_id': message_thread_id} if message_thread_id else {}
@@ -516,14 +528,15 @@ async def _run_prompt_generation(callback: types.CallbackQuery, request_id: str)
         return
     data['current_ai_prompt'] = eng
     data['prev_prompts'].append(eng)
-    rus_line = f'\n\n🇷🇺 По-русски:\n{rus}' if rus else ''
-    text = f'🤖 AI-промт готов:\n\n🇬🇧 English:\n<code>{eng}</code>{rus_line}'
+    rus_line = f'\n\n🇷🇺 По-русски:\n{escape(str(rus))}' if rus else ''
+    text = f'🤖 AI-промт готов:\n\n🇬🇧 English:\n<code>{escape(str(eng))}</code>{rus_line}'
     try:
         await callback.message.edit_text(text, parse_mode='HTML', reply_markup=_prompt_ai_keyboard(request_id))
     except Exception:
         pass
 
 @media_router.callback_query(F.data.startswith('pask:'))
+@media_router.callback_query(F.data.startswith('pother:'))
 async def handle_prompt_ask(callback: types.CallbackQuery):
     parts = callback.data.split(':')
     if len(parts) != 2:
@@ -538,8 +551,9 @@ async def handle_prompt_ask(callback: types.CallbackQuery):
         return
     await _run_prompt_generation(callback, request_id)
 
-@media_router.callback_query(F.data.startswith('pother:'))
-async def handle_prompt_other(callback: types.CallbackQuery):
+
+@media_router.callback_query(F.data.startswith('puse:'))
+async def handle_prompt_use(callback: types.CallbackQuery):
     parts = callback.data.split(':')
     if len(parts) != 2:
         return
@@ -551,21 +565,7 @@ async def handle_prompt_other(callback: types.CallbackQuery):
     if callback.from_user.id != data['user_id']:
         await callback.answer('Только автор запроса.', show_alert=True)
         return
-    await _run_prompt_generation(callback, request_id)
-
-@media_router.callback_query(F.data.startswith('puse:'))
-async def handle_prompt_use(callback: types.CallbackQuery):
-    parts = callback.data.split(':')
-    if len(parts) != 2:
-        return
-    (_, request_id) = parts
-    data = pending_prompt_requests.pop(request_id, None)
-    if not data:
-        await callback.answer('Запрос устарел.', show_alert=True)
-        return
-    if callback.from_user.id != data['user_id']:
-        await callback.answer('Только автор запроса.', show_alert=True)
-        return
+    pending_prompt_requests.pop(request_id, None)
     chosen_prompt = data.get('current_ai_prompt') or data['prompt']
     req = pending_image_requests.get(request_id, {})
     req['prompt'] = chosen_prompt
@@ -583,13 +583,14 @@ async def handle_prompt_base(callback: types.CallbackQuery):
     if len(parts) != 2:
         return
     (_, request_id) = parts
-    data = pending_prompt_requests.pop(request_id, None)
+    data = pending_prompt_requests.get(request_id)
     if not data:
         await callback.answer('Запрос устарел.', show_alert=True)
         return
     if callback.from_user.id != data['user_id']:
         await callback.answer('Только автор запроса.', show_alert=True)
         return
+    pending_prompt_requests.pop(request_id, None)
     await callback.answer()
     req = pending_image_requests.get(request_id, {})
     try:
@@ -673,6 +674,35 @@ async def handle_provider_back(callback: types.CallbackQuery):
     except Exception:
         pass
 
+@media_router.callback_query(F.data.startswith('nsfwback:'))
+async def handle_nsfw_back(callback: types.CallbackQuery):
+    request_id = (callback.data or '').removeprefix('nsfwback:')
+    config = pending_nsfw_configs.get(request_id)
+    if not config:
+        await callback.answer('Запрос устарел.', show_alert=True)
+        return
+    if callback.from_user.id != config['user_id']:
+        await callback.answer('Только автор запроса.', show_alert=True)
+        return
+    request_data = config.get('request_data')
+    if not request_data:
+        await callback.answer('Предыдущий шаг недоступен. Отмени запрос и начни заново.', show_alert=True)
+        return
+    try:
+        await callback.message.edit_text(
+            'Через какую модель генерировать?',
+            reply_markup=_providers_keyboard(request_id, request_data['chat_id'], len(request_data.get('images_bytes') or [])),
+        )
+    except Exception as e:
+        logger.warning(f'NSFW back edit failed: {type(e).__name__}: {e}', exc_info=True)
+        await callback.answer(f'Не удалось вернуться: {type(e).__name__}: {e}', show_alert=True)
+        return
+    pending_nsfw_configs.pop(request_id, None)
+    _nsfw_awaiting_input.pop((config['chat_id'], config['user_id']), None)
+    pending_image_requests[request_id] = request_data
+    await callback.answer()
+
+
 @media_router.callback_query(F.data.startswith('imgsel:'))
 async def handle_image_model_select(callback: types.CallbackQuery):
     if not callback.data:
@@ -714,7 +744,7 @@ async def handle_image_model_select(callback: types.CallbackQuery):
     if provider == 'nsfw':
         pending_image_requests.pop(request_id, None)
         imgs = request_data.get('images_bytes') or ([request_data['image_bytes']] if request_data.get('image_bytes') else None)
-        pending_nsfw_configs[request_id] = {'user_id': request_data['user_id'], 'chat_id': request_data['chat_id'], 'source_message_id': request_data['source_message_id'], 'message_thread_id': request_data['message_thread_id'], 'prompt': request_data['prompt'], 'model': real_model, 'label': selected_label, 'image_bytes': imgs[0] if imgs else None, 'cfg': _nsfw_default_cfg(real_model)}
+        pending_nsfw_configs[request_id] = {'user_id': request_data['user_id'], 'chat_id': request_data['chat_id'], 'source_message_id': request_data['source_message_id'], 'message_thread_id': request_data['message_thread_id'], 'prompt': request_data['prompt'], 'model': real_model, 'label': selected_label, 'image_bytes': imgs[0] if imgs else None, 'cfg': _nsfw_default_cfg(real_model), 'request_data': request_data}
         try:
             await callback.message.edit_text(_nsfw_cfg_text(request_id), reply_markup=_nsfw_cfg_keyboard(request_id))
         except Exception:

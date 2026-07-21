@@ -1,12 +1,10 @@
 """Lyria music generation — text-to-music via Gemini Interactions API."""
 
 import base64
-import json
 import logging
 from typing import Tuple, Optional
-import asyncio
-import aiohttp
-from keys import load_keys, remove_key
+from keys import load_keys
+from shared_types import gemini_post
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +19,6 @@ MUSIC_MODELS = {
 
 MUSIC_MODEL_LIST = list(MUSIC_MODELS.keys())
 
-async def fetch_music_models() -> list:
-    """Return available Lyria models for inline keyboard selection."""
-    return [
-        {"id": k, "label": v["label"], "desc": v["desc"]}
-        for k, v in MUSIC_MODELS.items()
-    ]
 
 
 async def generate_music(
@@ -38,8 +30,7 @@ async def generate_music(
     if model_key not in MUSIC_MODELS:
         return None, None, f"Неизвестная модель: {model_key}"
 
-    keys = await load_keys()
-    if not keys:
+    if not await load_keys():
         return None, None, "Нет доступных Gemini ключей."
     # Fallback chain: selected model → other models
     model_chain = [model_key] + [k for k in MUSIC_MODEL_LIST if k != model_key]
@@ -60,67 +51,39 @@ async def generate_music(
             ],
         }
 
-        for key in keys:
-            try:
-                async with aiohttp.ClientSession() as s:
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={key}"
-                    async with s.post(
-                        url,
-                        json=payload,
-                        headers={"Content-Type": "application/json"},
-                        timeout=aiohttp.ClientTimeout(total=120),
-                    ) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            candidates = data.get("candidates", [])
-                            if not candidates:
-                                fb = data.get("promptFeedback", {})
-                                reason = fb.get("blockReason", "")
-                                if reason:
-                                    errors.append(f"{mk}: BLOCKED ({reason})")
-                                    logger.warning(f"music: {mk}: BLOCKED ({reason})")
-                                else:
-                                    errors.append(f"{mk}: empty candidates")
-                                continue
-                            c = candidates[0]
-                            parts = c.get("content", {}).get("parts", [])
-                            audio_b64 = None
-                            for p in parts:
-                                if "inlineData" in p:
-                                    audio_b64 = p["inlineData"].get("data", "")
-                                elif "text" in p:
-                                    lyrics_parts.append(p["text"])
+        data, used_key, err = await gemini_post(f"models/{model_id}:generateContent", payload, timeout=120)
+        if data:
+            candidates = data.get("candidates", [])
+            if not candidates:
+                fb = data.get("promptFeedback", {})
+                reason = fb.get("blockReason", "")
+                if reason:
+                    errors.append(f"{mk}: BLOCKED ({reason})")
+                    logger.warning(f"music: {mk}: BLOCKED ({reason})")
+                else:
+                    errors.append(f"{mk}: empty candidates")
+                continue
+            c = candidates[0]
+            parts = c.get("content", {}).get("parts", [])
+            audio_b64 = None
+            lyrics_parts = []
+            for p in parts:
+                if "inlineData" in p:
+                    audio_b64 = p["inlineData"].get("data", "")
+                elif "text" in p:
+                    lyrics_parts.append(p["text"])
 
-                            audio_bytes = base64.b64decode(audio_b64) if audio_b64 else None
-                            lyrics = "\n".join(lyrics_parts) or None
+            audio_bytes = base64.b64decode(audio_b64) if audio_b64 else None
+            lyrics = "\n".join(lyrics_parts) or None
 
-                            if audio_bytes:
-                                logger.info(f"music: generated {len(audio_bytes)//1024}KB via {mk}")
-                                return audio_bytes, lyrics, None
+            if audio_bytes:
+                logger.info(f"music: generated {len(audio_bytes)//1024}KB via {mk}")
+                return audio_bytes, lyrics, None
 
-                            errors.append(f"{mk}: empty audio")
-                            logger.warning(f"music: {mk}: empty audio in response")
-
-                        elif resp.status == 429:
-                            errors.append(f"{mk}: HTTP 429")
-                            continue
-                        elif resp.status == 403:
-                            body = await resp.text()
-                            errors.append(f"{mk}: HTTP 403 blocked: {body[:150]}")
-                            continue
-                        elif resp.status == 400:
-                            body = await resp.text()
-                            errors.append(f"{mk}: HTTP 400")
-                            break
-                        else:
-                            body = await resp.text()
-                            errors.append(f"{mk}: HTTP {resp.status}")
-                            logger.warning(f"music: {mk}: HTTP {resp.status}: {body[:100]}")
-            except asyncio.TimeoutError:
-                errors.append(f"{mk}: timeout")
-            except Exception as e:
-                logger.exception(f"music: {mk} crash")
-                errors.append(f"{mk}: {type(e).__name__}: {e}")
+            errors.append(f"{mk}: empty audio")
+            logger.warning(f"music: {mk}: empty audio in response")
+        else:
+            errors.append(f"{mk}: {err}")
     # Deduplicate and count errors
     unique = list(dict.fromkeys(errors))  # preserve order, remove dupes
     summary = unique[0] if unique else "неизвестная ошибка"
