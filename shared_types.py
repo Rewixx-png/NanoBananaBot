@@ -157,6 +157,11 @@ async def gemini_post(path: str, payload: dict, timeout: float = 60.0, max_keys:
                         last_err = f'HTTP {resp.status}'
                         continue
                     if resp.status == 400:
+                        # API_KEY_INVALID = this particular key can't access this model; try next.
+                        if '"API_KEY_INVALID"' in text:
+                            remove_key(key, resp.status)
+                            last_err = f'HTTP 400 (API_KEY_INVALID for this model)'
+                            continue
                         return (None, None, f'HTTP 400: {text[:300]}')
                     last_err = f'HTTP {resp.status}: {text[:200]}'
         except Exception as e:
