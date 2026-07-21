@@ -1,16 +1,19 @@
 """Lyria music generation — text-to-music via Gemini Interactions API."""
 
+import asyncio as _asyncio
 import base64
 import logging
 from typing import Tuple, Optional
 from keys import load_keys
 from shared_types import gemini_post
+from config import PHOTO_ANALYSIS_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
 # Model IDs (via Interactions API)
 LYRIA_CLIP = "lyria-3-clip-preview"      # 30s clips, MP3
 LYRIA_PRO  = "lyria-3-pro-preview"        # Full songs, MP3/WAV
+_BLOCK_CHECK_MODEL = LYRIA_CLIP
 
 MUSIC_MODELS = {
     "lyria-clip":  {"id": LYRIA_CLIP, "label": "🎵 Lyria 3 Clip",   "desc": "30-секундные клипы, MP3"},
@@ -58,8 +61,15 @@ async def generate_music(
                 fb = data.get("promptFeedback", {})
                 reason = fb.get("blockReason", "")
                 if reason:
-                    errors.append(f"{mk}: BLOCKED ({reason})")
-                    logger.warning(f"music: {mk}: BLOCKED ({reason})")
+                    ratings = fb.get("safetyRatings", [])
+                    cats = [r["category"].rsplit("_", 1)[-1] for r in ratings if r.get("blocked")]
+                    cat_info = f" ({', '.join(cats)})" if cats else ""
+                    if reason == "PROHIBITED_CONTENT":
+                        diag = await _diagnose_block(prompt)
+                        if diag:
+                            cat_info += diag
+                    errors.append(f"{mk}: BLOCKED ({reason}{cat_info})")
+                    logger.warning(f"music: {mk}: BLOCKED ({reason}{cat_info})")
                 else:
                     errors.append(f"{mk}: empty candidates")
                 continue
@@ -89,3 +99,53 @@ async def generate_music(
     summary = unique[0] if unique else "неизвестная ошибка"
     rest = f" + ещё {len(errors)-1}" if len(errors) > 1 else ""
     return None, None, f"Lyria: {summary}{rest}"
+
+
+async def _diagnose_block(prompt: str) -> str:
+    """Quick-check each segment of a blocked prompt to find the offender.
+
+    Returns a human-readable annotation like '\\n  ↳ Строка 5: «в стиле Моргенштерна»'
+    or empty string if nothing specific is found."""
+    lines = [l.strip() for l in prompt.split("\n") if l.strip()]
+    if len(lines) <= 1:
+        return ""
+    segments = [(i, line) for i, line in enumerate(lines) if len(line) > 10]
+    if not segments:
+        return ""
+
+    async def _check_one(idx: int, text: str) -> tuple[int, str, bool]:
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": text}]}],
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 1},
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ],
+        }
+        try:
+            data, _, _ = await gemini_post(
+                f"models/{_BLOCK_CHECK_MODEL}:generateContent",
+                payload,
+                timeout=PHOTO_ANALYSIS_TIMEOUT,
+            )
+        except Exception:
+            return idx, text, False
+        if data:
+            fb = data.get("promptFeedback", {})
+            blocked = bool(fb.get("blockReason") or not data.get("candidates"))
+            return idx, text, blocked
+        return idx, text, False
+
+    results = await _asyncio.gather(*(_check_one(i, t) for i, t in segments))
+    blocked = [(idx, text) for idx, text, is_blocked in results if is_blocked]
+    if not blocked:
+        return ""
+    if len(blocked) == 1:
+        idx, text = blocked[0]
+        snippet = text if len(text) <= 60 else text[:57] + "..."
+        return f"\n  ↳ Строка {idx+1}: «{snippet}»"
+    lines_list = ", ".join(str(idx+1) for idx, _ in blocked[:3])
+    more = f" + ещё {len(blocked)-3}" if len(blocked) > 3 else ""
+    return f"\n  ↳ Строки: {lines_list}{more}"
