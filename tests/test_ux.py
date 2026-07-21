@@ -1477,6 +1477,32 @@ class UxContractsTest(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(call_count, 2)
 
+    def test_music_block_diagnoser_pinpoints_offending_line(self):
+        from services.music_service import _diagnose_block
+        import asyncio as _asyncio
+
+        blocked = {"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}, "candidates": []}
+        clean = {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+
+        async def fake_post(path, payload, timeout):
+            text = payload["contents"][0]["parts"][0]["text"]
+            return (blocked if "Моргенштерна" in text else clean, "key", None)
+
+        with patch("services.music_service.gemini_post", fake_post):
+            result = _asyncio.run(_diagnose_block("строка один\nв стиле Моргенштерна\nстрока три"))
+
+        self.assertIn("Строка 2", result)
+        self.assertIn("Моргенштерна", result)
+
+    def test_music_block_diagnoser_skips_single_line(self):
+        from services.music_service import _diagnose_block
+        import asyncio as _asyncio
+
+        with patch("services.music_service.gemini_post", new=AsyncMock()):
+            result = _asyncio.run(_diagnose_block("одна строка"))
+
+        self.assertEqual(result, "")
+
     def test_project_json_rejects_non_object_root(self):
         from services.code_service import _extract_project_json
 
