@@ -142,16 +142,8 @@ async def _diagnose_block(prompt: str) -> str:
     blocked = [(idx, text) for idx, text, is_blocked in results if is_blocked]
     if not blocked:
         return ""
-    if len(blocked) == 1:
-        idx, text = blocked[0]
-        snippet = text if len(text) <= 80 else text[:77] + "..."
-        return f"\n  ↳ Строка {idx+1}: «{snippet}»"
-    # Quote each blocked line, up to 5; summarize the rest
     quoted = []
-    for idx, text in blocked[:5]:
+    for idx, text in blocked:
         snippet = text if len(text) <= 80 else text[:77] + "..."
         quoted.append(f"  ↳ Строка {idx+1}: «{snippet}»")
-    result = "\n".join(quoted)
-    if len(blocked) > 5:
-        result += f"\n  + ещё {len(blocked) - 5} строк"
-    return f"\n{result}"
+    return f"\n" + "\n".join(quoted)
