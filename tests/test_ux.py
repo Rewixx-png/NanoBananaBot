@@ -1424,6 +1424,59 @@ class UxContractsTest(unittest.TestCase):
 
         status.delete.assert_awaited_once()
 
+    def test_gemini_post_retries_on_api_key_invalid_400(self):
+        from shared_types import gemini_post
+
+        valid = {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+
+        call_count = 0
+
+        class FakeResponse:
+            def __init__(self, status, body):
+                self.status = status
+                self._body = body
+
+            async def text(self):
+                return self._body
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+            async def json(self):
+                return self._body
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+            def post(self, url, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                body = (
+                    '{"error":{"details":[{"reason":"API_KEY_INVALID"}]}}'
+                    if call_count == 1
+                    else valid
+                )
+                return FakeResponse(400 if call_count == 1 else 200, body)
+
+        with (
+            patch("keys.load_keys", new=AsyncMock(return_value=["bad-key", "good-key"])),
+            patch("keys.remove_key", new=lambda *_: None),
+            patch("aiohttp.ClientSession", return_value=FakeSession()),
+        ):
+            data, key, err = asyncio.run(gemini_post("models/test:generateContent", {}))
+
+        self.assertIsNotNone(data)
+        self.assertEqual(key, "good-key")
+        self.assertIsNone(err)
+        self.assertEqual(call_count, 2)
+
     def test_project_json_rejects_non_object_root(self):
         from services.code_service import _extract_project_json
 
