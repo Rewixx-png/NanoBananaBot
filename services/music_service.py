@@ -5,8 +5,8 @@ import base64
 import logging
 from typing import Tuple, Optional
 from keys import load_keys
+
 from shared_types import gemini_post
-from config import PHOTO_ANALYSIS_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +128,7 @@ async def _diagnose_block(prompt: str) -> str:
             data, _, _ = await gemini_post(
                 f"models/{_BLOCK_CHECK_MODEL}:generateContent",
                 payload,
-                timeout=PHOTO_ANALYSIS_TIMEOUT,
+                timeout=30,
             )
         except Exception:
             return idx, text, False
@@ -144,8 +144,14 @@ async def _diagnose_block(prompt: str) -> str:
         return ""
     if len(blocked) == 1:
         idx, text = blocked[0]
-        snippet = text if len(text) <= 60 else text[:57] + "..."
+        snippet = text if len(text) <= 80 else text[:77] + "..."
         return f"\n  ↳ Строка {idx+1}: «{snippet}»"
-    lines_list = ", ".join(str(idx+1) for idx, _ in blocked[:3])
-    more = f" + ещё {len(blocked)-3}" if len(blocked) > 3 else ""
-    return f"\n  ↳ Строки: {lines_list}{more}"
+    # Quote each blocked line, up to 5; summarize the rest
+    quoted = []
+    for idx, text in blocked[:5]:
+        snippet = text if len(text) <= 80 else text[:77] + "..."
+        quoted.append(f"  ↳ Строка {idx+1}: «{snippet}»")
+    result = "\n".join(quoted)
+    if len(blocked) > 5:
+        result += f"\n  + ещё {len(blocked) - 5} строк"
+    return f"\n{result}"
