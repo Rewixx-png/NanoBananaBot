@@ -4,9 +4,8 @@ aiosqlite==0.22.1
 python-dotenv==1.2.2
 playwright==1.60.0
 qrcode==8.2
-matplotlib==3.11.0
 Pillow
-numpy==2.4.6
-bleach==6.4.0
 cryptography>=41.0.0
 yt-dlp
+redis>=5.0.0
+aiohttp-socks>=0.3.0

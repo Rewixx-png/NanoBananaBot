@@ -1,9 +1,8 @@
 import asyncio
 import logging
 from services.deepseek_service import deepseek_text
-from services.openrouter import generate_text_with_openrouter, OPENROUTER_TEXT_MODEL
 
-from config import GEMINI_TEXT_TIMEOUT, MAX_HISTORY_MESSAGES
+from config import DEEPSEEK_MODEL, GEMINI_TEXT_TIMEOUT, MAX_HISTORY_MESSAGES
 from database import get_history, save_history
 from services.web_search import search_web_with_firecrawl, _extract_search_query, _fallback_web_answer
 # ── Shared helpers moved to shared_types.py ───────────────────────────────
@@ -62,7 +61,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
             return 'Не могу сейчас зайти в интернет — все Firecrawl ключи сдохли или отвалились.'
         if explicit_web_lookup:
             src_count = web_context.count('---') + 1 if web_context else 0
-            await _status(f'🧠 Нашёл {src_count} источника(-ов), синтезирую ответ через Claude Sonnet 5...')
+            await _status(f'🧠 Нашёл {src_count} источника(-ов), синтезирую ответ через DeepSeek V4 Flash...')
             if not web_context:
                 return f'Я искал «{clean_q}» — поиск вернул пустоту. Firecrawl не нашёл ни одного пригодного источника.'
 
@@ -89,15 +88,17 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
 
     async def _call_model(call_contents, allow_web_directive: bool = True):
         try:
-            text = await generate_text_with_openrouter(
+            text = await deepseek_text(
                 prompt=call_contents[-1]['parts'][0]['text'] if call_contents else prompt,
                 system_prompt=_build_text_system_prompt(allow_web_directive=allow_web_directive, is_owner=is_owner),
-                model=OPENROUTER_TEXT_MODEL,
+                model=DEEPSEEK_MODEL,
                 max_tokens=800 if web_context else 300,
                 timeout=GEMINI_TEXT_TIMEOUT,
             )
+            if not text:
+                raise RuntimeError('DeepSeek не ответил (все ключи недоступны)')
         except Exception as error:
-            logging.error(f"Claude Sonnet 5 text generation failed: {type(error).__name__}: {error}", exc_info=True)
+            logging.error(f"DeepSeek text generation failed: {type(error).__name__}: {error}", exc_info=True)
             if not is_owner and not explicit_web_lookup and not web_context:
                 try:
                     from services.groq_service import generate_text_with_groq
@@ -114,11 +115,11 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
                         max_tokens=300,
                     )
                     if fallback:
-                        logging.warning("Claude Sonnet 5 failed; used Groq fallback")
+                        logging.warning("DeepSeek failed; used Groq fallback")
                         return fallback
                 except Exception as fallback_error:
                     logging.error(f"Groq fallback failed: {type(fallback_error).__name__}: {fallback_error}", exc_info=True)
-            return f"Claude Sonnet 5 не ответил: {type(error).__name__}: {error}"
+            return f"DeepSeek не ответил: {type(error).__name__}: {error}"
         return text
 
     reply_text = await _call_model(contents, allow_web_directive=not bool(web_context))

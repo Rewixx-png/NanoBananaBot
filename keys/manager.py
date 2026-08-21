@@ -153,8 +153,21 @@ async def load_keys(model_filter: str = None):
                 keys = [row[0] for row in rows if not _is_dead(row[0])]
                 if keys:
                     return keys
-    except Exception:
-        pass
+            premium_where = "service='Gemini' AND status IN ('reserved', 'sold', 'rate_limited')"
+            premium_args = ()
+            if model_filter:
+                premium_where += " AND deep_check LIKE ?"
+                premium_args = (f'%{model_filter}%',)
+            async with db.execute(
+                f"SELECT key FROM premium_keys WHERE {premium_where} ORDER BY CASE status WHEN 'reserved' THEN 0 WHEN 'sold' THEN 1 ELSE 2 END, last_validated_at DESC",
+                premium_args,
+            ) as cur:
+                rows = await cur.fetchall()
+                keys = [row[0] for row in rows if not _is_dead(row[0])]
+                if keys:
+                    return keys
+    except Exception as e:
+        logging.warning(f'load_keys: RewTest query failed: {type(e).__name__}: {e}')
     return [k for k in load_api_config().get('gemini', []) if not _is_dead(k)]
 
 async def load_openai_keys():
@@ -203,6 +216,12 @@ def load_nvidia_keys():
     return []
 
 async def load_openrouter_keys():
+    try:
+        from config import OPENROUTER_API_KEY
+        if OPENROUTER_API_KEY:
+            return [OPENROUTER_API_KEY]
+    except Exception:
+        pass
     try:
         async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
             async with db.execute("SELECT key FROM keys WHERE service='OpenRouter' AND is_live=1") as cur:

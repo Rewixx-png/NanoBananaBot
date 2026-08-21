@@ -157,7 +157,7 @@ async def analyze_video(
     max_frames: int = 8,
 ) -> Optional[str]:
     """Extract frames from video and analyze with NVIDIA 90B Vision."""
-    frames = extract_video_frames(video_bytes, max_frames)
+    frames = await extract_video_frames(video_bytes, max_frames)
     if not frames:
         return "Не удалось извлечь кадры из видео."
 
@@ -170,8 +170,9 @@ async def analyze_video(
     return await _nvidia_request(messages, max_tokens=800, timeout=90)
 
 
-def extract_video_frames(video_bytes: bytes, max_frames: int = 8) -> list[bytes]:
+async def extract_video_frames(video_bytes: bytes, max_frames: int = 8) -> list[bytes]:
     """Extract evenly-spaced JPEG frames from video via ffmpeg."""
+    from utils import run_ffmpeg
     import subprocess
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
@@ -180,27 +181,33 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 8) -> list[bytes]
 
     out_dir = tempfile.mkdtemp(prefix="nv_frames_")
     try:
-        dur_proc = subprocess.run(
-            [
-                "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                "-of", "csv=p=0", in_path,
-            ],
-            capture_output=True, text=True, timeout=10,
-        )
-        duration = float(dur_proc.stdout.strip()) if dur_proc.stdout.strip() else 10.0
+        try:
+            _, stdout, _ = await run_ffmpeg(
+                [
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    "-of", "csv=p=0", in_path,
+                ],
+                timeout=10,
+            )
+            duration = float(stdout.strip()) if stdout.strip() else 10.0
+        except Exception:
+            duration = 10.0
 
         interval = max(1.0, duration / max_frames)
         frame_paths: list[str] = []
         for i in range(max_frames):
             ts = i * interval
             out_path = os.path.join(out_dir, f"frame_{i:03d}.jpg")
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-ss", str(ts), "-i", in_path,
-                    "-vframes", "1", "-q:v", "2", out_path,
-                ],
-                capture_output=True, timeout=15,
-            )
+            try:
+                await run_ffmpeg(
+                    [
+                        "ffmpeg", "-y", "-ss", str(ts), "-i", in_path,
+                        "-vframes", "1", "-q:v", "2", out_path,
+                    ],
+                    timeout=15,
+                )
+            except Exception:
+                pass
             if os.path.exists(out_path) and os.path.getsize(out_path) > 100:
                 frame_paths.append(out_path)
 

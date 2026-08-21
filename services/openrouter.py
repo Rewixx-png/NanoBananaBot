@@ -49,6 +49,8 @@ async def openrouter_chat(
         "messages": request_messages,
         "max_tokens": max_tokens,
         "reasoning": {"effort": "none"},
+        "reasoning": {"effort": "none"},
+        "stream": False,
     }
     if tools:
         payload["tools"] = tools
@@ -56,40 +58,44 @@ async def openrouter_chat(
 
     last_error = "provider returned no response"
     request_timeout = aiohttp.ClientTimeout(total=timeout)
-    async with aiohttp.ClientSession() as session:
-        for api_key in api_keys:
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "X-OpenRouter-Title": OPENROUTER_APP_TITLE,
-            }
-            try:
-                async with session.post(
-                    f"{OPENROUTER_BASE_URL}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                    timeout=request_timeout,
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if data.get("choices"):
-                            return data
-                        last_error = "успешный ответ не содержит choices"
-                        continue
+    from utils import get_http_session
+    session = await get_http_session()
+    for api_key in api_keys:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "X-OpenRouter-Title": OPENROUTER_APP_TITLE,
+        }
+        try:
+            async with session.post(
+                f"{OPENROUTER_BASE_URL}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=request_timeout,
+            ) as response:
+                if response.status == 200:
+                    data = await response.json(content_type=None)
+                    if data.get("choices"):
+                        return data
+                    last_error = "успешный ответ не содержит choices"
+                    continue
 
-                    body = await response.text()
-                    last_error = f"HTTP {response.status}: {body[:500]}"
-                    if response.status in (401, 402, 403, 429):
-                        remove_key(api_key, response.status)
-                    if response.status == 404:
-                        _TEXT_POLICY_DEAD[api_key] = time.monotonic() + _TEXT_POLICY_COOLDOWN_SECONDS
-                        logging.warning("OpenRouter key is in a %ss cooldown after policy/guardrail 404", _TEXT_POLICY_COOLDOWN_SECONDS)
-                    if response.status == 400:
-                        break
-            except asyncio.TimeoutError:
-                last_error = f"таймаут после {timeout} секунд"
-            except Exception as error:
-                last_error = f"{type(error).__name__}: {error}"
+                body = await response.text()
+                last_error = f"HTTP {response.status}: {body[:500]}"
+                if response.status in (401, 402, 403, 429):
+                    remove_key(api_key, response.status)
+                if response.status in (429, 500, 502, 503, 504) or "cooling down" in body.lower() or "reset after" in body.lower() or "empty content" in body.lower():
+                    await asyncio.sleep(3)
+                    continue
+                if response.status == 404:
+                    _TEXT_POLICY_DEAD[api_key] = time.monotonic() + _TEXT_POLICY_COOLDOWN_SECONDS
+                    logging.warning("OpenRouter key is in a %ss cooldown after policy/guardrail 404", _TEXT_POLICY_COOLDOWN_SECONDS)
+                if response.status == 400:
+                    break
+        except asyncio.TimeoutError:
+            last_error = f"таймаут после {timeout} секунд"
+        except Exception as error:
+            last_error = f"{type(error).__name__}: {error}"
 
     raise RuntimeError(f"OpenRouter {model}: {last_error}")
 
@@ -155,55 +161,56 @@ async def generate_image_with_openrouter(
         for img in images_bytes[:4]:
             b64 = base64.b64encode(img).decode()
             msg_content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64}'}})
-    payload = {'model': model, 'modalities': modalities, 'messages': [{'role': 'user', 'content': msg_content}]}
+    payload = {'model': model, 'modalities': modalities, 'messages': [{'role': 'user', 'content': msg_content}], 'stream': False}
     request_timeout = aiohttp.ClientTimeout(total=300)
     last_error = None
     for idx, api_key in enumerate(api_keys):
         if state_data:
             state_data['status'] = f'Пробую ключ {idx+1}/{len(api_keys)} (OpenRouter)'
         headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(url, json=payload, headers=headers, timeout=request_timeout) as resp:
-                    if resp.status == 200:
-                        raw = await resp.read()
-                        raw_text = raw.decode('utf-8', errors='replace')
-                        try:
-                            import re as _re
-                            b64_match = _re.search('data:image/[^;]+;base64,([A-Za-z0-9+/=]+)', raw_text)
-                            if b64_match:
-                                return (base64.b64decode(b64_match.group(1)), None)
-                        except Exception:
-                            pass
-                        try:
-                            d = json.loads(raw_text)
-                            msg = d.get('choices', [{}])[0].get('message', {})
-                            for src in [msg.get('images', []), msg.get('content', []) or []]:
-                                for part in src:
-                                    if isinstance(part, dict) and part.get('type') == 'image_url':
-                                        img_url = part.get('image_url', {}).get('url', '')
-                                        if img_url.startswith('data:'):
-                                            return (base64.b64decode(img_url.split(',', 1)[1]), None)
-                                        if img_url.startswith('http'):
-                                            if not is_safe_url(img_url):
-                                                logging.warning(f'OpenRouter returned unsafe image URL, blocked: {img_url[:120]}')
-                                                continue
-                                            async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=60)) as img_resp:
-                                                if img_resp.status == 200:
-                                                    return (await img_resp.read(), None)
-                        except Exception:
-                            pass
-                        return (None, 'OpenRouter не вернул изображение в ответе.')
-                    err_text = await resp.text()
-                    last_error = f'Ошибка OpenRouter ({resp.status}): {err_text[:200]}'
-                    if resp.status in [401, 403]:
-                        logging.warning(f'OpenRouter {resp.status} на ключе {api_key[:12]}..., пробую следующий.')
-                        remove_key(api_key, resp.status)
-                        continue
-            except asyncio.TimeoutError:
-                last_error = 'Таймаут OpenRouter'
-                continue
-            except Exception as e:
-                last_error = str(e)
-                continue
+        from utils import get_http_session
+        session = await get_http_session()
+        try:
+            async with session.post(url, json=payload, headers=headers, timeout=request_timeout) as resp:
+                if resp.status == 200:
+                    raw = await resp.read()
+                    raw_text = raw.decode('utf-8', errors='replace')
+                    try:
+                        import re as _re
+                        b64_match = _re.search('data:image/[^;]+;base64,([A-Za-z0-9+/=]+)', raw_text)
+                        if b64_match:
+                            return (base64.b64decode(b64_match.group(1)), None)
+                    except Exception:
+                        pass
+                    try:
+                        d = json.loads(raw_text)
+                        msg = d.get('choices', [{}])[0].get('message', {})
+                        for src in [msg.get('images', []), msg.get('content', []) or []]:
+                            for part in src:
+                                if isinstance(part, dict) and part.get('type') == 'image_url':
+                                    img_url = part.get('image_url', {}).get('url', '')
+                                    if img_url.startswith('data:'):
+                                        return (base64.b64decode(img_url.split(',', 1)[1]), None)
+                                    if img_url.startswith('http'):
+                                        if not is_safe_url(img_url):
+                                            logging.warning(f'OpenRouter returned unsafe image URL, blocked: {img_url[:120]}')
+                                            continue
+                                        async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=60)) as img_resp:
+                                            if img_resp.status == 200:
+                                                return (await img_resp.read(), None)
+                    except Exception:
+                        pass
+                    return (None, 'OpenRouter не вернул изображение в ответе.')
+                err_text = await resp.text()
+                last_error = f'Ошибка OpenRouter ({resp.status}): {err_text[:200]}'
+                if resp.status in [401, 403]:
+                    logging.warning(f'OpenRouter {resp.status} на ключе {api_key[:12]}..., пробую следующий.')
+                    remove_key(api_key, resp.status)
+                    continue
+        except asyncio.TimeoutError:
+            last_error = 'Таймаут OpenRouter'
+            continue
+        except Exception as e:
+            last_error = str(e)
+            continue
     return (None, last_error)

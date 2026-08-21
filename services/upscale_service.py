@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 
-async def _upscale_imageupscaling(image_bytes: bytes) -> Tuple[Optional[bytes], Optional[str]]:
+async def upscale_image(image_bytes: bytes) -> Tuple[Optional[bytes], Optional[str]]:
     if not UPSCALE_CLIENT_ID:
         return None, "UPSCALE_CLIENT_ID не задан в окружении. Добавьте его в .env."
     cookies = {'client_id': UPSCALE_CLIENT_ID}
@@ -47,9 +47,4 @@ async def _upscale_imageupscaling(image_bytes: bytes) -> Tuple[Optional[bytes], 
                 continue
     return (None, 'Upscale timeout')
 
-
-
-
-async def upscale_image(image_bytes: bytes) -> Tuple[Optional[bytes], Optional[str]]:
-    return await _upscale_imageupscaling(image_bytes)
 

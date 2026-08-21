@@ -37,11 +37,11 @@ async def send_agent_callback(media: dict, /, *, message: types.Message, reply_k
         return
 
     if mtype == "inline_buttons":
-        import bleach as _bleach
+        from utils import clean_html
         _TG_TAGS = ['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del',
                     'code', 'pre', 'blockquote', 'tg-spoiler', 'tg-emoji']
         raw_text = (media.get("text") or "Выбери:")[:4000]
-        text_body = _bleach.clean(raw_text, tags=_TG_TAGS,
+        text_body = clean_html(raw_text, tags=_TG_TAGS,
             attributes={'pre': [], 'code': ['class'], 'tg-emoji': ['emoji-id'],
                         'blockquote': ['expandable']}, strip=True)
         rows = media.get("buttons", [])

@@ -593,9 +593,9 @@ async def process_clone_name(message: Message, state: FSMContext):
             input_path = file.name
         output_path = input_path + '.mp3'
         try:
-            subprocess.run(
+            from utils import run_ffmpeg
+            await run_ffmpeg(
                 ['ffmpeg', '-y', '-i', input_path, '-t', '300', '-ac', '1', '-b:a', '64k', output_path],
-                capture_output=True,
                 timeout=30,
             )
             if _os.path.exists(output_path):
@@ -883,11 +883,12 @@ async def process_changer_voice_select(callback: types.CallbackQuery, state: FSM
             vocals_path = file.name
         output_path = tempfile.mktemp(suffix='.mp3')
         try:
-            subprocess.run([
+            from utils import run_ffmpeg
+            await run_ffmpeg([
                 'ffmpeg', '-y', '-i', instrumental_path, '-i', vocals_path,
                 '-filter_complex', '[0:a]loudnorm=I=-16:TP=-1.5:LRA=11:linear=true[inst];[1:a]loudnorm=I=-16:TP=-1.5:LRA=11:linear=true[voc];[inst][voc]amix=inputs=2:duration=first,volume=2.0',
                 '-b:a', '128k', output_path,
-            ], capture_output=True, timeout=30)
+            ], timeout=30)
             if not _os.path.exists(output_path):
                 raise RuntimeError("ffmpeg output missing")
             with open(output_path, 'rb') as file:

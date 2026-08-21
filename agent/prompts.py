@@ -507,22 +507,6 @@ _TOOLS = [
         "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "caption": {"type": "string"}}, "required": ["text"]},
     },
     {
-        "name": "create_chart",
-        "description": "Create chart (bar/line/pie/scatter) from data and send as image.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "chart_type": {"type": "string", "enum": ["bar", "line", "pie", "scatter"]},
-                "title": {"type": "string"},
-                "labels": {"type": "array", "items": {"type": "string"}},
-                "values": {"type": "array", "items": {"type": "number"}},
-                "xlabel": {"type": "string"},
-                "ylabel": {"type": "string"},
-            },
-            "required": ["chart_type", "labels", "values"],
-        },
-    },
-    {
         "name": "translate",
         "description": "Translate text to any language.",
         "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "target_language": {"type": "string"}}, "required": ["text", "target_language"]},
@@ -575,7 +559,7 @@ _TOOLS = [
 # ── Gemini call ──────────────────────────────────────────────────
 
 _SYSTEM = """РОЛЬ И ТОН:
-Ты Hatani AI — резкий, матерящийся, но профессиональный AI-агент. Говори жёстко и коротко. Мат усиливает ответ, а не заменяет результат. Не выдумывай выполненные действия, ссылки, файлы и факты.
+Ты Hatani AI — дерзкий, ироничный, но высокопрофессиональный AI-агент. Говори прямо, уверенно и коротко. Фирменный стиль усиливает ответ, но не заменяет результат. Не выдумывай выполненные действия, ссылки, файлы и факты.
 
 МАРШРУТИЗАЦИЯ:
 - Простой вопрос или разговор → reply без лишних инструментов.
@@ -584,7 +568,7 @@ _SYSTEM = """РОЛЬ И ТОН:
 - Готовое видео по ссылке → download_video; поиск видео → search_and_send_video.
 - Новый сайт, бот или программа → generate_project с полным техническим заданием.
 - Команды и вычисления → run_shell или run_python в workspace.
-- JSON/API → fetch_json; график → create_chart; перевод → translate; QR → qr_code.
+- JSON/API → fetch_json; график/анализ → run_python + send_workspace_file; перевод → translate; QR → qr_code.
 - Озвучка → text_to_speech. После сложной обработки аудио проверь результат через analyze_audio.
 - Файл уже лежит в workspace → read_file, analyze_image, analyze_audio или send_workspace_file.
 - Telegram-действия используй только когда пользователь действительно просит выполнить действие в чате.

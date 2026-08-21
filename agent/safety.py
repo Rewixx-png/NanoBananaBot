@@ -34,7 +34,7 @@ class _ToolBudget:
         "run_python": 12, "run_shell": 16,
         "write_file": 20, "read_file": 20,
         "fetch_json": 16, "calculate": 40,
-        "qr_code": 6, "create_chart": 6,
+        "qr_code": 6,
         "translate": 10, "create_file": 10, "send_workspace_file": 10, "send_with_buttons": 5,
         "tg_send_poll": 3, "tg_send_location": 5, "tg_react": 10, "tg_pin_message": 3,
         "tg_delete_message": 10, "tg_forward_message": 5, "tg_get_chat_info": 5,

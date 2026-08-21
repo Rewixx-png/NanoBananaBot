@@ -13,7 +13,7 @@ from state import (
 )
 from database import save_pending_gen, delete_pending_gen
 from services.video_service import start_veo_generation, poll_veo_operation, generate_video_with_omni
-from services.error_explainer import explain_generation_error
+from services.deepseek_service import explain_generation_error
 from utils import check_membership, make_safe_caption
 from handlers.common import (
     safe_send,

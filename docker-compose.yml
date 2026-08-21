@@ -30,6 +30,10 @@ services:
       - .env
     environment:
       TELEGRAM_API_URL: http://telegram-bot-api:8081
+      REDIS_URL: redis://localhost:6379
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     ports:
       - "7432:7432"
     working_dir: /root/Projects/NanoHatani

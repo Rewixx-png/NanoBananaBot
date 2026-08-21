@@ -121,7 +121,11 @@ async def generate_tts_with_gemini(text: str, model: str, voice_name: str, tempe
             wav_file.setframerate(24000)
             wav_file.writeframes(pcm_data)
         temp_ogg = temp_wav.replace('.wav', '.ogg')
-        subprocess.run(['ffmpeg', '-i', temp_wav, '-c:a', 'libopus', '-b:a', '48k', '-y', temp_ogg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        from utils import run_ffmpeg
+        try:
+            await run_ffmpeg(['ffmpeg', '-i', temp_wav, '-c:a', 'libopus', '-b:a', '48k', '-y', temp_ogg], timeout=30)
+        except Exception as e:
+            logger.warning(f"ffmpeg ogg conversion failed: {e}")
         ogg_data = None
         if os.path.exists(temp_ogg):
             with open(temp_ogg, 'rb') as f:
@@ -251,7 +255,11 @@ async def generate_tts_with_gemini(text: str, model: str, voice_name: str, tempe
                         wav_file.setframerate(24000)
                         wav_file.writeframes(pcm_data)
                     temp_ogg = temp_wav.replace('.wav', '.ogg')
-                    subprocess.run(['ffmpeg', '-i', temp_wav, '-c:a', 'libopus', '-b:a', '48k', '-y', temp_ogg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    from utils import run_ffmpeg
+                    try:
+                        await run_ffmpeg(['ffmpeg', '-i', temp_wav, '-c:a', 'libopus', '-b:a', '48k', '-y', temp_ogg], timeout=30)
+                    except Exception as e:
+                        logger.warning(f"ffmpeg ogg conversion failed: {e}")
                     ogg_data = None
                     if os.path.exists(temp_ogg):
                         with open(temp_ogg, 'rb') as f:

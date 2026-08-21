@@ -60,9 +60,9 @@ async def _voice_reply(message: Message, text: str, sent_msg: types.Message | No
             "в стиле Ху Тао. Ответь ТОЛЬКО изменённым текстом.\n\n"
             f"Ответ для переозвучки: {text[:2000]}"
         )
-        tagged = await generate_text_with_openrouter(
+        tagged = await deepseek_text(
             tag_prompt,
-            model=OPENROUTER_TEXT_MODEL,
+            model=DEEPSEEK_MODEL,
             max_tokens=1000,
             timeout=60,
         )
@@ -121,7 +121,7 @@ from config import (
     ADMIN_IDS,
     TEXT_COOLDOWN_SECONDS,
     PHOTO_ANALYSIS_MODEL_LABEL,
-    OPENROUTER_TEXT_MODEL,
+    DEEPSEEK_MODEL,
     AGENT_CONTEXT_WINDOW,
     AGENT_TIMEOUT_SECONDS,
     FILE_CACHE_TTL_SECONDS,
@@ -138,7 +138,7 @@ from state import (
 from services.audio_service import analyze_voice_with_gemini
 from services.video_service import generate_video_with_gemini
 from services.gemini_text import generate_text_with_gemini
-from services.openrouter import generate_text_with_openrouter
+from services.deepseek_service import deepseek_text
 
 from agent import run_agent
 from utils import (
@@ -548,10 +548,10 @@ async def handle_text_messages(message: types.Message, state: FSMContext):
                             logging.getLogger(__name__).warning(f"MarkdownV2 fallback failed: {e}")
                 if not sent_msg:
                     # HTML fallback
-                    import bleach
+                    from utils import clean_html
                     _TG_TAGS = ['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del',
                                 'code', 'pre', 'blockquote', 'tg-spoiler', 'tg-emoji']
-                    safe_html = bleach.clean(
+                    safe_html = clean_html(
                         _md_to_html(html_text),
                         tags=_TG_TAGS,
                         attributes={'pre': [], 'code': ['class'], 'tg-emoji': ['emoji-id'],

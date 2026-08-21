@@ -43,6 +43,46 @@ class RichMessageContractsTest(unittest.TestCase):
         self.assertIsNone(rich_message.markdown)
         bot.message_mock.assert_not_awaited()
 
+    def test_converts_markdown_bold_before_rich_send(self):
+        sent = object()
+        bot = BotStub(rich_result=sent)
+
+        result = asyncio.run(send_rich_message(cast(Any, bot), 42, "Ну чё, **Получилось, босс.** работает?"))
+
+        self.assertIs(result, sent)
+        call = bot.rich_mock.await_args
+        assert call is not None
+        rich_message = call.kwargs["rich_message"]
+        self.assertEqual(rich_message.html, "Ну чё, <b>Получилось, босс.</b> работает?")
+        bot.message_mock.assert_not_awaited()
+
+    def test_markdown_bold_survives_html_fallback(self):
+        bot = BotStub(rich_side_effect=RuntimeError("unsupported"), message_result=object())
+
+        asyncio.run(send_rich_message(cast(Any, bot), 42, "**bold** тут"))
+
+        call = bot.message_mock.await_args
+        assert call is not None
+        self.assertIn("<b>bold</b>", call.kwargs["text"])
+        self.assertEqual(call.kwargs["parse_mode"], "HTML")
+
+    def test_markdown_table_converts_to_html_table(self):
+        sent = object()
+        bot = BotStub(rich_result=sent)
+        md = "| Сервис | Что делает |\n|---|---|\n| Aptoide | сборка APK |"
+
+        result = asyncio.run(send_rich_message(cast(Any, bot), 42, md))
+
+        self.assertIs(result, sent)
+        call = bot.rich_mock.await_args
+        assert call is not None
+        html = call.kwargs["rich_message"].html
+        self.assertIn("<table", html)
+        self.assertIn("<th>Сервис</th>", html)
+        self.assertIn("<td>Aptoide</td>", html)
+        self.assertNotIn("|---|---|", html)
+        bot.message_mock.assert_not_awaited()
+
     def test_sanitizes_ai_html_before_rich_send(self):
         bot = BotStub(rich_result=object())
         unsafe = (

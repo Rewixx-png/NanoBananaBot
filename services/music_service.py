@@ -22,6 +22,12 @@ MUSIC_MODELS = {
 
 MUSIC_MODEL_LIST = list(MUSIC_MODELS.keys())
 
+def _clean_music_error(error: str) -> str:
+    if "ClientConnectorDNSError" in error and "generativelanguage.googleapis.com" in error:
+        return "DNS временно не резолвит generativelanguage.googleapis.com. Проверь DNS/сеть контейнера и повтори."
+    return error
+
+
 
 
 async def generate_music(
@@ -33,8 +39,6 @@ async def generate_music(
     if model_key not in MUSIC_MODELS:
         return None, None, f"Неизвестная модель: {model_key}"
 
-    if not await load_keys():
-        return None, None, "Нет доступных Gemini ключей."
     # Fallback chain: selected model → other models
     model_chain = [model_key] + [k for k in MUSIC_MODEL_LIST if k != model_key]
     errors = []
@@ -96,8 +100,8 @@ async def generate_music(
             errors.append(f"{mk}: {err}")
     # Deduplicate and count errors
     unique = list(dict.fromkeys(errors))  # preserve order, remove dupes
-    summary = unique[0] if unique else "неизвестная ошибка"
-    rest = f" + ещё {len(errors)-1}" if len(errors) > 1 else ""
+    summary = _clean_music_error(unique[0]) if unique else "неизвестная ошибка"
+    rest = f" + ещё {len(errors)-1}" if len(errors) > 1 and summary == unique[0] else ""
     return None, None, f"Lyria: {summary}{rest}"
 
 

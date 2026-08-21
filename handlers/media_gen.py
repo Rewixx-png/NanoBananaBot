@@ -32,7 +32,7 @@ from services.gemini_image import generate_image_with_gemini, generate_image_pro
 from services.openai_service import generate_image_with_gpt, fetch_openai_image_models
 from services.nvidia import generate_image_with_nvidia
 from services.replicate import generate_image_with_replicate, fetch_replicate_image_models
-from services.error_explainer import explain_generation_error
+from services.deepseek_service import explain_generation_error
 from services.upscale_service import upscale_image
 from utils import check_membership, make_safe_caption
 from handlers.common import (

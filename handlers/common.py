@@ -71,15 +71,15 @@ _MAX_TRACKED_CODE_MESSAGES = 60
 
 _KIRIESHKI_CHAT_ID = -1002830734467
 _KIRIESHKI_STICKER_SET = 'kirieshkikirieshki'
-_KIRIESHKI_STICKER_CHANCE = 0.10
+_KIRIESHKI_STICKER_CHANCE = 0.003
 _PERMA_STICKER_SET = 'SHCHperma9740'
-_PERMA_STICKER_CHANCE = 0.05
+_PERMA_STICKER_CHANCE = 0.003
+_RANDOM_GIF_CHANCE = 0.004
 _KIRIESHKI_STICKER_CACHE_TTL = 86400
 _sticker_caches: dict[str, dict] = {
     'kirieshki': {'ids': [], 'ts': 0.0},
     'perma':    {'ids': [], 'ts': 0.0},
 }
-_RANDOM_GIF_CHANCE = 0.05
 _RANDOM_MEDIA_MIN_INTERVAL = 10
 _random_media_last_ts_by_chat: dict[int, float] = {}
 
@@ -230,8 +230,8 @@ _HTML_PROTOCOLS = ["http", "https", "mailto", "tel", "tg"]
 
 
 def _sanitize_rich_html(text: str) -> str:
-    import bleach
-    return bleach.clean(
+    from utils import clean_html
+    return clean_html(
         text[:32768],
         tags=_RICH_HTML_TAGS,
         attributes=_HTML_ATTRIBUTES,
@@ -241,7 +241,6 @@ def _sanitize_rich_html(text: str) -> str:
 
 
 def _sanitize_regular_html(text: str) -> str:
-    import bleach
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<li(?:\s+[^>]*)?>", "• ", text, flags=re.IGNORECASE)
     text = re.sub(r"</(?:td|th)>", " · ", text, flags=re.IGNORECASE)
@@ -249,7 +248,8 @@ def _sanitize_regular_html(text: str) -> str:
     text = re.sub(r"</li>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"</(?:p|h[1-6]|details|summary|footer|aside|figcaption)>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<hr\s*/?>", "\n", text, flags=re.IGNORECASE)
-    return bleach.clean(
+    from utils import clean_html
+    return clean_html(
         text,
         tags=_REGULAR_HTML_TAGS,
         attributes=_HTML_ATTRIBUTES,
@@ -260,6 +260,7 @@ def _sanitize_regular_html(text: str) -> str:
 
 async def send_rich_message(bot, chat_id: int, text: str, **kwargs):
     """Send sanitized Rich HTML with regular HTML and plain-text fallbacks."""
+    text = _md_to_html(text)
     safe_kwargs = {
         key: value
         for key, value in kwargs.items()
@@ -332,8 +333,44 @@ def _clean_plain_reply(text: str) -> str:
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
+def _md_table_row(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip('|').split('|')]
+
+
+def _md_tables_to_html(text: str) -> str:
+    """Convert markdown pipe tables → <table> HTML. Inline formatting in cells is applied later."""
+    lines = text.split('\n')
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        sep = lines[i + 1] if i + 1 < len(lines) else ''
+        if line.strip().startswith('|') and '-' in sep and re.match(r'^\s*\|?[\s:|-]+\|?\s*$', sep.strip()):
+            header = _md_table_row(line)
+            i += 2
+            body = []
+            while i < len(lines) and lines[i].strip().startswith('|'):
+                body.append(_md_table_row(lines[i]))
+                i += 1
+            parts = ['<table bordered="true"><thead><tr>']
+            parts.extend(f'<th>{c}</th>' for c in header)
+            parts.append('</tr></thead><tbody>')
+            for row in body:
+                parts.append('<tr>')
+                parts.extend(f'<td>{c}</td>' for c in row)
+                parts.append('</tr>')
+            parts.append('</tbody></table>')
+            out.append(''.join(parts))
+        else:
+            out.append(line)
+            i += 1
+    return '\n'.join(out)
+
+
 def _md_to_html(text: str) -> str:
     """Convert Markdown to HTML for Telegram parse_mode='HTML'."""
+    # Tables: | a | b | → <table> (must run first: consumes the whole block line-by-line)
+    text = _md_tables_to_html(text)
     # Links: [text](url) → <a href="url">text</a>
     text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
     # Bold: **text** → <b>text</b>

@@ -199,6 +199,10 @@ async def cmd_dual(message: Message):
     if message.chat.id != FULL_ACCESS_CHAT_ID:
         await message.reply('Команда /dual работает только в специальной беседе с полным доступом. Здесь используй обычный чат или /help.')
         return
+    from dual_bot import bot2_id
+    if not bot2_id:
+        await message.reply("Второй бот (@HatabiAiibot) сейчас не подключён или токен не валиден.")
+        return
     chat_id = message.chat.id
     thread_id = message.message_thread_id
     started = start_dual(chat_id, thread_id)

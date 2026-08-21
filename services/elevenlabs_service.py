@@ -104,20 +104,14 @@ def mark_key_dead(key: str, status_code: int = 429):
 
 async def _get_session() -> aiohttp.ClientSession:
     """Lazy-init shared persistent session. Never closed until bot shutdown."""
-    global _session
-    if _session is None or _session.closed:
-        connector = aiohttp.TCPConnector(limit=10, ttl_dns_cache=300, force_close=False)
-        timeout = aiohttp.ClientTimeout(total=120, connect=15, sock_read=30)
-        _session = aiohttp.ClientSession(connector=connector, timeout=timeout)
-    return _session
+    from utils import get_http_session
+    return await get_http_session()
 
 
 async def close_elevenlabs():
     """Gracefully close the shared session (call on bot shutdown)."""
-    global _session
-    if _session and not _session.closed:
-        await _session.close()
-        _session = None
+    from utils import close_http_session
+    await close_http_session()
 
 
 async def _request(method: str, endpoint: str, key: str, **kwargs) -> Optional[aiohttp.ClientResponse]:

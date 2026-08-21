@@ -186,10 +186,11 @@ async def on_shutdown():
     from dual_bot import bot2
     if bot_instance:
         await bot_instance.session.close()
-    try:
-        await bot2.session.close()
-    except Exception:
-        pass
+    if bot2:
+        try:
+            await bot2.session.close()
+        except Exception:
+            pass
     try:
         from services.elevenlabs_service import close_elevenlabs
         await close_elevenlabs()
@@ -245,21 +246,41 @@ async def main():
                 logger.error(f"Failed to notify owner about error: {exception}")
         dp_instance.errors.register(_owner_error_handler)
         dp2.include_router(router2)
+        for attempt in range(15):
+            try:
+                me = await bot_instance.get_me()
+                logger.info(f"Подключено к Telegram API. Бот: @{me.username} (id={me.id})")
+                break
+            except Exception as e:
+                if attempt == 14:
+                    raise
+                logger.info(f"Ожидание доступности Telegram API ({attempt + 1}/15): {e}")
+                await asyncio.sleep(2)
         await on_startup(bot_instance)
         set_bot1_ref(bot_instance)
-        await asyncio.gather(
-            bot_instance.delete_webhook(drop_pending_updates=True),
-            bot2.delete_webhook(drop_pending_updates=True),
-        )
-        await init_bot2()
-        logger.info('Оба бота запущены и готовы к работе!')
+        await bot_instance.delete_webhook(drop_pending_updates=True)
+        has_bot2 = False
+        if bot2:
+            try:
+                await bot2.delete_webhook(drop_pending_updates=True)
+                has_bot2 = await init_bot2()
+            except Exception as e:
+                logger.warning(f"Bot2 (dual_bot) не удалось запустить: {e}")
+                has_bot2 = False
+
         from figma_bridge import start_bridge
-        await asyncio.gather(
+        polling_tasks = [
             dp_instance.start_polling(bot_instance),
-            dp2.start_polling(bot2),
             start_bridge(),
             _nano_keys_sync_loop(),
-        )
+        ]
+        if has_bot2:
+            polling_tasks.append(dp2.start_polling(bot2))
+            logger.info('Оба бота запущены и готовы к работе!')
+        else:
+            logger.info('Основной бот (@HataniAiBot) запущен и готов к работе (Bot2 отключен)!')
+
+        await asyncio.gather(*polling_tasks)
     except Exception as e:
         logger.exception(f'Критическая ошибка при запуске бота: {e}')
         raise

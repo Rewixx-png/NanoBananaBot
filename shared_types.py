@@ -145,8 +145,10 @@ async def gemini_post(path: str, payload: dict, timeout: float = 60.0, max_keys:
         return (None, None, 'нет живых Gemini ключей')
     last_err = 'неизвестная ошибка'
     for key in (keys[:max_keys] if max_keys else keys):
-        try:
-            async with aiohttp.ClientSession() as session:
+        for attempt in range(2):
+            try:
+                from utils import get_http_session
+                session = await get_http_session()
                 async with session.post(_gemini_url(path), json=payload, headers=_gemini_headers(key),
                                         timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
                     if resp.status == 200:
@@ -155,18 +157,26 @@ async def gemini_post(path: str, payload: dict, timeout: float = 60.0, max_keys:
                     if resp.status in (429, 403, 402):
                         remove_key(key, resp.status)
                         last_err = f'HTTP {resp.status}'
-                        continue
+                        break
                     if resp.status == 400:
-                        # API_KEY_INVALID = this particular key can't access this model; try next.
+                        # This can mean the key lacks access to this specific model/path.
+                        # Do not globally kill paid Gemini keys after one Lyria probe.
                         if '"API_KEY_INVALID"' in text:
-                            remove_key(key, resp.status)
                             last_err = f'HTTP 400 (API_KEY_INVALID for this model)'
-                            continue
+                            break
                         return (None, None, f'HTTP 400: {text[:300]}')
                     last_err = f'HTTP {resp.status}: {text[:200]}'
-        except Exception as e:
-            last_err = f'{type(e).__name__}: {e}'
-            continue
+                    break
+            except aiohttp.ClientConnectorDNSError as e:
+                last_err = f'{type(e).__name__}: {e}'
+                if attempt == 0:
+                    import asyncio
+                    await asyncio.sleep(0.3)
+                    continue
+                break
+            except Exception as e:
+                last_err = f'{type(e).__name__}: {e}'
+                break
     return (None, None, last_err)
 
 

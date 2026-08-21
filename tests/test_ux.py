@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 import unittest
 
 
@@ -700,13 +700,13 @@ class UxContractsTest(unittest.TestCase):
         )
         status = SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())
         rich_send = AsyncMock(return_value=object())
+        deepseek = AsyncMock(return_value="Tagged DeepSeek answer")
         sonnet = AsyncMock(return_value="Tagged Sonnet answer")
-        deepseek = AsyncMock(return_value={})
 
         async def scenario():
             with (
+                patch.object(chat_handler, "deepseek_text", deepseek, create=True),
                 patch.object(chat_handler, "generate_text_with_openrouter", sonnet, create=True),
-                patch("services.deepseek_service.deepseek_chat", new=deepseek),
                 patch("database.voice.get_voices", new=AsyncMock(return_value=[])),
                 patch("handlers.chat.send_rich_message", new=rich_send),
             ):
@@ -714,8 +714,8 @@ class UxContractsTest(unittest.TestCase):
 
         asyncio.run(scenario())
         self.assertEqual(rich_send.await_args.kwargs["text"], "Полный ответ")
-        self.assertEqual(sonnet.await_args.kwargs["model"], "anthropic/claude-sonnet-5")
-        deepseek.assert_not_awaited()
+        self.assertEqual(deepseek.await_args.kwargs["model"], "deepseek-v4-flash")
+        sonnet.assert_not_awaited()
         status.delete.assert_awaited_once()
 
     def test_video_download_failure_does_not_fake_text_analysis(self):
@@ -816,7 +816,7 @@ class UxContractsTest(unittest.TestCase):
 
         failing_db = AsyncMock()
         failing_db.__aenter__.side_effect = RuntimeError("db down")
-        with patch("database.voice.get_db", return_value=failing_db):
+        with patch("database.queries.get_db", return_value=failing_db):
             with self.assertRaisesRegex(RuntimeError, "db down"):
                 asyncio.run(add_voice(1, "name", "voice", "cloned"))
 
@@ -825,7 +825,7 @@ class UxContractsTest(unittest.TestCase):
 
         failing_db = AsyncMock()
         failing_db.__aenter__.side_effect = RuntimeError("db down")
-        with patch("database.voice.get_db", return_value=failing_db):
+        with patch("database.queries.get_db", return_value=failing_db):
             with self.assertRaisesRegex(RuntimeError, "db down"):
                 asyncio.run(get_settings(1))
 
@@ -836,8 +836,8 @@ class UxContractsTest(unittest.TestCase):
         failing_db.__aenter__.side_effect = RuntimeError("db down")
         current = {"tts_model": "eleven_v3", "stability": 0.5, "similarity_boost": 0.75, "style": 0.0, "speed": 1.0}
         with (
-            patch("database.voice.get_settings", new=AsyncMock(return_value=current)),
-            patch("database.voice.get_db", return_value=failing_db),
+            patch("database.queries.get_settings", new=AsyncMock(return_value=current)),
+            patch("database.queries.get_db", return_value=failing_db),
         ):
             with self.assertRaisesRegex(RuntimeError, "db down"):
                 asyncio.run(save_settings(1, speed=1.1))
@@ -867,15 +867,15 @@ class UxContractsTest(unittest.TestCase):
         self.assertNotIn(user_id, _voice_active_users)
         state.clear.assert_awaited_once()
 
-    def test_main_text_uses_claude_sonnet_5_via_openrouter(self):
+    def test_main_text_uses_deepseek_v4_flash(self):
         import services.gemini_text as text_service
 
-        sonnet = AsyncMock(return_value="sonnet reply")
-        groq = AsyncMock(return_value="groq reply")
         deepseek = AsyncMock(return_value="deepseek reply")
+        groq = AsyncMock(return_value="groq reply")
+        sonnet = AsyncMock(return_value="sonnet reply")
         with (
-            patch.object(text_service, "generate_text_with_openrouter", sonnet, create=True),
             patch.object(text_service, "deepseek_text", deepseek, create=True),
+            patch.object(text_service, "generate_text_with_openrouter", sonnet, create=True),
             patch("services.groq_service.generate_text_with_groq", new=groq),
             patch("services.gemini_text.get_history", new=AsyncMock(return_value=[])),
             patch("services.gemini_text.save_history", new=AsyncMock()),
@@ -886,18 +886,18 @@ class UxContractsTest(unittest.TestCase):
                 allow_web=False,
             ))
 
-        self.assertEqual(result, "sonnet reply")
-        self.assertEqual(sonnet.await_args.kwargs["model"], "anthropic/claude-sonnet-5")
+        self.assertEqual(result, "deepseek reply")
+        self.assertEqual(deepseek.await_args.kwargs["model"], "deepseek-v4-flash")
         groq.assert_not_awaited()
-        deepseek.assert_not_awaited()
+        sonnet.assert_not_awaited()
 
-    def test_main_text_uses_groq_only_after_sonnet_failure(self):
+    def test_main_text_uses_groq_only_after_deepseek_failure(self):
         import services.gemini_text as text_service
 
-        sonnet = AsyncMock(side_effect=RuntimeError("openrouter down"))
+        deepseek = AsyncMock(side_effect=RuntimeError("deepseek down"))
         groq = AsyncMock(return_value="groq fallback")
         with (
-            patch.object(text_service, "generate_text_with_openrouter", sonnet),
+            patch.object(text_service, "deepseek_text", deepseek),
             patch("services.groq_service.generate_text_with_groq", new=groq),
             patch("services.gemini_text.get_history", new=AsyncMock(return_value=[])),
             patch("services.gemini_text.save_history", new=AsyncMock()),
@@ -909,17 +909,17 @@ class UxContractsTest(unittest.TestCase):
             ))
 
         self.assertEqual(result, "groq fallback")
-        sonnet.assert_awaited_once()
+        deepseek.assert_awaited_once()
         groq.assert_awaited_once()
 
-    def test_explicit_web_answer_is_synthesized_by_sonnet(self):
+    def test_explicit_web_answer_is_synthesized_by_deepseek(self):
         import services.gemini_text as text_service
 
-        sonnet = AsyncMock(return_value="sonnet web answer")
-        old_synthesis = AsyncMock(return_value="deepseek web answer")
+        deepseek = AsyncMock(return_value="deepseek web answer")
+        old_synthesis = AsyncMock(return_value="legacy web answer")
         web_context = "Источник: официальный сайт\n" + ("данные " * 20)
         with (
-            patch.object(text_service, "generate_text_with_openrouter", sonnet),
+            patch.object(text_service, "deepseek_text", deepseek),
             patch.object(text_service, "synthesize_web_answer", old_synthesis, create=True),
             patch("services.gemini_text._extract_search_query", new=AsyncMock(return_value="новости")),
             patch("services.gemini_text.search_web_with_firecrawl", new=AsyncMock(return_value=(web_context, True))),
@@ -931,16 +931,16 @@ class UxContractsTest(unittest.TestCase):
                 987657,
             ))
 
-        self.assertEqual(result, "sonnet web answer")
-        sonnet.assert_awaited_once()
+        self.assertEqual(result, "deepseek web answer")
+        deepseek.assert_awaited_once()
         old_synthesis.assert_not_awaited()
 
     def test_explicit_web_empty_result_is_reported_without_model_call(self):
         import services.gemini_text as text_service
 
-        sonnet = AsyncMock(return_value="should not be used")
+        deepseek = AsyncMock(return_value="should not be used")
         with (
-            patch.object(text_service, "generate_text_with_openrouter", sonnet),
+            patch.object(text_service, "deepseek_text", deepseek),
             patch("services.gemini_text._extract_search_query", new=AsyncMock(return_value="ничего")),
             patch("services.gemini_text.search_web_with_firecrawl", new=AsyncMock(return_value=("", True))),
             patch("services.gemini_text.get_history", new=AsyncMock(return_value=[])),
@@ -952,7 +952,7 @@ class UxContractsTest(unittest.TestCase):
             ))
 
         self.assertIn("поиск вернул пустоту", result)
-        sonnet.assert_not_awaited()
+        deepseek.assert_not_awaited()
 
     def test_openrouter_text_sends_exact_sonnet_model(self):
         from services import openrouter
@@ -968,7 +968,7 @@ class UxContractsTest(unittest.TestCase):
             async def __aexit__(self, *_):
                 return False
 
-            async def json(self):
+            async def json(self, *_, **__):
                 return {"choices": [{"message": {"content": "sonnet reply"}}]}
 
         class Session:
@@ -993,8 +993,8 @@ class UxContractsTest(unittest.TestCase):
             ))
 
         self.assertEqual(result, "sonnet reply")
-        self.assertEqual(openrouter.OPENROUTER_TEXT_MODEL, "anthropic/claude-sonnet-5")
-        self.assertEqual(captured["json"]["model"], "anthropic/claude-sonnet-5")
+        self.assertEqual(openrouter.OPENROUTER_TEXT_MODEL, "antigravity/gemini-pro-agent")
+        self.assertEqual(captured["json"]["model"], "antigravity/gemini-pro-agent")
         self.assertEqual(captured["json"]["messages"], [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "question"},
@@ -1016,7 +1016,7 @@ class UxContractsTest(unittest.TestCase):
             async def __aexit__(self, *_):
                 return False
 
-            async def json(self):
+            async def json(self, *_, **__):
                 return self.payload
 
             async def text(self):
@@ -1060,13 +1060,13 @@ class UxContractsTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "нет доступных API-ключей"):
                 asyncio.run(generate_text_with_openrouter("question"))
 
-    def test_main_text_surfaces_sonnet_provider_error(self):
+    def test_main_text_surfaces_deepseek_provider_error(self):
         import services.gemini_text as text_service
 
         with (
             patch.object(
                 text_service,
-                "generate_text_with_openrouter",
+                "deepseek_text",
                 new=AsyncMock(side_effect=RuntimeError("credits exhausted")),
             ),
             patch("services.gemini_text.get_history", new=AsyncMock(return_value=[])),
@@ -1079,10 +1079,10 @@ class UxContractsTest(unittest.TestCase):
                 is_owner=True,
             ))
 
-        self.assertIn("Claude Sonnet 5", result)
+        self.assertIn("DeepSeek не ответил", result)
         self.assertIn("credits exhausted", result)
 
-    def test_primary_agent_uses_sonnet_tool_call_round_trip(self):
+    def test_primary_agent_uses_deepseek_tool_call_round_trip(self):
         import agent.loop as agent_loop
 
         tool_response = {
@@ -1101,12 +1101,12 @@ class UxContractsTest(unittest.TestCase):
         final_response = {
             "choices": [{"finish_reason": "stop", "message": {"content": "done"}}],
         }
-        sonnet = AsyncMock(side_effect=[tool_response, final_response])
-        deepseek = AsyncMock(return_value=None)
+        deepseek = AsyncMock(side_effect=[tool_response, final_response])
+        sonnet = AsyncMock(return_value=None)
         contents = [{"role": "user", "parts": [{"text": "do work"}]}]
         with (
-            patch.object(agent_loop, "openrouter_chat", sonnet, create=True),
             patch.object(agent_loop, "deepseek_chat", deepseek, create=True),
+            patch.object(agent_loop, "openrouter_chat", sonnet, create=True),
         ):
             first = asyncio.run(agent_loop._sonnet_call(contents, is_owner=False))
             contents.extend([
@@ -1120,15 +1120,15 @@ class UxContractsTest(unittest.TestCase):
         function_call = first["content"]["parts"][0]["functionCall"]
         self.assertEqual(function_call, {"name": "think", "args": {"thought": "plan"}})
         self.assertEqual(second["content"]["parts"][0]["text"], "done")
-        sent_messages = sonnet.await_args_list[1].kwargs["messages"]
+        sent_messages = deepseek.await_args_list[1].kwargs["messages"]
         assistant_message = next(message for message in sent_messages if message["role"] == "assistant")
         tool_message = next(message for message in sent_messages if message["role"] == "tool")
         tool_call = assistant_message["tool_calls"][0]
         self.assertEqual(__import__("json").loads(tool_call["function"]["arguments"]), {"thought": "plan"})
         self.assertEqual(tool_message["tool_call_id"], tool_call["id"])
-        self.assertEqual(sonnet.await_args.kwargs["model"], "anthropic/claude-sonnet-5")
-        self.assertTrue(sonnet.await_args.kwargs["tools"])
-        deepseek.assert_not_awaited()
+        self.assertEqual(deepseek.await_args.kwargs["model"], "deepseek-v4-flash")
+        self.assertTrue(deepseek.await_args.kwargs["tools"])
+        sonnet.assert_not_awaited()
 
     def test_run_agent_does_not_require_gemini_keys(self):
         import agent.loop as agent_loop
@@ -1141,8 +1141,9 @@ class UxContractsTest(unittest.TestCase):
         with (
             patch.object(agent_loop, "AgentWorkspace", return_value=workspace),
             patch.object(agent_loop, "_sonnet_call", new=AsyncMock(return_value={
-                "content": {"role": "model", "parts": [{"text": "sonnet agent reply"}]},
-                "_finish": "stop",
+                "content": {"role": "model", "parts": [
+                    {"functionCall": {"name": "reply", "args": {"text": "sonnet agent reply"}}}]},
+                "_finish": "tool_calls",
             })),
             patch.object(agent_loop, "load_keys", new=AsyncMock(return_value=[]), create=True),
         ):
@@ -1156,20 +1157,123 @@ class UxContractsTest(unittest.TestCase):
         self.assertEqual(result, "sonnet agent reply")
         self.assertIsNone(project)
 
-    def test_agent_intent_classifier_never_calls_deepseek(self):
+    def test_run_agent_keeps_workspace_after_session(self):
         import agent.loop as agent_loop
 
-        sonnet = AsyncMock(return_value="false")
-        deepseek = AsyncMock(return_value=None)
+        workspace = SimpleNamespace(
+            host_path="/tmp/agent-test",
+            preload=lambda *_: None,
+            cleanup=Mock(),
+        )
+
+        async def status(_text):
+            return None
+
         with (
+            patch.object(agent_loop, "AgentWorkspace", return_value=workspace),
+            patch.object(agent_loop, "_sonnet_call", new=AsyncMock(return_value={
+                "content": {"role": "model", "parts": [
+                    {"functionCall": {"name": "reply", "args": {"text": "reply"}}}]},
+                "_finish": "tool_calls",
+            })),
+            patch.object(agent_loop, "load_keys", new=AsyncMock(return_value=[]), create=True),
+            patch("state.chat_workspaces", new={}),
+        ):
+            result, project = asyncio.run(agent_loop.run_agent(
+                "task",
+                998877,
+                "User",
+                status,
+            ))
+
+        self.assertEqual(result, "reply")
+        self.assertIsNone(project)
+        workspace.cleanup.assert_not_called()
+
+    def test_agent_never_returns_raw_text_with_reasoning(self):
+        import agent.loop as agent_loop
+
+        workspace = SimpleNamespace(host_path="/tmp/agent-test", preload=lambda *_: None, cleanup=lambda: None)
+
+        async def status(_text):
+            return None
+
+        leaked = "Мне нужно разобраться, кто такой Тревор... Слушай, marss, вот ответ."
+        clean = "Слушай, marss, вот ответ."
+        replies = [
+            {"content": {"role": "model", "parts": [{"text": leaked}]}, "_finish": "stop"},
+            {"content": {"role": "model", "parts": [
+                {"functionCall": {"name": "reply", "args": {"text": clean}}}]}, "_finish": "tool_calls"},
+        ]
+        with (
+            patch.object(agent_loop, "AgentWorkspace", return_value=workspace),
+            patch.object(agent_loop, "_sonnet_call", new=AsyncMock(side_effect=replies)),
+            patch.object(agent_loop, "_execute_tool", new=AsyncMock(return_value=(clean, None))),
+            patch.object(agent_loop, "load_keys", new=AsyncMock(return_value=[]), create=True),
+            patch("state.chat_workspaces", new={}),
+        ):
+            result, project = asyncio.run(agent_loop.run_agent("забань Тревора", 998877, "marss", status))
+
+        self.assertEqual(result, clean)
+        self.assertNotIn("разобраться", result)
+        self.assertIsNone(project)
+
+    def test_clear_chat_removes_agent_workspace(self):
+        import handlers.core as core_handler
+        from state import chat_workspaces
+
+        chat_workspaces[9876] = {"path": "/tmp/ws-clear-test", "ts": 1.0}
+        with (
+            patch("handlers.core.save_history", new=AsyncMock()),
+            patch("shutil.rmtree") as rmtree,
+        ):
+            asyncio.run(core_handler._clear_chat(9876))
+
+        self.assertNotIn(9876, chat_workspaces)
+        rmtree.assert_called_once_with("/tmp/ws-clear-test", ignore_errors=True)
+        chat_workspaces.pop(9876, None)
+
+    def test_agent_status_shows_shell_command(self):
+        import agent.loop as agent_loop
+
+        workspace = SimpleNamespace(host_path="/tmp/agent-test", preload=lambda *_: None, cleanup=lambda: None)
+        statuses = []
+
+        async def status(text):
+            statuses.append(text)
+
+        tool_call = {"content": {"role": "model", "parts": [
+            {"functionCall": {"name": "run_shell", "args": {"command": "ls -la"}}},
+        ]}, "_finish": "tool_calls"}
+
+        with (
+            patch.object(agent_loop, "AgentWorkspace", return_value=workspace),
+            patch.object(agent_loop, "_sonnet_call", new=AsyncMock(return_value=tool_call)),
+            patch.object(agent_loop, "_execute_tool", new=AsyncMock(return_value=("ok", None))),
+            patch.object(agent_loop, "load_keys", new=AsyncMock(return_value=[]), create=True),
+            patch("state.chat_workspaces", new={}),
+        ):
+            asyncio.run(agent_loop.run_agent("task", 998877, "User", status))
+
+        joined = "".join(statuses)
+        self.assertIn("Выполняю команду", joined)
+        self.assertIn("ls -la", joined)
+
+
+    def test_agent_intent_classifier_uses_deepseek(self):
+        import agent.loop as agent_loop
+
+        deepseek = AsyncMock(return_value="false")
+        sonnet = AsyncMock(return_value="false")
+        with (
+            patch.object(agent_loop, "deepseek_text", deepseek, create=True),
             patch.object(agent_loop, "generate_text_with_openrouter", sonnet, create=True),
-            patch.object(agent_loop, "deepseek_chat", deepseek, create=True),
         ):
             result = asyncio.run(agent_loop.classify_agent_intent("как твои дела"))
 
         self.assertFalse(result)
-        self.assertEqual(sonnet.await_args.kwargs["model"], "anthropic/claude-sonnet-5")
-        deepseek.assert_not_awaited()
+        self.assertEqual(deepseek.await_args.kwargs["model"], "deepseek-v4-flash")
+        sonnet.assert_not_awaited()
 
 
     def test_regular_chat_prompt_is_structured(self):
@@ -1190,6 +1294,40 @@ class UxContractsTest(unittest.TestCase):
             self.assertIn("РЕЗУЛЬТАТ И ОШИБКИ:", prompt)
             self.assertNotIn("Перед каждой командой/инструментом вызывай think", prompt)
             self.assertNotIn("CRITICAL SYSTEM OVERRIDE", prompt)
+
+    def test_deepseek_chat_disables_thinking_for_plain_text(self):
+        from services import deepseek_service
+
+        captured = {}
+
+        class Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+            async def json(self, *_, **__):
+                return {"choices": [{"message": {"content": "ok"}}]}
+
+        class Session:
+            def post(self, url, **kwargs):
+                captured["json"] = kwargs.get("json")
+                return Response()
+
+        with (
+            patch.object(deepseek_service, "load_deepseek_keys", new=AsyncMock(return_value=["key"])),
+            patch("utils.get_http_session", new=AsyncMock(return_value=Session())),
+        ):
+            data = asyncio.run(deepseek_service.deepseek_chat(
+                messages=[{"role": "user", "content": "привет"}],
+                max_tokens=50,
+            ))
+
+        self.assertEqual(data["choices"][0]["message"]["content"], "ok")
+        self.assertEqual(captured["json"]["thinking"], {"type": "disabled"})
 
     def test_think_tool_shows_neutral_status_only(self):
         from agent.loop import _execute_tool
@@ -1229,8 +1367,11 @@ class UxContractsTest(unittest.TestCase):
                 "_finish": "tool_calls",
             },
             {
-                "content": {"role": "model", "parts": [{"text": "готово"}]},
-                "_finish": "stop",
+                "content": {"role": "model", "parts": [{"functionCall": {
+                    "name": "reply",
+                    "args": {"text": "готово"},
+                }}]},
+                "_finish": "tool_calls",
             },
         ])
 
@@ -1272,7 +1413,7 @@ class UxContractsTest(unittest.TestCase):
 
         self.assertEqual(result, "На фото кот")
         payload = chat.await_args.kwargs
-        self.assertEqual(payload["model"], "anthropic/claude-sonnet-5")
+        self.assertEqual(payload["model"], "antigravity/gemini-pro-agent")
         content = payload["messages"][0]["content"]
         self.assertEqual(content[0], {"type": "text", "text": "Что на фото?"})
         self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
@@ -1401,7 +1542,7 @@ class UxContractsTest(unittest.TestCase):
         self.assertIn('<tg-emoji emoji-id="5210956306952758910">👀</tg-emoji>', rendered)
         self.assertEqual(message.reply.await_args.kwargs["parse_mode"], "HTML")
         self.assertIn("<b>Анализирую фото</b>", rendered)
-        self.assertIn("<i>Claude Sonnet 5</i>", rendered)
+        self.assertIn("<i>Gemini Pro Agent</i>", rendered)
         self.assertIn('<tg-emoji emoji-id="5386367538735104399">⌛</tg-emoji>', rendered)
         status.delete.assert_awaited_once()
 
@@ -1423,6 +1564,78 @@ class UxContractsTest(unittest.TestCase):
             ))
 
         status.delete.assert_awaited_once()
+
+    def test_load_keys_falls_back_to_premium_gemini_keys(self):
+        import aiosqlite
+        import keys.manager as manager
+
+        async def scenario():
+            db = await aiosqlite.connect(":memory:")
+            await db.executescript(
+                "CREATE TABLE keys (key TEXT, service TEXT, is_live INTEGER, info TEXT);"
+                "CREATE TABLE premium_keys (key TEXT, service TEXT, status TEXT, deep_check TEXT, last_validated_at TEXT);"
+                "INSERT INTO premium_keys VALUES ('paid-key', 'Gemini', 'reserved', '{\"tier\":\"paid\"}', '2026-01-01');"
+            )
+            await db.commit()
+            await db.close()
+
+        async def run():
+            import tempfile, os
+            fd, path = tempfile.mkstemp(suffix='.db')
+            os.close(fd)
+            try:
+                db = await aiosqlite.connect(path)
+                await db.executescript(
+                    "CREATE TABLE keys (key TEXT, service TEXT, is_live INTEGER, info TEXT);"
+                    "CREATE TABLE premium_keys (key TEXT, service TEXT, status TEXT, deep_check TEXT, last_validated_at TEXT);"
+                    "INSERT INTO premium_keys VALUES ('paid-key', 'Gemini', 'reserved', '{\"tier\":\"paid\"}', '2026-01-01');"
+                )
+                await db.commit()
+                await db.close()
+                with patch.object(manager, "REWTEST_DB", path), patch.object(manager, "load_api_config", return_value={"gemini": []}):
+                    return await manager.load_keys()
+            finally:
+                os.remove(path)
+
+        self.assertEqual(asyncio.run(run()), ["paid-key"])
+
+    def test_load_keys_uses_config_when_rewtest_has_no_usable_gemini_keys(self):
+        import aiosqlite
+        import keys.manager as manager
+
+        async def run():
+            import tempfile, os
+            fd, path = tempfile.mkstemp(suffix='.db')
+            os.close(fd)
+            try:
+                db = await aiosqlite.connect(path)
+                await db.executescript(
+                    "CREATE TABLE keys (key TEXT, service TEXT, is_live INTEGER, info TEXT);"
+                )
+                await db.commit()
+                await db.close()
+                with patch.object(manager, "REWTEST_DB", path), patch.object(manager, "load_api_config", return_value={"gemini": ["config-key"]}):
+                    return await manager.load_keys()
+            finally:
+                os.remove(path)
+
+        self.assertEqual(asyncio.run(run()), ["config-key"])
+
+    def test_generate_music_does_not_preflight_generic_keys(self):
+        from services.music_service import generate_music
+        import base64
+
+        audio = base64.b64encode(b"mp3").decode()
+        response = {"candidates": [{"content": {"parts": [{"inlineData": {"data": audio}}]}}]}
+
+        with (
+            patch("services.music_service.load_keys", new=AsyncMock(return_value=[])),
+            patch("services.music_service.gemini_post", new=AsyncMock(return_value=(response, "paid-key", None))),
+        ):
+            audio_bytes, _lyrics, error = asyncio.run(generate_music("test", "lyria-pro"))
+
+        self.assertEqual(audio_bytes, b"mp3")
+        self.assertIsNone(error)
 
     def test_gemini_post_retries_on_api_key_invalid_400(self):
         from shared_types import gemini_post
@@ -1476,6 +1689,94 @@ class UxContractsTest(unittest.TestCase):
         self.assertEqual(key, "good-key")
         self.assertIsNone(err)
         self.assertEqual(call_count, 2)
+
+    def test_gemini_post_does_not_globally_kill_api_key_invalid_key(self):
+        from shared_types import gemini_post
+
+        class FakeResponse:
+            status = 400
+
+            async def text(self):
+                return '{"error":{"details":[{"reason":"API_KEY_INVALID"}]}}'
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+        class FakeSession:
+            def post(self, *_args, **_kwargs):
+                return FakeResponse()
+
+        removed = []
+        with (
+            patch("keys.load_keys", new=AsyncMock(return_value=["paid-key"])),
+            patch("keys.remove_key", new=lambda *args: removed.append(args)),
+            patch("aiohttp.ClientSession", return_value=FakeSession()),
+        ):
+            data, key, err = asyncio.run(gemini_post("models/lyria-3-pro-preview:generateContent", {}))
+
+        self.assertIsNone(data)
+        self.assertIsNone(key)
+        self.assertIn("API_KEY_INVALID", err or "")
+        self.assertEqual(removed, [])
+
+
+    def test_gemini_post_retries_dns_failure_before_rotating_key(self):
+        from aiohttp import ClientConnectorDNSError
+        from aiohttp.client_reqrep import ConnectionKey
+        from shared_types import gemini_post
+
+        valid = {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+        calls = 0
+
+        class FakeResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+            async def json(self):
+                return valid
+
+        class FakeSession:
+            def post(self, *_args, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    key = ConnectionKey("generativelanguage.googleapis.com", 443, True, True, None, None, None, None)
+                    raise ClientConnectorDNSError(key, OSError("Temporary failure in name resolution"))
+                return FakeResponse()
+
+        with (
+            patch("keys.load_keys", new=AsyncMock(return_value=["same-key"])),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch("aiohttp.ClientSession", return_value=FakeSession()),
+        ):
+            data, key, err = asyncio.run(gemini_post("models/test:generateContent", {}))
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(key, "same-key")
+        self.assertEqual(data, valid)
+        self.assertIsNone(err)
+
+    def test_generate_music_cleans_dns_failure_message(self):
+        from services.music_service import generate_music
+
+        async def fake_post(*_args, **_kwargs):
+            return None, None, "lyria-pro: ClientConnectorDNSError: Cannot connect to host generativelanguage.googleapis.com:443 ssl:default [Temporary failure in name resolution]"
+
+        with (
+            patch("services.music_service.load_keys", new=AsyncMock(return_value=["key"])),
+            patch("services.music_service.gemini_post", new=fake_post),
+        ):
+            _, _, error = asyncio.run(generate_music("test", "lyria-pro"))
+
+        self.assertEqual(error, "Lyria: DNS временно не резолвит generativelanguage.googleapis.com. Проверь DNS/сеть контейнера и повтори.")
 
     def test_music_block_diagnoser_pinpoints_offending_line(self):
         from services.music_service import _diagnose_block

@@ -405,49 +405,6 @@ async def _tool_qr_code(text: str, caption: str, send_cb: Callable) -> str:
         return f"QR failed: {e}"
 
 
-async def _tool_create_chart(
-    chart_type: str, title: str, labels: list, values: list,
-    xlabel: str, ylabel: str, send_cb: Callable,
-) -> str:
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.set_title(title or "Chart", fontsize=14, pad=12)
-        ct = (chart_type or "bar").lower()
-        if ct == "bar":
-            ax.bar(range(len(values)), values, color="#4C9BE8")
-            ax.set_xticks(range(len(labels)))
-            ax.set_xticklabels(labels, rotation=30, ha="right")
-        elif ct == "line":
-            ax.plot(range(len(values)), values, marker="o", color="#4C9BE8", linewidth=2)
-            ax.set_xticks(range(len(labels)))
-            ax.set_xticklabels(labels, rotation=30, ha="right")
-        elif ct == "pie":
-            ax.pie(values, labels=labels, autopct="%1.1f%%", startangle=90)
-            ax.axis("equal")
-        elif ct == "scatter":
-            ax.scatter(range(len(values)), values, color="#4C9BE8", s=80)
-            ax.set_xticks(range(len(labels)))
-            ax.set_xticklabels(labels, rotation=30, ha="right")
-        else:
-            ax.bar(range(len(values)), values)
-            ax.set_xticks(range(len(labels)))
-            ax.set_xticklabels(labels, rotation=30, ha="right")
-        if xlabel: ax.set_xlabel(xlabel)
-        if ylabel: ax.set_ylabel(ylabel)
-        ax.grid(axis="y", linestyle="--", alpha=0.4)
-        plt.tight_layout()
-        buf = io.BytesIO()
-        plt.savefig(buf, format="PNG", dpi=150)
-        plt.close(fig)
-        await send_cb({"type": "photo", "data": buf.getvalue(),
-                       "caption": f"📊 {title}", "filename": "chart.png"})
-        return "Chart sent."
-    except Exception as e:
-        return f"Chart failed: {e}"
-
 
 async def _tool_translate(text: str, target_lang: str) -> str:
     keys = await load_keys()

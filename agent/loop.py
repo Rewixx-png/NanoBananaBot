@@ -13,8 +13,10 @@ from typing import Any, Callable, Optional, Tuple
 
 from services.code_service import generate_project_with_gemini
 
-from services.deepseek_service import _gemini_contents_to_openai_messages, _gemini_tools_to_openai, _openai_response_to_gemini
-from services.openrouter import generate_text_with_openrouter, openrouter_chat
+from services.deepseek_service import (
+    _gemini_contents_to_openai_messages, _gemini_tools_to_openai, _openai_response_to_gemini,
+    deepseek_chat, deepseek_text,
+)
 logger = logging.getLogger(__name__)
 
 from config import (
@@ -24,9 +26,8 @@ from config import (
     AGENT_PROJECT_TIMEOUT,
     AGENT_SONNET_MAX_TOKENS,
     AGENT_SONNET_TIMEOUT,
-    AGENT_WORKSPACE_TTL,
+    DEEPSEEK_MODEL,
     NEWS_EMOJI_IDS,
-    OPENROUTER_TEXT_MODEL,
 )
 
 _E = NEWS_EMOJI_IDS
@@ -45,7 +46,7 @@ from .sandbox import _tool_run_python, _tool_run_shell, _tool_analyze_image, _to
 from .media import (
     _tool_search_image, _tool_generate_image, _tool_list_image_models,
     _tool_download_image, _tool_download_video, _tool_search_video,
-    _tool_tts, _tool_qr_code, _tool_create_chart, _tool_translate,
+    _tool_tts, _tool_qr_code, _tool_translate,
 )
 
 
@@ -67,36 +68,38 @@ async def _sonnet_call(contents: list, is_owner: bool = False) -> dict:
     for attempt in range(3):
         started = _t.monotonic()
         try:
-            data = await openrouter_chat(
+            data = await deepseek_chat(
                 messages=messages,
                 system_prompt=system,
-                model=OPENROUTER_TEXT_MODEL,
+                model=DEEPSEEK_MODEL,
                 max_tokens=AGENT_SONNET_MAX_TOKENS,
                 tools=tools,
                 timeout=AGENT_SONNET_TIMEOUT,
             )
+            if not data:
+                raise RuntimeError('DeepSeek не ответил (все ключи недоступны)')
         except Exception as error:
             errors.append(f"{type(error).__name__}: {error}")
             if attempt < 2:
                 await asyncio.sleep(2)
             continue
 
-        logger.info(f"agent: Sonnet raw finish={data.get('choices',[{}])[0].get('finish_reason','?')} has_tools={bool(data.get('choices',[{}])[0].get('message',{}).get('tool_calls'))}")
+        logger.info(f"agent: DeepSeek V4 raw finish={data.get('choices',[{}])[0].get('finish_reason','?')} has_tools={bool(data.get('choices',[{}])[0].get('message',{}).get('tool_calls'))}")
         result = _openai_response_to_gemini(data)
         elapsed = _t.monotonic() - started
         function_calls = [part.get("functionCall") for part in result.get("content", {}).get("parts", []) if "functionCall" in part]
         text = " ".join(part.get("text", "") for part in result.get("content", {}).get("parts", []) if "text" in part).strip()
         if function_calls:
-            logger.info(f"agent: Sonnet tool calls [{elapsed:.1f}s]: {[call['name'] for call in function_calls]}")
+            logger.info(f"agent: DeepSeek V4 tool calls [{elapsed:.1f}s]: {[call['name'] for call in function_calls]}")
             return result
         if text:
-            logger.info(f"agent: Sonnet text [{elapsed:.1f}s] ({len(text)} chars)")
+            logger.info(f"agent: DeepSeek V4 text [{elapsed:.1f}s] ({len(text)} chars)")
             return result
-        errors.append(f"Claude Sonnet 5: пустой ответ (finish={data.get('choices',[{}])[0].get('finish_reason','?')})")
+        errors.append(f"DeepSeek: пустой ответ (finish={data.get('choices',[{}])[0].get('finish_reason','?')})")
 
     first = errors[0][:300] if errors else "неизвестная ошибка"
     rest = f" + ещё {len(errors) - 1}" if len(errors) > 1 else ""
-    return {"_error": f"Claude Sonnet 5: {first}{rest}"}
+    return {"_error": f"DeepSeek V4: {first}{rest}"}
 
  # ── Execute one tool ─────────────────────────────────────────────
 
@@ -380,14 +383,6 @@ async def _execute_tool(
         await _st("🔲 Генерирую QR...")
         return await _tool_qr_code(args.get("text", ""), args.get("caption", ""), _send), None
 
-    if name == "create_chart":
-        await _st("📊 Рисую график...")
-        return await _tool_create_chart(
-            args.get("chart_type", "bar"), args.get("title", ""),
-            args.get("labels", []), args.get("values", []),
-            args.get("xlabel", ""), args.get("ylabel", ""), _send,
-        ), None
-
     if name == "translate":
         await _st(f"🌍 Перевожу на {args.get('target_language', '?')}...")
         return await _tool_translate(args.get("text", ""), args.get("target_language", "English")), None
@@ -439,11 +434,8 @@ async def run_agent(
 
     import time as _time
     from state import chat_workspaces as _cws
-    _WS_TTL = AGENT_WORKSPACE_TTL
     _existing = _cws.get(chat_id)
-    _existing_path = ""
-    if _existing and _time.time() - _existing["ts"] < _WS_TTL:
-        _existing_path = _existing["path"]
+    _existing_path = _existing["path"] if _existing else ""
     ws = AgentWorkspace(existing_path=_existing_path)
     _cws[chat_id] = {"path": ws.host_path, "ts": _time.time()}
     if initial_files:
@@ -480,7 +472,6 @@ async def run_agent(
         "calculate": (_E["idea"], "💡", "Считаю"),
         "translate": (_E["globe"], "🌐", "Перевожу"),
         "qr_code": (_E["link"], "🔗", "Генерирую QR"),
-        "create_chart": (_E["growth"], "📈", "Строю график"),
         "create_file": (_E["pencil"], "✏️", "Создаю файл"),
         "send_workspace_file": (_E["attachment"], "📎", "Отправляю файл"),
         "send_with_buttons": (_E["chat"], "💬", "Отправляю кнопки"),
@@ -491,6 +482,7 @@ async def run_agent(
         "generate_project": "prompt", "playwright_browse": "url",
         "write_file": "path", "read_file": "path",
         "create_file": "filename", "send_workspace_file": "path",
+        "run_shell": "command", "run_python": "code",
     }
     last_tool, last_args = "think", {}
     _start_ts = _time.monotonic()
@@ -515,65 +507,63 @@ async def run_agent(
         )
         return "\n".join(lines)
 
-    try:
-        # Claude Sonnet 5 drives every agent step, including tool calls.
-        for step in range(AGENT_MAX_STEPS):
-            await _st(_fmt_status(last_tool, last_args))
+    # Gemini Pro Agent drives every agent step, including tool calls.
+    for step in range(AGENT_MAX_STEPS):
+        await _st(_fmt_status(last_tool, last_args))
 
-            if AGENT_MAX_STEPS - step <= 3:
-                contents.append({"role": "user", "parts": [{"text":
-                    f"\n[СИСТЕМА: осталось {AGENT_MAX_STEPS - step} шагов. Завершай.]"
-                }]})
+        if AGENT_MAX_STEPS - step <= 3:
+            contents.append({"role": "user", "parts": [{"text":
+                f"\n[СИСТЕМА: осталось {AGENT_MAX_STEPS - step} шагов. Завершай.]"
+            }]})
 
-            candidate = await _sonnet_call(contents, is_owner=is_owner)
+        candidate = await _sonnet_call(contents, is_owner=is_owner)
 
 
-            if candidate.get("_error"):
-                return f"Модели недоступны: {candidate['_error']}", None
+        if candidate.get("_error"):
+            return f"Модели недоступны: {candidate['_error']}", None
 
-            parts = candidate.get("content", {}).get("parts", [])
-            if not parts:
-                return f"Агент не смог ответить. Причина: {candidate.get('_finish', 'пустой ответ')}", None
+        parts = candidate.get("content", {}).get("parts", [])
+        if not parts:
+            return f"Агент не смог ответить. Причина: {candidate.get('_finish', 'пустой ответ')}", None
 
-            contents.append({"role": "model", "parts": parts})
-            fn_calls = [p["functionCall"] for p in parts if "functionCall" in p]
+        contents.append({"role": "model", "parts": parts})
+        fn_calls = [p["functionCall"] for p in parts if "functionCall" in p]
 
-            if not fn_calls:
-                text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
-                text = re.sub(r'\b(?:call:default_api:)?\w+\(\w+="([^"]*)"\)', r'\1', text)
-                text = re.sub(r'<\w+\.?\w+="([^"]*)"\s*/?>', r'\1', text)
-                text = re.sub(r'<reply[^>]*>|</reply>', '', text)
-                text = text.strip()
-                return text or "Done.", None
+        if not fn_calls:
+            # DeepSeek V4 can answer text-only, leaking its chain-of-thought into
+            # content (thinking is disabled). Never trust raw text — force the
+            # final answer through the reply tool, whose args.text stays clean.
+            contents.append({"role": "user", "parts": [{"text":
+                "[СИСТЕМА: не отвечай обычным текстом. Заверши задачу строго через инструмент reply.]"
+            }]})
+            continue
 
-            tool_responses: list = []
-            for fn in fn_calls:
-                name = fn.get("name", "")
-                args = fn.get("args", {})
-                last_tool, last_args = name, args
-                await _st(_fmt_status(name, args))
-                result, project = await _execute_tool(
-                    name, args, debounce, budget, status_cb, send_media_cb, ws,
-                    is_owner=is_owner, chat_id=chat_id,
-                )
-                last_tool, last_args = name, args
-                if name == "generate_project" and project is not None:
-                    return None, project
-                if name == "reply":
-                    return result, None
-                tool_responses.append({
-                    "functionResponse": {"name": name, "response": {"result": result}}
-                })
-            contents.append({"role": "user", "parts": tool_responses})
+        tool_responses: list = []
+        for fn in fn_calls:
+            name = fn.get("name", "")
+            args = fn.get("args", {})
+            last_tool, last_args = name, args
+            await _st(_fmt_status(name, args))
+            result, project = await _execute_tool(
+                name, args, debounce, budget, status_cb, send_media_cb, ws,
+                is_owner=is_owner, chat_id=chat_id,
+            )
+            last_tool, last_args = name, args
+            if name == "generate_project" and project is not None:
+                return None, project
+            if name == "reply":
+                return result, None
+            tool_responses.append({
+                "functionResponse": {"name": name, "response": {"result": result}}
+            })
+        contents.append({"role": "user", "parts": tool_responses})
 
-        return "Agent exhausted all steps.", None
-    finally:
-        ws.cleanup()
+    return "Agent exhausted all steps.", None
 
 
 async def classify_agent_intent(prompt: str) -> bool:
     """Returns True if this request should go through the agent loop.
-    Uses Claude Sonnet 5 to understand ambiguous intent; explicit triggers stay local."""
+    Uses Gemini Pro Agent to understand ambiguous intent; explicit triggers stay local."""
     system = (
         "You decide if a Telegram message needs the AI agent tools.\n\n"
         "Answer TRUE when the user wants to:\n"
@@ -605,13 +595,15 @@ async def classify_agent_intent(prompt: str) -> bool:
     if any(t in prompt.lower() for t in agent_triggers):
         return True
     try:
-        text = await generate_text_with_openrouter(
+        text = await deepseek_text(
             prompt=prompt[:800],
             system_prompt=system,
-            model=OPENROUTER_TEXT_MODEL,
+            model=DEEPSEEK_MODEL,
             max_tokens=AGENT_CLASSIFY_MAX_TOKENS,
             timeout=AGENT_CLASSIFY_TIMEOUT,
         )
+        if not text:
+            return False
     except Exception as error:
         logger.warning(f"Agent intent classification failed: {type(error).__name__}: {error}")
         return False

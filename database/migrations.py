@@ -126,28 +126,54 @@ MIGRATIONS = [
 
 
 async def apply_migrations(db) -> int:
-    """Apply pending migrations. Returns the number of new migrations applied."""
-    await db.execute(
-        "CREATE TABLE IF NOT EXISTS _schema_version (version INTEGER PRIMARY KEY)"
-    )
-    cursor = await db.execute("SELECT COALESCE(MAX(version), 0) FROM _schema_version")
-    row = await cursor.fetchone()
-    current_version = row[0] if row else 0
+    """Apply pending migrations with fcntl advisory locking. Returns the number of new migrations applied."""
+    import os
+    try:
+        import fcntl
+        has_fcntl = True
+    except ImportError:
+        has_fcntl = False
 
-    applied = 0
-    for m in MIGRATIONS:
-        if m["version"] <= current_version:
-            continue
-        logger.info(f"Applying migration {m['version']}: {m['description']}")
-        await db.executescript(m["sql"])
+    lock_fd = None
+    if has_fcntl:
+        try:
+            from database.connection import DB_PATH
+            lock_path = f"{DB_PATH}.lock"
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o666)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        except Exception as e:
+            logger.warning(f"Could not acquire migration file lock: {e}")
+
+    try:
         await db.execute(
-            "INSERT OR REPLACE INTO _schema_version (version) VALUES (?)",
-            (m["version"],),
+            "CREATE TABLE IF NOT EXISTS _schema_version (version INTEGER PRIMARY KEY)"
         )
-        await db.commit()
-        applied += 1
-        logger.info(f"Migration {m['version']} applied successfully")
+        cursor = await db.execute("SELECT COALESCE(MAX(version), 0) FROM _schema_version")
+        row = await cursor.fetchone()
+        current_version = row[0] if row else 0
 
-    if applied:
-        logger.info(f"Applied {applied} migration(s). Current version: {MIGRATIONS[-1]['version']}")
-    return applied
+        applied = 0
+        for m in MIGRATIONS:
+            if m["version"] <= current_version:
+                continue
+            logger.info(f"Applying migration {m['version']}: {m['description']}")
+            await db.executescript(m["sql"])
+            await db.execute(
+                "INSERT OR REPLACE INTO _schema_version (version) VALUES (?)",
+                (m["version"],),
+            )
+            await db.commit()
+            applied += 1
+            logger.info(f"Migration {m['version']} applied successfully")
+
+        if applied:
+            logger.info(f"Applied {applied} migration(s). Current version: {MIGRATIONS[-1]['version']}")
+        return applied
+    finally:
+        if lock_fd is not None:
+            try:
+                if has_fcntl:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
+            except Exception:
+                pass

@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -19,7 +20,8 @@ async def generate_video_with_gemini(prompt: str, video_path: str) -> str:
     temp_dir = tempfile.mkdtemp()
     cmd = ['ffmpeg', '-i', video_path, '-vf', f'fps={VIDEO_FPS},scale={VIDEO_FRAME_SIZE}:-1', '-q:v', '10', os.path.join(temp_dir, 'frame_%04d.jpg')]
     try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        from utils import run_ffmpeg
+        await run_ffmpeg(cmd, timeout=30)
     except FileNotFoundError:
         shutil.rmtree(temp_dir, ignore_errors=True)
         return 'ffmpeg не установлен, блять. Установи ffmpeg и попробуй снова.'
@@ -40,7 +42,8 @@ async def generate_video_with_gemini(prompt: str, video_path: str) -> str:
         os.remove(os.path.join(temp_dir, frame))
     audio_path = os.path.join(temp_dir, 'audio.wav')
     try:
-        subprocess.run(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', '-y', audio_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        from utils import run_ffmpeg
+        await run_ffmpeg(['ffmpeg', '-i', video_path, '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', '-y', audio_path], timeout=30)
     except FileNotFoundError:
         logging.warning('ffmpeg не найден, пропускаем извлечение аудио.')
     except Exception as e:
@@ -153,9 +156,11 @@ _omni_good_proxies: list = []  # прокси, через которые Google 
 
 async def _omni_proxy_list() -> list:
     """Прокси для обхода EEA-блока редактирования: OMNI_PROXY env или общий пул keyhunter в Redis."""
-    env_px = os.environ.get('OMNI_PROXY')
+    env_px = os.environ.get('OMNI_PROXY', '').strip()
     if env_px:
-        return [env_px]
+        candidates = [p.strip() for p in env_px.split(',') if p.strip()]
+        # Drop malformed entries (e.g. status text glued to the first proxy).
+        return [p for p in candidates if re.match(r'^(socks5|socks4|http|https)://[^\s,]+:\d+$', p)]
     try:
         import random
         import redis.asyncio as aioredis
@@ -376,6 +381,11 @@ async def generate_video_with_omni(
                     # Выходной фильтр: видео сгенерировалось, но Google его убил — обычно из-за реального человека в кадре
                     if resp.status == 400 and ('request blocked' in err_low or 'filtered out' in err_low or 'harmful content' in err_low):
                         return (None, 'Omni Flash: видео сгенерировалось, но Google отфильтровал результат — это не твой промпт. Причина почти всегда: на видео реальный человек, а редактура людей ограничена политикой Google (особенно если лицо выглядит молодо). Попробуй: другое видео, сцену без людей, или нейтральную правку (стиль, свет, фон).')
+                    if resp.status == 400 and '"API_KEY_INVALID"' in err:
+                        from keys import remove_key
+                        remove_key(key, resp.status)
+                        key_errors.append(f'ключ {idx+1}: API_KEY_INVALID для Omni, пробую следующий')
+                        continue
                     # Прочие 4xx — зависят от запроса, а не от ключа
                     return (None, f'Omni Flash ошибка API ({resp.status}):\n{err[:500]}')
             except asyncio.TimeoutError:

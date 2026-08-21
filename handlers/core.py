@@ -124,10 +124,15 @@ async def _clear_chat(chat_id: int) -> None:
     await save_history(chat_id, [])
     chat_context_buffer.pop(chat_id, None)
     chat_last_files.pop(chat_id, None)
-    from state import running_agent_tasks
+    from state import running_agent_tasks, chat_workspaces
     task = running_agent_tasks.pop(chat_id, None)
     if task and not task.done():
         task.cancel()
+    # Sandbox is persistent until the owner clears it: wipe the chat's workspace dir.
+    ws = chat_workspaces.pop(chat_id, None)
+    if ws and ws.get('path'):
+        import shutil
+        shutil.rmtree(ws['path'], ignore_errors=True)
 
 
 @core_router.callback_query(F.data == "menu:voice")
