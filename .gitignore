@@ -28,3 +28,4 @@ models/
 *~
 test_*_results.json
 thoughts/
+*.db.lock
