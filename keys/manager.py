@@ -144,10 +144,11 @@ async def load_nvidia_keys():
 
 
 async def load_openrouter_keys():
-    # A local gateway (OmniRoute) key wins when configured, then the scraped pool.
-    keys = _env_keys('OPENROUTER_API_KEY')
-    if keys:
-        return keys
+    # A gateway key (OmniRoute or a personal openrouter.ai key) wins when
+    # configured, then the scraped pool.
+    from config import OPENROUTER_API_KEY
+    if OPENROUTER_API_KEY and not _is_dead(OPENROUTER_API_KEY):
+        return [OPENROUTER_API_KEY]
     rows = await _live_rows('OpenRouter')
     return [row[0] for row in rows]
 
