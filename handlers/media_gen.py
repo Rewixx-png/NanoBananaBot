@@ -97,6 +97,12 @@ VEO_MODELS: dict = {
 
 VIDEO_COOLDOWN = 20
 
+# Telegram allows at most 100 buttons per inline keyboard. The model list adds
+# one button per model plus a "back" row, so leave headroom: 6 curated models +
+# 84 from the Replicate collection + nav = 91. The collection is fetched
+# newest-first, so the cap trims the 2022-2023 SD1.5/SDXL tail, not new models.
+REPLICATE_MENU_LIMIT = 90
+
 TTS_MODELS: dict = {
     'tts0': ('Gemini 3.5 Flash TTS', 'gemini-3.5-flash-tts'),
     'tts1': ('Gemini 3.1 Flash TTS', 'gemini-3.1-flash-tts-preview'),
@@ -131,7 +137,7 @@ async def refresh_models():
         for (label, path) in replicate_models:
             if path not in custom_paths:
                 all_models.append((label, path))
-        all_models = all_models[:25]
+        all_models = all_models[:REPLICATE_MENU_LIMIT]
         PROVIDER_MODELS['nsfw'] = [(label, f'rep{i}') for (i, (label, _)) in enumerate(all_models)]
         for (i, (_, model_id)) in enumerate(all_models):
             MODEL_TO_REAL[f'rep{i}'] = ('nsfw', model_id)

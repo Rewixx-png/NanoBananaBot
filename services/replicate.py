@@ -28,7 +28,12 @@ _REPLICATE_MODELS = {
 
 
 async def fetch_replicate_image_models() -> list:
-    """Fetch available Replicate models from the text-to-image collection."""
+    """Fetch available Replicate models from the text-to-image collection.
+
+    Returned newest-first: the collection is ordered roughly oldest-to-newest,
+    so a plain head-slice of it would drop the current models and keep the
+    2022-2023 SD1.5/SDXL relics.
+    """
     from shared_types import _models_cache, _MODELS_CACHE_TTL
     cache_key = 'replicate_image'
     now = time.time()
@@ -45,7 +50,7 @@ async def fetch_replicate_image_models() -> list:
             async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    for m in data.get('models', []):
+                    for m in sorted(data.get('models', []), key=lambda x: x.get('created_at') or '', reverse=True):
                         owner = m.get('owner')
                         name = m.get('name')
                         version_info = m.get('latest_version')
@@ -71,17 +76,18 @@ async def generate_image_with_replicate(
     if not keys:
         return (None, 'Нет Replicate ключей.')
     model_cfg = _REPLICATE_MODELS.get(model)
-    if not model_cfg:
-        dynamic_version = _DYNAMIC_REPLICATE_VERSIONS.get(model)
-        if dynamic_version:
-            model_cfg = {
-                'version': dynamic_version,
-                'input': lambda p: {'prompt': p}
-            }
-        else:
-            return (None, f'Неизвестная Replicate модель: {model}')
-    version = model_cfg['version']
-    model_input = model_cfg['input'](prompt)
+    dynamic_version = _DYNAMIC_REPLICATE_VERSIONS.get(model)
+    if model_cfg:
+        # Prefer the version the API reports as latest — the pinned constant is
+        # only a fallback for when the collection has not been fetched yet.
+        version = dynamic_version or model_cfg['version']
+        model_input = model_cfg['input'](prompt)
+    elif dynamic_version:
+        version = dynamic_version
+        model_input = {'prompt': prompt}
+    else:
+        return (None, f'Неизвестная Replicate модель: {model}')
+    last_error = 'Все Replicate ключи недоступны.'
     for idx, key in enumerate(keys):
         if state_data:
             state_data['status'] = f'Пробую ключ {idx+1}/{len(keys)} (Replicate)'
@@ -94,6 +100,11 @@ async def generate_image_with_replicate(
                         logging.warning(f'Replicate create {resp.status}: {err[:150]}')
                         if resp.status in (401, 403):
                             await remove_key(key, resp.status)
+                            continue
+                        if resp.status == 429:
+                            # Throttled key is not dead — cool it down and try the next one.
+                            await remove_key(key, 429)
+                            last_error = f'Replicate 429: {err[:200]}'
                             continue
                         return (None, f'Replicate error {resp.status}: {err[:200]}')
                     prediction = await resp.json()
@@ -126,4 +137,4 @@ async def generate_image_with_replicate(
             except Exception as e:
                 logging.error(f'Replicate error: {e}')
                 return (None, str(e))
-    return (None, 'Все Replicate ключи недоступны.')
+    return (None, last_error)
