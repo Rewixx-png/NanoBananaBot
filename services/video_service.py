@@ -126,6 +126,12 @@ async def poll_veo_operation(operation_name: str, api_key: str, state_data: dict
     return (None, 'Veo: операция не завершилась за 5 минут.')
 
 async def fetch_veo_models() -> list:
+    """Video-generation models the API advertises: Veo plus Omni Flash.
+
+    Both families live behind different APIs (operations vs interactions), but
+    the menu lists them together and handlers/media_video.py routes on the real
+    model id, so a new family member shows up without touching the menu.
+    """
     cache_key = 'veo'
     now = __import__('time').time()
     if cache_key in _models_cache and now - _models_cache[cache_key]['ts'] < _MODELS_CACHE_TTL:
@@ -142,7 +148,7 @@ async def fetch_veo_models() -> list:
                     result = []
                     for m in data.get('models', []):
                         model_id = m['name'].replace('models/', '')
-                        if 'veo' in model_id.lower():
+                        if 'veo' in model_id.lower() or 'omni' in model_id.lower():
                             result.append((_pretty_model_name(model_id), model_id))
                     _models_cache[cache_key] = {'ts': now, 'data': result}
                     return result
@@ -211,6 +217,7 @@ async def generate_video_with_omni(
     video_bytes: bytes = None,
     aspect_ratio: str = '16:9',
     state_data: dict = None,
+    model: str = 'gemini-omni-1.1-flash',
     _sanitized: bool = False,
 ) -> tuple:
     """Generate or edit a video via Gemini Omni Flash (Interactions API).
@@ -267,7 +274,7 @@ async def generate_video_with_omni(
         omni_input = final_prompt
     task = 'edit' if video_bytes else ('image_to_video' if image_bytes else 'text_to_video')
     payload = {
-        'model': 'gemini-omni-flash-preview',
+        'model': model,
         'input': omni_input,
         'generation_config': {'video_config': {'task': task}},
     }
@@ -376,7 +383,7 @@ async def generate_video_with_omni(
                             safe = await _sanitize_video_prompt(final_prompt)
                             if safe and safe != final_prompt:
                                 logging.info(f'Omni: промпт заблокирован фильтром, retry со смягчённым: {safe[:80]}')
-                                return await generate_video_with_omni(safe, image_bytes=image_bytes, video_bytes=video_bytes, aspect_ratio=aspect_ratio, state_data=state_data, _sanitized=True)
+                                return await generate_video_with_omni(safe, image_bytes=image_bytes, video_bytes=video_bytes, aspect_ratio=aspect_ratio, state_data=state_data, model=model, _sanitized=True)
                         return (None, f'Omni Flash: промпт заблокирован фильтром безопасности Google (даже после смягчения — возможно, дело в самом фото):\n{err[:400]}')
                     # Выходной фильтр: видео сгенерировалось, но Google его убил — обычно из-за реального человека в кадре
                     if resp.status == 400 and ('request blocked' in err_low or 'filtered out' in err_low or 'harmful content' in err_low):

@@ -88,11 +88,13 @@ MODEL_TO_REAL: dict = {
 }
 
 VEO_MODELS: dict = {
+    # Fallback only — refresh_models() replaces all veo*/omni* keys with the
+    # live list. Keep these pointed at models that still exist.
     'veo2': ('Veo 3.1', 'veo-3.1-generate-preview'),
     'veo1': ('Veo 3.1 Fast', 'veo-3.1-fast-generate-preview'),
     'veo3': ('Veo 3.1 Lite', 'veo-3.1-lite-generate-preview'),
+    'omni1': ('Omni Flash 1.1', 'gemini-omni-1.1-flash'),
     'omni0': ('Omni Flash (preview)', 'gemini-omni-flash-preview'),
-    'veo0': ('Veo 2 (deprecated)', 'veo-2.0-generate-001'),
 }
 
 VIDEO_COOLDOWN = 20
@@ -147,6 +149,11 @@ async def refresh_models():
     from services.audio_service import fetch_gemini_tts_models
     veo_models = await fetch_veo_models()
     if veo_models:
+        # The live list is authoritative: drop the hardcoded fallback entries
+        # first, otherwise they survive alongside the fetched ones as stale
+        # duplicates (that is how "Veo 3.1 Lite" ended up listed twice).
+        for key in [k for k in VEO_MODELS if k.startswith(('veo', 'omni'))]:
+            del VEO_MODELS[key]
         for (i, (label, model_id)) in enumerate(veo_models):
             VEO_MODELS[f'veo{i}'] = (label, model_id)
     tts_models = await fetch_gemini_tts_models()
