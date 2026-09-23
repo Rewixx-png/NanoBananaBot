@@ -177,6 +177,21 @@ async def load_firecrawl_keys():
     return list(dict.fromkeys([*ordered, *_env_keys('FIRECRAWL_API_KEY', 'FIRECRAWL_KEYS')]))
 
 
+async def load_suno_keys():
+    """Live Suno (sunoapi.org) keys, richest wallet first.
+
+    One V6 generation costs ~12 credits, so ordering by balance matters: most
+    scraped keys hold 2-10 credits and can only serve as a fallback.
+    """
+    rows = await _live_rows('Suno')
+
+    def _credits(info: str) -> float:
+        m = re.search(r'([\d.]+)\s*credits', info)
+        return float(m.group(1)) if m else 0.0
+
+    return [key for key, _ in sorted(rows, key=lambda row: _credits(row[1]), reverse=True)]
+
+
 async def _retire_in_db(key: str) -> None:
     """Flip is_live=0 so the pool stops handing out a key that came back 401/402."""
     if not os.path.exists(KEYHUNTER_DB):

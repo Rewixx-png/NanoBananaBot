@@ -110,6 +110,7 @@ from handlers.text_inputs import (
     handle_pending_file_task,
     handle_nsfw_input,
     handle_tts_input,
+    handle_suno_input,
 )
 
 from database import (
@@ -390,6 +391,8 @@ async def handle_text_messages(message: types.Message, state: FSMContext):
     if await handle_nsfw_input(message, reply_kwargs):
         return
     if await handle_tts_input(message, reply_kwargs):
+        return
+    if await handle_suno_input(message, reply_kwargs):
         return
     asyncio.create_task(_maybe_send_random_chat_media(message))
     bot_user = await message.bot.get_me()

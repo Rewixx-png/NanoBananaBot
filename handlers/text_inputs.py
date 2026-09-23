@@ -12,13 +12,17 @@ from handlers.common import (
     _nsfw_cfg_keyboard,
     _tts_cfg_text,
     _tts_cfg_keyboard,
+    _suno_cfg_text,
+    _suno_cfg_keyboard,
 )
 from handlers.media_gen import _nsfw_awaiting_input
 from handlers.media_tts import _tts_awaiting_input
+from handlers.music import _suno_awaiting_input
 from state import (
     pending_file_tasks,
     pending_nsfw_configs,
     pending_tts_configs,
+    pending_suno_configs,
 )
 
 
@@ -72,6 +76,43 @@ async def handle_nsfw_input(message: types.Message, reply_kwargs: dict) -> bool:
                 chat_id=d['chat_id'],
                 text=_nsfw_cfg_text(request_id),
                 reply_markup=_nsfw_cfg_keyboard(request_id),
+            )
+    return True
+
+
+async def handle_suno_input(message: types.Message, reply_kwargs: dict) -> bool:  # noqa: ARG001
+    """Consume Suno config field input. Returns True if consumed."""
+    _suno_key = (message.chat.id, message.from_user.id)
+    if _suno_key not in _suno_awaiting_input:
+        return False
+    wait = _suno_awaiting_input.pop(_suno_key)
+    request_id: str = wait['request_id']
+    field: str = wait['field']
+    msg_id: int = wait['msg_id']
+    d = pending_suno_configs.get(request_id)
+    if d:
+        new_val = message.text.strip()
+        if field == 'title':
+            new_val = new_val[:80]
+        d['cfg'][field] = new_val
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=msg_id,
+                text=_suno_cfg_text(request_id),
+                reply_markup=_suno_cfg_keyboard(request_id),
+                parse_mode='HTML',
+            )
+        except Exception:
+            await message.bot.send_message(
+                chat_id=d['chat_id'],
+                text=_suno_cfg_text(request_id),
+                reply_markup=_suno_cfg_keyboard(request_id),
+                parse_mode='HTML',
             )
     return True
 

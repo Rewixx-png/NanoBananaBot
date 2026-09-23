@@ -1623,6 +1623,53 @@ class UxContractsTest(unittest.TestCase):
 
         self.assertEqual(asyncio.run(run()), [])
 
+    def test_suno_payload_drops_vocal_only_fields_for_instrumentals(self):
+        """The API rejects lyrics/vocalGender/audioWeight when instrumental=true."""
+        from services.suno_service import build_payload
+
+        cfg = {'style': 'jazz', 'lyrics': 'la la', 'title': 'T', 'neg': 'metal',
+               'instrumental': '1', 'vocal': 'm', 'style_weight': 0.8,
+               'weirdness': 0.4, 'audio_weight': 0.3, 'variety': 2, 'duration': 90}
+        payload = build_payload('ignored', 'V6', cfg)
+
+        self.assertTrue(payload['instrumental'])
+        self.assertNotIn('lyrics', payload)
+        self.assertNotIn('vocalGender', payload)
+        self.assertNotIn('audioWeight', payload)
+        self.assertEqual(payload['style'], 'jazz')
+        self.assertEqual(payload['duration'], 90)
+
+    def test_suno_payload_falls_back_to_the_idea_and_never_sends_empty_custom_mode(self):
+        """Custom mode needs style/lyrics/negativeTags; the /music idea becomes the style."""
+        from services.suno_service import build_payload
+
+        payload = build_payload('dark techno', 'V6', {})
+        self.assertEqual(payload['style'], 'dark techno')
+
+        for empty in ({}, {'style': '', 'lyrics': '', 'neg': '', 'title': ''}):
+            filled = build_payload('', 'V6', empty)
+            self.assertTrue(filled.get('style') or filled.get('lyrics') or filled.get('negativeTags'))
+
+    def test_suno_payload_keeps_vocal_fields_when_singing(self):
+        from services.suno_service import build_payload
+
+        cfg = {'style': 'rap', 'lyrics': '[Verse] x', 'instrumental': '0',
+               'vocal': 'f', 'audio_weight': 0.5, 'duration': 60}
+        payload = build_payload('', 'V6_MINI', cfg)
+
+        self.assertFalse(payload['instrumental'])
+        self.assertEqual(payload['lyrics'], '[Verse] x')
+        self.assertEqual(payload['vocalGender'], 'f')
+        self.assertEqual(payload['audioWeight'], 0.5)
+
+    def test_suno_rejects_unknown_model_without_touching_the_network(self):
+        from services.suno_service import generate_suno
+
+        tracks, error = asyncio.run(generate_suno('x', model_key='suno-v9', cfg={}))
+
+        self.assertIsNone(tracks)
+        self.assertIn('suno-v9', error or '')
+
     def test_generate_music_does_not_preflight_generic_keys(self):
         from services.music_service import generate_music
         import base64

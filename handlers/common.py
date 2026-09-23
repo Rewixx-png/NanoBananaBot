@@ -10,6 +10,7 @@ import sys
 import logging
 import random
 import secrets
+from html import escape
 from html.parser import HTMLParser
 from typing import Any
 
@@ -25,6 +26,7 @@ from state import (
     pending_nsfw_configs,
     chat_members_cache,
     pending_tts_configs,
+    pending_suno_configs,
     generated_draw_messages,
     generated_code_messages,
 )
@@ -164,6 +166,38 @@ _TTS_KEYBOARD_LAYOUT = (
     ('header',   False, '— Голос —'),
     ('chunked',  False, ('voice', TTS_VOICES, 3)),
     ('preview',  False, '🔊 Прослушать голос'),
+    ('generate', False, '🚀 Генерировать'),
+)
+
+_SUNO_CFG_DEFAULTS: dict[str, Any] = {
+    'style': '', 'lyrics': '', 'title': '', 'neg': '',
+    'instrumental': '0', 'vocal': '', 'style_weight': 0.65,
+    'weirdness': 0.25, 'audio_weight': 0.5, 'variety': 1, 'duration': 60,
+}
+
+_SUNO_STYLE_WEIGHTS = [0.0, 0.25, 0.5, 0.65, 0.8, 1.0]
+_SUNO_WEIRDNESS = [0.0, 0.25, 0.5, 0.65, 1.0]
+_SUNO_AUDIO_WEIGHTS = [0.0, 0.25, 0.5, 0.65, 1.0]
+_SUNO_VARIETY = [('0 точно', 0), ('1 норма', 1), ('2 разно', 2), ('3 смело', 3), ('4 макс', 4)]
+_SUNO_DURATIONS = [30, 60, 90, 120, 180, 240, 360]
+_SUNO_VOCAL = [('— любой', ''), ('👨 муж', 'm'), ('👩 жен', 'f')]
+
+_SUNO_KEYBOARD_LAYOUT = (
+    ('actions',  False, (('✏️ Стиль', 'style'), ('📝 Текст песни', 'lyrics'))),
+    ('actions',  False, (('🏷 Название', 'title'), ('🚫 Исключить', 'neg'))),
+    ('header',   False, '— Вокал —'),
+    ('options',  False, ('instrumental', (('🎹 Инструментал', '1'), ('🎤 С вокалом', '0')))),
+    ('options',  False, ('vocal', _SUNO_VOCAL)),
+    ('header',   False, '— Точность стиля (styleWeight) —'),
+    ('options',  False, ('style_weight', _SUNO_STYLE_WEIGHTS)),
+    ('header',   False, '— Креатив (weirdness) —'),
+    ('options',  False, ('weirdness', _SUNO_WEIRDNESS)),
+    ('header',   False, '— Вес аудио (audioWeight) —'),
+    ('options',  False, ('audio_weight', _SUNO_AUDIO_WEIGHTS)),
+    ('header',   False, '— Разнообразие —'),
+    ('chunked',  False, ('variety', _SUNO_VARIETY, 3)),
+    ('header',   False, '— Длительность, сек —'),
+    ('chunked',  False, ('duration', _SUNO_DURATIONS, 4)),
     ('generate', False, '🚀 Генерировать'),
 )
 
@@ -810,6 +844,11 @@ def _cfg_keyboard(request_id: str, pending_dict: dict, layout: tuple, defaults: 
             InlineKeyboardButton(text='← Назад', callback_data=f'nsfwback:{request_id}'),
             InlineKeyboardButton(text='Отмена', callback_data=f'imgcancel:{request_id}'),
         ])
+    elif prefix == 'suno':
+        rows.append([
+            InlineKeyboardButton(text='← Назад', callback_data=f'sunoback:{request_id}'),
+            InlineKeyboardButton(text='Отмена', callback_data=f'sunocancel:{request_id}'),
+        ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
@@ -819,6 +858,45 @@ def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
 
 def _tts_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
     return _cfg_keyboard(request_id, pending_tts_configs, _TTS_KEYBOARD_LAYOUT, _TTS_CFG_DEFAULTS, 'tts')
+
+def _suno_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    return _cfg_keyboard(request_id, pending_suno_configs, _SUNO_KEYBOARD_LAYOUT, _SUNO_CFG_DEFAULTS, 'suno')
+
+def _suno_cfg_text(request_id: str) -> str:
+    d = pending_suno_configs.get(request_id, {})
+    cfg = d.get('cfg', {})
+    prompt = d.get('prompt', '')[:120]
+    style = (cfg.get('style') or '').strip()
+    lyrics = (cfg.get('lyrics') or '').strip()
+    instrumental = str(cfg.get('instrumental', '0')) == '1'
+    vocal = {'m': 'мужской', 'f': 'женский'}.get(cfg.get('vocal'), 'любой')
+
+    def _cut(text, limit=90):
+        text = text.replace('\n', ' / ')
+        return text if len(text) <= limit else text[:limit - 3] + '...'
+
+    lines = [
+        f"🎼 <b>{escape(str(d.get('label', 'Suno')))}</b>",
+        '',
+        f"💡 <b>Идея:</b> {escape(prompt)}",
+        f"✏️ <b>Стиль:</b> {escape(_cut(style)) if style else '<i>берётся из идеи</i>'}",
+    ]
+    if instrumental:
+        lines.append('🎹 <b>Инструментал:</b> без вокала')
+    else:
+        lines.append(f"📝 <b>Текст:</b> {escape(_cut(lyrics)) if lyrics else '<i>Suno придумает сам</i>'}")
+        lines.append(f"🎤 <b>Голос:</b> {vocal}")
+    if cfg.get('title'):
+        lines.append(f"🏷 <b>Название:</b> {escape(str(cfg['title']))}")
+    if cfg.get('neg'):
+        lines.append(f"🚫 <b>Исключить:</b> {escape(_cut(str(cfg['neg'])))}")
+    lines.append(
+        f"⚖️ styleWeight {cfg.get('style_weight', 0.65)} · "
+        f"creativity {cfg.get('weirdness', 0.25)} · "
+        f"audio {cfg.get('audio_weight', 0.5)}"
+    )
+    lines.append(f"🎲 разнообразие {cfg.get('variety', 1)} · ⏱ {cfg.get('duration', 60)}с")
+    return '\n'.join(lines)
 
 def _prompt_ai_keyboard(request_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Использовать этот промт', callback_data=f'puse:{request_id}')], [InlineKeyboardButton(text='🔄 Другой вариант', callback_data=f'pother:{request_id}'), InlineKeyboardButton(text='📝 Мой промт', callback_data=f'pbase:{request_id}')], [InlineKeyboardButton(text='Отмена', callback_data=f'imgcancel:{request_id}')]])
