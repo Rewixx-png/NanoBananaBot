@@ -1592,14 +1592,14 @@ class UxContractsTest(unittest.TestCase):
                 )
                 await db.commit()
                 await db.close()
-                with patch.object(manager, "REWTEST_DB", path), patch.object(manager, "load_api_config", return_value={"gemini": []}):
+                with patch.object(manager, "KEYHUNTER_DB", path):
                     return await manager.load_keys()
             finally:
                 os.remove(path)
 
         self.assertEqual(asyncio.run(run()), ["paid-key"])
 
-    def test_load_keys_uses_config_when_rewtest_has_no_usable_gemini_keys(self):
+    def test_load_keys_returns_nothing_when_keyhunter_has_no_live_gemini_keys(self):
         import aiosqlite
         import keys.manager as manager
 
@@ -1611,15 +1611,17 @@ class UxContractsTest(unittest.TestCase):
                 db = await aiosqlite.connect(path)
                 await db.executescript(
                     "CREATE TABLE keys (key TEXT, service TEXT, is_live INTEGER, info TEXT);"
+                    "CREATE TABLE premium_keys (key TEXT, service TEXT, status TEXT, deep_check TEXT, last_validated_at TEXT);"
+                    "INSERT INTO keys VALUES ('dead-key', 'Gemini', 0, 'dead');"
                 )
                 await db.commit()
                 await db.close()
-                with patch.object(manager, "REWTEST_DB", path), patch.object(manager, "load_api_config", return_value={"gemini": ["config-key"]}):
+                with patch.object(manager, "KEYHUNTER_DB", path):
                     return await manager.load_keys()
             finally:
                 os.remove(path)
 
-        self.assertEqual(asyncio.run(run()), ["config-key"])
+        self.assertEqual(asyncio.run(run()), [])
 
     def test_generate_music_does_not_preflight_generic_keys(self):
         from services.music_service import generate_music
@@ -1680,7 +1682,7 @@ class UxContractsTest(unittest.TestCase):
 
         with (
             patch("keys.load_keys", new=AsyncMock(return_value=["bad-key", "good-key"])),
-            patch("keys.remove_key", new=lambda *_: None),
+            patch("keys.remove_key", new=AsyncMock()),
             patch("aiohttp.ClientSession", return_value=FakeSession()),
         ):
             data, key, err = asyncio.run(gemini_post("models/test:generateContent", {}))
@@ -1712,7 +1714,7 @@ class UxContractsTest(unittest.TestCase):
         removed = []
         with (
             patch("keys.load_keys", new=AsyncMock(return_value=["paid-key"])),
-            patch("keys.remove_key", new=lambda *args: removed.append(args)),
+            patch("keys.remove_key", new=AsyncMock(side_effect=lambda *args: removed.append(args))),
             patch("aiohttp.ClientSession", return_value=FakeSession()),
         ):
             data, key, err = asyncio.run(gemini_post("models/lyria-3-pro-preview:generateContent", {}))

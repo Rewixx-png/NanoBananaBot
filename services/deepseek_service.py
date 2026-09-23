@@ -9,8 +9,6 @@ from typing import Optional
 
 import aiohttp
 
-from keys.manager import load_api_config
-
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_BASE = "https://api.deepseek.com/v1"
@@ -19,64 +17,51 @@ _COOLDOWN = 30.0
 
 
 async def load_deepseek_keys() -> list[str]:
-    """Load DeepSeek API keys from keyhunter.db, sorted by balance (highest first).
-    Falls back to r.txt config + DEEPSEEK_API_KEY env if DB unavailable."""
+    """Load DeepSeek API keys from the KeyHunter DB, highest balance first."""
     import aiosqlite, re, os as _os
-    from keys.manager import REWTEST_DB
+    from config import KEYHUNTER_DB
     now = time.time()
     keys = []
 
-    # Primary: keyhunter.db with balance parsing
-    try:
-        async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
-            async with db.execute(
-                "SELECT key, info FROM keys WHERE service='DeepSeek' AND is_live=1"
-            ) as cur:
-                rows = await cur.fetchall()
-        for key, info in rows:
-            if key in _dead_until and now < _dead_until[key]:
-                continue
-            # Parse balance: currency code + number (e.g. "USD 5.70", "CNY 53.97")
-            m = re.search(r'(USD|CNY)\s*(-?[\d.]+)', info or '')
-            if not m:
-                continue
-            currency, balance_str = m.group(1), m.group(2)
-            try:
-                balance = float(balance_str)
-            except ValueError:
-                continue  # skip inf/nan/non-numeric
-            # Skip keys with low/no balance (minimum $0.50 USD)
-            if 'no balance' in (info or '').lower() or balance <= 0:
-                continue
-            # Normalize: CNY → USD (approximate rate 7.2)
-            balance_usd = balance if currency == 'USD' else balance / 7.2
-            if balance_usd < 0.50:
-                continue
-            keys.append((balance_usd, key))
-    except Exception as e:
-        logger.warning(f"DeepSeek keyhunter read failed: {e}")
+    if not _os.path.exists(KEYHUNTER_DB):
+        logger.error("KeyHunter DB not found at %s — no DeepSeek keys available", KEYHUNTER_DB)
+        return []
+
+    async with aiosqlite.connect(KEYHUNTER_DB, timeout=3) as db:
+        async with db.execute(
+            "SELECT key, info FROM keys WHERE service='DeepSeek' AND is_live=1"
+        ) as cur:
+            rows = await cur.fetchall()
+    for key, info in rows:
+        if key in _dead_until and now < _dead_until[key]:
+            continue
+        # Parse balance: currency code + number (e.g. "USD 5.70", "CNY 53.97")
+        m = re.search(r'(USD|CNY)\s*(-?[\d.]+)', info or '')
+        if not m:
+            continue
+        currency, balance_str = m.group(1), m.group(2)
+        try:
+            balance = float(balance_str)
+        except ValueError:
+            continue  # skip inf/nan/non-numeric
+        # Skip keys with low/no balance (minimum $0.50 USD)
+        if 'no balance' in (info or '').lower() or balance <= 0:
+            continue
+        # Normalize: CNY → USD (approximate rate 7.2)
+        balance_usd = balance if currency == 'USD' else balance / 7.2
+        if balance_usd < 0.50:
+            continue
+        keys.append((balance_usd, key))
 
     if keys:
         keys.sort(key=lambda x: x[0], reverse=True)
         logger.info(f"DeepSeek: loaded {len(keys)} keys from keyhunter (top balance: ${keys[0][0]:.2f})")
         return [k for _, k in keys]
 
-    # Fallback: r.txt config + env
     env_key = _os.getenv("DEEPSEEK_API_KEY", "").strip()
-    if env_key:
-        keys_fallback = [env_key]
-    else:
-        keys_fallback = []
-    try:
-        config = load_api_config()
-        cfg_keys = config.get("deepseek", [])
-        if isinstance(cfg_keys, list):
-            keys_fallback.extend(cfg_keys)
-        elif isinstance(cfg_keys, str) and cfg_keys.strip():
-            keys_fallback.append(cfg_keys.strip())
-    except Exception as e:
-        logger.debug(f"deepseek keys from r.txt skipped: {e}")
-    return [k for k in keys_fallback if k not in _dead_until or now >= _dead_until[k]]
+    if env_key and (env_key not in _dead_until or now >= _dead_until[env_key]):
+        return [env_key]
+    return []
 
 def _mark_dead(key: str):
     _dead_until[key] = time.time() + _COOLDOWN

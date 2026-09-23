@@ -1,6 +1,6 @@
 """NVIDIA Vision service — image/video analysis via Llama 3.2 90B Vision Instruct.
 
-Free tier via NVIDIA NIM API. Keys from RewTest keyhunter,
+Free tier via NVIDIA NIM API. Keys from the KeyHunter pool,
 validated on every TTL cycle. Only verified working keys are used.
 
 Public API:
@@ -39,9 +39,9 @@ async def _get_validated_keys() -> list[str]:
         return _validated_keys
 
     import aiosqlite
-    from keys.manager import REWTEST_DB
+    from config import KEYHUNTER_DB
     try:
-        async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
+        async with aiosqlite.connect(KEYHUNTER_DB, timeout=3) as db:
             async with db.execute(
                 "SELECT key FROM keys WHERE service='Nvidia' AND is_live=1"
             ) as cur:

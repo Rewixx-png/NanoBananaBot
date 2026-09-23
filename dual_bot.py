@@ -6,7 +6,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Message
 from aiogram.exceptions import TelegramRetryAfter
-from config import BOT_TOKEN_2, DUAL_HISTORY_SIZE, BANNED_USER_IDS, TELEGRAM_API_URL
+from config import BOT_TOKEN_2, DUAL_HISTORY_SIZE, BANNED_USER_IDS, TELEGRAM_API_URL, TELEGRAM_API_IS_LOCAL
 from keys import load_firecrawl_keys, remove_key
 from state import dual_histories, dual_tasks
 from aiogram.client.telegram import TelegramAPIServer
@@ -15,7 +15,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 
 logger = logging.getLogger(__name__)
 
-session2 = AiohttpSession(api=TelegramAPIServer.from_base(TELEGRAM_API_URL, is_local=True))
+session2 = AiohttpSession(api=TelegramAPIServer.from_base(TELEGRAM_API_URL, is_local=TELEGRAM_API_IS_LOCAL))
 bot2 = Bot(token=BOT_TOKEN_2, session=session2) if BOT_TOKEN_2 else None
 dp2 = Dispatcher()
 router2 = Router()
@@ -144,7 +144,7 @@ async def _search_web(query: str) -> str:
                                 parts.append(f"{title}:\n{snippet}")
                         return "\n\n".join(parts)
                     if resp.status in (401, 402):
-                        remove_key(key)
+                        await remove_key(key)
                         continue
                     if resp.status in (408, 429, 500, 502, 503, 504):
                         logger.warning(f"Firecrawl transient HTTP {resp.status}; key kept alive")

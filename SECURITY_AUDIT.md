@@ -50,6 +50,8 @@ The ARCHITECTURE_REPORT.md contains **several critical inaccuracies** due to cod
 **Verdict: FALSE — VULNERABILITY DOES NOT EXIST in current code.** The report described an older version. Current code uses pure Python string matching with input validation.
 
 ### C4 — Plaintext API Keys (CRITICAL)
+> **RESOLVED (2026-09-23).** The key file is gone: `r.txt`, `r.txt.enc` and `keys/crypto.py` were deleted, and every loader now reads live keys from the KeyHunter SQLite DB (`KEYHUNTER_DB`). Nothing below applies to the current code — kept as the record of what was found.
+
 | Aspect | Report Claim | Actual Code | Verdict |
 |--------|-------------|-------------|---------|
 | Keys in `r.txt` plaintext | Yes | `keys/manager.py:51-64` loads from `r.txt` or `r.txt.enc` with plaintext fallback | **CONFIRMED** |

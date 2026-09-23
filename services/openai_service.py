@@ -124,10 +124,10 @@ async def generate_image_with_gpt(
                                 pass
                     elif '(429)' in error:
                         logging.warning(f'Rate limit (429) на ключе {api_key[:12]}..., кулдаун 65с.')
-                        remove_key(api_key, 429)
+                        await remove_key(api_key, 429)
                     elif 'billing' in lowered_err or 'quota' in lowered_err or 'hard limit' in lowered_err or '(401)' in error or 'unauthorized' in lowered_err or 'not active' in lowered_err:
                         logging.warning(f'Удаляю нерабочий OpenAI ключ {api_key[:12]}... Ошибка: {error}')
-                        remove_key(api_key)
+                        await remove_key(api_key)
                     else:
                         logging.warning(f'Временная ошибка OpenAI на ключе {api_key[:12]}...: {error}')
                 continue

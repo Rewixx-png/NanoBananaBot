@@ -217,9 +217,11 @@ async def main():
         from dual_bot import bot2, dp2, router2, set_bot1_ref, init_bot2
         from aiogram.client.telegram import TelegramAPIServer
         from aiogram.client.session.aiohttp import AiohttpSession
-        from config import TELEGRAM_API_URL
+        from config import TELEGRAM_API_URL, TELEGRAM_API_IS_LOCAL
 
-        session = AiohttpSession(api=TelegramAPIServer.from_base(TELEGRAM_API_URL, is_local=True))
+        session = AiohttpSession(
+            api=TelegramAPIServer.from_base(TELEGRAM_API_URL, is_local=TELEGRAM_API_IS_LOCAL)
+        )
         bot_instance = Bot(token=BOT_TOKEN, session=session)
         from aiogram.fsm.storage.memory import MemoryStorage
         dp_instance = Dispatcher(storage=MemoryStorage())

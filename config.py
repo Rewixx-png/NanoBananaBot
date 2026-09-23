@@ -6,11 +6,12 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 BOT_TOKEN_2 = os.getenv("BOT_TOKEN_2", "")
 TELEGRAM_API_URL = os.getenv("TELEGRAM_API_URL", "http://telegram-bot-api:8081")
+# Local Bot API server (docker sidecar) speaks local mode; api.telegram.org does not.
+TELEGRAM_API_IS_LOCAL = os.getenv("TELEGRAM_API_IS_LOCAL", "1") != "0"
 DUAL_HISTORY_SIZE = 100
 CHAT_ID = -1002033901364
 TEXT_ONLY_CHAT_ID = -1002017590469
 FULL_ACCESS_CHAT_ID = -1002830734467
-API_KEYS_FILE = os.getenv('API_KEYS_FILE', '/root/Projects/NanoHatani/r.txt')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 ALLOWED_USER_IDS = {1358471738, 7622722099, 8421975646}
 BANNED_USER_IDS = {8377231659}
@@ -121,7 +122,7 @@ NANO_KEY_SYNC_INTERVAL = 300
 DB_PATH = os.getenv('DB_PATH', 'bot_data.db')
 DB_BUSY_TIMEOUT_MS = 5_000
 PROMPT_LOG_RETENTION_DAYS = 30
-KEYHUNTER_DB = os.getenv('KEYHUNTER_DB', '/root/RewTest/keyhunter.db')
+KEYHUNTER_DB = os.getenv('KEYHUNTER_DB', '/root/keyhunter/keyhunter.db')
 NANO_KEYS_DB = os.getenv('NANO_KEYS_DB', '/root/Projects/NanoHatani/nano_keys.db')
 GEMINI_KEY_COOLDOWN_429 = 65.0
 GEMINI_KEY_COOLDOWN_403 = 300.0

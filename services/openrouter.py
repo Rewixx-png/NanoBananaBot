@@ -83,7 +83,7 @@ async def openrouter_chat(
                 body = await response.text()
                 last_error = f"HTTP {response.status}: {body[:500]}"
                 if response.status in (401, 402, 403, 429):
-                    remove_key(api_key, response.status)
+                    await remove_key(api_key, response.status)
                 if response.status in (429, 500, 502, 503, 504) or "cooling down" in body.lower() or "reset after" in body.lower() or "empty content" in body.lower():
                     await asyncio.sleep(3)
                     continue
@@ -152,7 +152,7 @@ async def generate_image_with_openrouter(
     """Generate an image via OpenRouter API (multi-provider proxy with unified chat-completions interface)."""
     api_keys = await load_openrouter_keys()
     if not api_keys:
-        return (None, 'Нет ключей OpenRouter. Добавьте sk-or-... ключи в r.txt.')
+        return (None, 'Нет живых ключей OpenRouter в KeyHunter.')
     prompt_text = prompt if prompt else 'A highly detailed beautiful picture'
     url = f'{OPENROUTER_BASE_URL}/chat/completions'
     modalities = ['image'] if 'flux' in model or 'seedream' in model or 'riverflow' in model else ['image', 'text']
@@ -205,7 +205,7 @@ async def generate_image_with_openrouter(
                 last_error = f'Ошибка OpenRouter ({resp.status}): {err_text[:200]}'
                 if resp.status in [401, 403]:
                     logging.warning(f'OpenRouter {resp.status} на ключе {api_key[:12]}..., пробую следующий.')
-                    remove_key(api_key, resp.status)
+                    await remove_key(api_key, resp.status)
                     continue
         except asyncio.TimeoutError:
             last_error = 'Таймаут OpenRouter'

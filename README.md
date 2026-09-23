@@ -193,20 +193,15 @@ FIGMA_TOKEN=figd_ваш_figma_personal_access_token
 FIRECRAWL_API_KEY=fc_ваш_ключ
 ```
 
-### API-ключи (`r.txt`)
+### API-ключи (KeyHunter DB)
 
-```json
-{
-  "gemini":    ["AIza...ключ1", "AIza...ключ2"],
-  "openai":    "sk-proj-...",
-  "firecrawl": ["fc-...ключ1", "fc-...ключ2"],
-  "nvidia":    ["nvapi-..."],
-  "openrouter":["sk-or-..."],
-  "replicate": ["r8_..."]
-}
+Все ключи провайдеров (Gemini, OpenAI, Nvidia, OpenRouter, Replicate, Groq, DeepSeek, ElevenLabs, Firecrawl и остальные) читаются на лету из SQLite-базы KeyHunter — таблица `keys`, строки с `is_live=1`. Никакого файла ключей нет: сначала поднимается keyhunter, потом указывается путь к его базе.
+
+```env
+KEYHUNTER_DB=/root/keyhunter/keyhunter.db
 ```
 
-Ключи ротируются автоматически. При 429 — ключ в кулдауне 65 сек; при 403 — 300 сек; при 401/402 — удаляется из файла. Дополнительный источник: `/root/RewTest/keyhunter.db` (если есть).
+Ключи ротируются автоматически. При 429 — ключ в кулдауне 65 сек; при 403 — 300 сек; при 401/402/400 — помечается мёртвым (`is_live=0`) в базе KeyHunter, чтобы не возвращался. Если базы нет по указанному пути, в лог уходит ошибка с путём и ни один ключ не выдаётся — правится одной переменной `KEYHUNTER_DB`.
 
 ### Запуск
 
@@ -269,7 +264,7 @@ services/        — AI-сервисы: Gemini/GPT/NVIDIA/Replicate/Veo/TTS/Fire
 agent/           — ReAct-агент и инструменты изолированного workspace
 state.py         — in-memory state: cooldown, pending requests, context buffers
 database/        — aiosqlite: миграции, история, статистика, лимиты и промпты
-keys/            — ротация ключей из r.txt, nano_keys.db и keyhunter.db
+keys/            — ротация ключей из базы KeyHunter и nano_keys.db
 dual_bot.py      — второй бот (Банан/Нано), дуэльный AI-диалог
 figma_bridge.py  — HTTP-сервер на порту 7432 для Figma Plugin
 ```

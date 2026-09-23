@@ -218,11 +218,11 @@ async def generate_video_with_omni(
     Supports: text-to-video, image-to-video, video-to-video (edit up to 10s).
     """
     import aiosqlite
-    from keys.manager import REWTEST_DB
+    from config import KEYHUNTER_DB
     # Load keys with their referrer info from Keyhunter
     keys_with_ref = []
     try:
-        async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
+        async with aiosqlite.connect(KEYHUNTER_DB, timeout=3) as db:
             async with db.execute(
                 "SELECT key, info FROM keys WHERE service='Gemini' AND is_live=1 AND info LIKE '%PAID%'"
             ) as cur:
@@ -351,12 +351,12 @@ async def generate_video_with_omni(
                     # 429/403 = ключ мёртв или в лимите → следующий
                     if resp.status in (429, 403):
                         from keys import remove_key
-                        remove_key(key, resp.status)
+                        await remove_key(key, resp.status)
                         key_errors.append(f'ключ {idx+1}: HTTP {resp.status}: {err[:150]}')
                         if resp.status == 403 and 'leaked' in err.lower():
                             # Слитый ключ мёртв навсегда — выключаем в keyhunter, чтобы не возвращался
                             try:
-                                async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
+                                async with aiosqlite.connect(KEYHUNTER_DB, timeout=3) as db:
                                     await db.execute("UPDATE keys SET is_live=0, info=info||' ❌ LEAKED' WHERE key=? AND is_live=1", (key,))
                                     await db.commit()
                             except Exception as e:
@@ -383,7 +383,7 @@ async def generate_video_with_omni(
                         return (None, 'Omni Flash: видео сгенерировалось, но Google отфильтровал результат — это не твой промпт. Причина почти всегда: на видео реальный человек, а редактура людей ограничена политикой Google (особенно если лицо выглядит молодо). Попробуй: другое видео, сцену без людей, или нейтральную правку (стиль, свет, фон).')
                     if resp.status == 400 and '"API_KEY_INVALID"' in err:
                         from keys import remove_key
-                        remove_key(key, resp.status)
+                        await remove_key(key, resp.status)
                         key_errors.append(f'ключ {idx+1}: API_KEY_INVALID для Omni, пробую следующий')
                         continue
                     # Прочие 4xx — зависят от запроса, а не от ключа

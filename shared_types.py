@@ -155,7 +155,7 @@ async def gemini_post(path: str, payload: dict, timeout: float = 60.0, max_keys:
                         return (await resp.json(), key, None)
                     text = await resp.text()
                     if resp.status in (429, 403, 402):
-                        remove_key(key, resp.status)
+                        await remove_key(key, resp.status)
                         last_err = f'HTTP {resp.status}'
                         break
                     if resp.status == 400:

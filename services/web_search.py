@@ -249,7 +249,7 @@ async def _plan_firecrawl_queries(user_request: str, seed_query: str) -> list[st
                                 return planned
                         elif resp.status in [429, 403]:
                             dead_keys.add(key)
-                            remove_key(key, resp.status)
+                            await remove_key(key, resp.status)
                         else:
                             body = await resp.text()
                             logging.warning(f'Firecrawl query planner [{model_name}] HTTP {resp.status}: {body[:200]}')
@@ -287,7 +287,7 @@ async def _firecrawl_scrape_url(url: str, keys: list[str]) -> str:
                         d = data.get('data') or data
                         return (d.get('markdown') or d.get('content') or '').strip()
                     if resp.status in _FIRECRAWL_DEAD_KEY_STATUSES:
-                        remove_key(key, resp.status)
+                        await remove_key(key, resp.status)
                         continue
                     if resp.status in _FIRECRAWL_TRANSIENT_STATUSES:
                         logging.warning(f'Firecrawl scrape transient HTTP {resp.status} for {url}; key kept alive')
@@ -362,7 +362,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
                                 return [q for q in _dedupe_texts(refined) if q.casefold() not in {a.casefold() for a in attempted}][:8]
                             if resp.status in [429, 403]:
                                 dead_keys2.add(key)
-                                remove_key(key, resp.status)
+                                await remove_key(key, resp.status)
                 except Exception as e:
                     logging.warning(f'Firecrawl query refiner [{model_name}] failed: {type(e).__name__}: {e}')
         return []
@@ -404,7 +404,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
                                     raw_results = raw_results.get('results', []) or raw_results.get('web', []) or []
                                 break
                             if resp.status in _FIRECRAWL_DEAD_KEY_STATUSES:
-                                remove_key(key, resp.status)
+                                await remove_key(key, resp.status)
                                 continue
                 except Exception as e:
                     logging.warning(f'Firecrawl search error: {type(e).__name__}: {e}')

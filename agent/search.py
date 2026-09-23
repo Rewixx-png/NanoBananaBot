@@ -69,7 +69,7 @@ async def _fc_search(query: str) -> str:
                                 parts.append(f"### {title}\nURL: {url}\n{body}".strip())
                         return "\n\n".join(parts) or "No results."
                     if resp.status in (401, 402):
-                        remove_key(key, resp.status)
+                        await remove_key(key, resp.status)
         except Exception as e:
             logger.warning(f"Firecrawl search {query!r}: {e}")
             last_err = f"{type(e).__name__}: {e}"
@@ -113,7 +113,7 @@ async def _fc_scrape(url: str) -> str:
                         d = (await resp.json()).get("data") or {}
                         return (d.get("markdown") or d.get("content") or "")[:8000]
                     if resp.status in (401, 402):
-                        remove_key(key, resp.status)
+                        await remove_key(key, resp.status)
         except Exception as e:
             logger.warning(f"Firecrawl scrape {url!r}: {e}")
             last_err = f"{type(e).__name__}: {e}"
@@ -169,7 +169,7 @@ async def _search_image_urls(query: str) -> list[str]:
                                     for u in img_pattern.findall(md or ""):
                                         _add(u)
                             elif resp.status in (401, 402):
-                                remove_key(key, resp.status)
+                                await remove_key(key, resp.status)
                                 continue
                             break
                 except Exception as e:

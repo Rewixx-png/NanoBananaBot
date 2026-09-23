@@ -17,6 +17,5 @@ __pycache__/
 .aider*
 media/
 thoughts/
-r.txt
 Dockerfile.sandbox
 models/

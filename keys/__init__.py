@@ -1,8 +1,6 @@
 from keys.manager import (
     strip_code_fences,
     normalize_key_list,
-    load_api_config,
-    save_api_config,
     load_keys,
     load_openai_keys,
     load_nvidia_keys,
@@ -21,7 +19,6 @@ from keys.nano import (
 
 __all__ = [
     'strip_code_fences', 'normalize_key_list',
-    'load_api_config', 'save_api_config',
     'load_keys', 'load_openai_keys',
     'load_nvidia_keys', 'load_openrouter_keys', 'load_replicate_keys',
     'load_groq_keys', 'load_firecrawl_keys', 'remove_key',

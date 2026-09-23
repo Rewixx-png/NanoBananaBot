@@ -138,7 +138,7 @@ async def _tool_generate_image(prompt: str, send_cb: Callable, provider: str = "
 
 async def _tool_list_image_models() -> str:
     """Fetch available image-generation models from OpenAI API."""
-    keys = load_openai_keys()
+    keys = await load_openai_keys()
     if not keys:
         return "OpenAI ключи не настроены."
     try:

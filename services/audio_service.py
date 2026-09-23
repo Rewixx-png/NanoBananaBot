@@ -227,14 +227,14 @@ async def generate_tts_with_gemini(text: str, model: str, voice_name: str, tempe
             candidates = data.get('candidates', [])
             if not candidates:
                 if used_key:
-                    remove_key(used_key, 400)
+                    await remove_key(used_key, 400)
                 last_err = 'Gemini заблокировал текст или вернул пустой ответ.'
                 break
             candidate = candidates[0]
             finish_reason = candidate.get('finishReason', '')
             if finish_reason and finish_reason != 'STOP' and finish_reason != 'MAX_TOKENS':
                 if used_key:
-                    remove_key(used_key, 400)
+                    await remove_key(used_key, 400)
                 last_err = f'Ошибка генерации (Finish Reason: {finish_reason}).'
                 break
             parts = candidate.get('content', {}).get('parts', [])

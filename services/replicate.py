@@ -34,7 +34,7 @@ async def fetch_replicate_image_models() -> list:
     now = time.time()
     if cache_key in _models_cache and now - _models_cache[cache_key]['ts'] < _MODELS_CACHE_TTL:
         return _models_cache[cache_key]['data']
-    keys = load_replicate_keys()
+    keys = await load_replicate_keys()
     if not keys:
         return []
     result = []
@@ -67,7 +67,7 @@ async def generate_image_with_replicate(
     state_data: dict = None,
 ) -> Tuple[Optional[bytes], Optional[str]]:
     """Generate an image via Replicate API (supports FLUX, WAI NSFW, etc.)."""
-    keys = load_replicate_keys()
+    keys = await load_replicate_keys()
     if not keys:
         return (None, 'Нет Replicate ключей.')
     model_cfg = _REPLICATE_MODELS.get(model)
@@ -93,7 +93,7 @@ async def generate_image_with_replicate(
                         err = await resp.text()
                         logging.warning(f'Replicate create {resp.status}: {err[:150]}')
                         if resp.status in (401, 403):
-                            remove_key(key, resp.status)
+                            await remove_key(key, resp.status)
                             continue
                         return (None, f'Replicate error {resp.status}: {err[:200]}')
                     prediction = await resp.json()

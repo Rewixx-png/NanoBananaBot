@@ -20,9 +20,9 @@ async def generate_image_with_nvidia(
     state_data: dict = None,
 ) -> Tuple[Optional[bytes], Optional[str]]:
     """Generate an image via NVIDIA NIM (FLUX models)."""
-    api_keys = load_nvidia_keys()
+    api_keys = await load_nvidia_keys()
     if not api_keys:
-        return (None, 'Нет ключей NVIDIA NIM. Добавьте nvapi-... ключи в r.txt.')
+        return (None, 'Нет живых ключей NVIDIA NIM в KeyHunter.')
     prompt_text = await translate_to_english(prompt) if prompt else 'A highly detailed beautiful picture'
     url = f'https://ai.api.nvidia.com/v1/genai/{model}'
     if 'schnell' in model:
@@ -51,7 +51,7 @@ async def generate_image_with_nvidia(
                     last_error = f'Ошибка NVIDIA NIM ({resp.status}): {resp_text[:300]}'
                     logging.warning(f'NVIDIA NIM {resp.status} на ключе {api_key[:12]}..., пробую следующий.')
                     if resp.status in [401, 403]:
-                        remove_key(api_key, resp.status)
+                        await remove_key(api_key, resp.status)
                     continue
             except asyncio.TimeoutError:
                 return (None, f'Таймаут NVIDIA NIM: модель не ответила за {NVIDIA_TIMEOUT} секунд.')

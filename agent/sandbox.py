@@ -156,7 +156,7 @@ async def _tool_analyze_image(
                         parts = (_cands[0].get("content", {}).get("parts", []) if _cands else [])
                         return " ".join(p.get("text", "") for p in parts).strip() or "Нет ответа."
                     if resp.status in (429, 403):
-                        remove_key(key, resp.status)
+                        await remove_key(key, resp.status)
                         last_err = f"HTTP {resp.status}"
                         continue
         except Exception as e:

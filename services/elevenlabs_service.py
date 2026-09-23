@@ -66,10 +66,10 @@ def _parse_tier(info: str) -> str:
 async def load_elevenlabs_keys() -> list[dict]:
     """Load ElevenLabs API keys from keyhunter.db, ordered by tier priority (best first)."""
     import aiosqlite
-    from keys.manager import REWTEST_DB
+    from config import KEYHUNTER_DB
     now = time.time()
     try:
-        async with aiosqlite.connect(REWTEST_DB, timeout=3) as db:
+        async with aiosqlite.connect(KEYHUNTER_DB, timeout=3) as db:
             async with db.execute(
                 "SELECT key, info FROM keys WHERE service='ElevenLabs' AND is_live=1"
             ) as cur:

@@ -125,7 +125,7 @@ class AgentWorkspace:
         """Run cmd as sandbox user with workspace as working directory."""
         full_cmd = [
             "sudo", "-u", _SANDBOX_USER,
-            "--preserve-env=PATH,HOME,PLAYWRIGHT_BROWSERS_PATH",
+            "--preserve-env=PATH,PLAYWRIGHT_BROWSERS_PATH",
         ] + cmd
 
         proc = await asyncio.create_subprocess_exec(
