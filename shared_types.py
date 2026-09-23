@@ -34,7 +34,7 @@ def _pretty_model_name(model_id: str) -> str:
     name = model_id.replace('-preview', '').replace('-generate', '').replace('-001', '')
     parts = name.split('-')
     _SPECIAL = {'chatgpt': 'ChatGPT'}
-    _UPPER = {'veo', 'gpt', 'dall', 'e'}
+    _UPPER = {'veo', 'gpt', 'dall', 'e', 'tts'}
     _TITLE = {'pro', 'flash', 'lite', 'fast', 'ultra', 'image', 'mini', 'latest'}
     out = []
     for p in parts:

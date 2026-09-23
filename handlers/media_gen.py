@@ -104,8 +104,10 @@ VIDEO_COOLDOWN = 20
 REPLICATE_MENU_LIMIT = 90
 
 TTS_MODELS: dict = {
-    'tts0': ('Gemini 3.5 Flash TTS', 'gemini-3.5-flash-tts'),
-    'tts1': ('Gemini 3.1 Flash TTS', 'gemini-3.1-flash-tts-preview'),
+    # Fallback only — refresh_models() replaces these with whatever the API
+    # advertises. Keep them pointed at models that still exist.
+    'tts0': ('Gemini 3.8 Flash TTS', 'gemini-3.8-flash-tts'),
+    'tts1': ('Gemini 3.8 Flash Lite TTS', 'gemini-3.8-flash-lite-tts'),
 }
 
 

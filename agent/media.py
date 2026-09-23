@@ -377,7 +377,7 @@ async def _tool_search_video(
 
 async def _tool_tts(text: str, voice: str, lang: str, send_cb: Callable) -> str:
     audio, err = await generate_tts_with_gemini(
-        text, model="gemini-3.5-flash-tts",
+        text, model="gemini-3.8-flash-tts",
         voice_name=voice or "Kore", language_code=lang or "ru-RU",
     )
     if err or not audio:
