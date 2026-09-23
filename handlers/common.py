@@ -27,6 +27,7 @@ from state import (
     chat_members_cache,
     pending_tts_configs,
     pending_suno_configs,
+    pending_lyria_configs,
     generated_draw_messages,
     generated_code_messages,
 )
@@ -198,6 +199,24 @@ _SUNO_KEYBOARD_LAYOUT = (
     ('chunked',  False, ('variety', _SUNO_VARIETY, 3)),
     ('header',   False, '— Длительность, сек —'),
     ('chunked',  False, ('duration', _SUNO_DURATIONS, 4)),
+    ('generate', False, '🚀 Генерировать'),
+)
+
+_LYRIA_CFG_DEFAULTS: dict[str, Any] = {
+    'style': '', 'mood': '', 'structure': '', 'instrumental': '0', 'temp': 'normal',
+}
+
+_LYRIA_TEMPS = [('😐 safe', 'safe'), ('🙂 normal', 'normal'), ('🔥 bold', 'bold'), ('🤪 wild', 'wild')]
+
+# Lyria exposes only temperature as a real API option; style/mood/structure
+# are folded into the prompt text (see build_lyria_prompt).
+_LYRIA_KEYBOARD_LAYOUT = (
+    ('actions',  False, (('✏️ Стиль', 'style'), ('🎭 Настроение', 'mood'))),
+    ('actions',  False, (('📝 Структура', 'structure'),)),
+    ('header',   False, '— Вокал —'),
+    ('options',  False, ('instrumental', (('🎹 Инструментал', '1'), ('🎤 С вокалом', '0')))),
+    ('header',   False, '— Креативность (temperature) —'),
+    ('chunked',  False, ('temp', _LYRIA_TEMPS, 2)),
     ('generate', False, '🚀 Генерировать'),
 )
 
@@ -849,6 +868,11 @@ def _cfg_keyboard(request_id: str, pending_dict: dict, layout: tuple, defaults: 
             InlineKeyboardButton(text='← Назад', callback_data=f'sunoback:{request_id}'),
             InlineKeyboardButton(text='Отмена', callback_data=f'sunocancel:{request_id}'),
         ])
+    elif prefix == 'lyria':
+        rows.append([
+            InlineKeyboardButton(text='← Назад', callback_data=f'lyriaback:{request_id}'),
+            InlineKeyboardButton(text='Отмена', callback_data=f'lyriacancel:{request_id}'),
+        ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
@@ -896,6 +920,39 @@ def _suno_cfg_text(request_id: str) -> str:
         f"audio {cfg.get('audio_weight', 0.5)}"
     )
     lines.append(f"🎲 разнообразие {cfg.get('variety', 1)} · ⏱ {cfg.get('duration', 60)}с")
+    return '\n'.join(lines)
+
+def _lyria_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    return _cfg_keyboard(request_id, pending_lyria_configs, _LYRIA_KEYBOARD_LAYOUT, _LYRIA_CFG_DEFAULTS, 'lyria')
+
+def _lyria_cfg_text(request_id: str) -> str:
+    from services.music_service import build_lyria_prompt
+
+    d = pending_lyria_configs.get(request_id, {})
+    cfg = d.get('cfg', {})
+    idea = d.get('prompt', '')
+    instrumental = str(cfg.get('instrumental', '0')) == '1'
+    temp = {'safe': 'safe 😐', 'normal': 'normal 🙂', 'bold': 'bold 🔥', 'wild': 'wild 🤪'}.get(
+        str(cfg.get('temp', 'normal')), 'normal')
+
+    def _cut(text, limit=80):
+        text = str(text).replace('\n', ' / ')
+        return escape(text if len(text) <= limit else text[:limit - 3] + '...')
+
+    lines = [
+        f"🎼 <b>{escape(str(d.get('label', 'Lyria')))}</b>",
+        '',
+        f"💡 <b>Идея:</b> {_cut(idea, 120)}",
+    ]
+    for field, icon, name in (('style', '✏️', 'Стиль'), ('mood', '🎭', 'Настроение'),
+                              ('structure', '📝', 'Структура')):
+        value = (cfg.get(field) or '').strip()
+        lines.append(f"{icon} <b>{name}:</b> {_cut(value) if value else '<i>не задано</i>'}")
+    lines.append(f"🎹 <b>Инструментал:</b> {'без вокала' if instrumental else 'с вокалом'}")
+    lines.append(f"🎛 <b>Креативность:</b> {temp}")
+    lines.append('')
+    lines.append('<i>Lyria не принимает структурных настроек, кроме temperature — '
+                 'стиль, настроение и структура вклеиваются в промпт.</i>')
     return '\n'.join(lines)
 
 def _prompt_ai_keyboard(request_id: str) -> InlineKeyboardMarkup:

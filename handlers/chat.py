@@ -111,7 +111,9 @@ from handlers.text_inputs import (
     handle_nsfw_input,
     handle_tts_input,
     handle_suno_input,
+    handle_lyria_input,
 )
+from handlers.music import handle_music_idea
 
 from database import (
     log_prompt,
@@ -392,7 +394,11 @@ async def handle_text_messages(message: types.Message, state: FSMContext):
         return
     if await handle_tts_input(message, reply_kwargs):
         return
+    if await handle_music_idea(message, reply_kwargs):
+        return
     if await handle_suno_input(message, reply_kwargs):
+        return
+    if await handle_lyria_input(message, reply_kwargs):
         return
     asyncio.create_task(_maybe_send_random_chat_media(message))
     bot_user = await message.bot.get_me()

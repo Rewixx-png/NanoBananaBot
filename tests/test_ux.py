@@ -140,18 +140,20 @@ class UxContractsTest(unittest.TestCase):
             pending_tts_configs.pop("req", None)
 
     def test_music_request_survives_foreign_cancel(self):
-        from handlers.music import _pending_music, music_model_callback
+        from handlers.music import _pending_music, music_cancel_callback
 
+        edit_text = AsyncMock()
         _pending_music["req"] = {"user_id": 1}
         callback = SimpleNamespace(
-            data="musicsel:req:cancel",
+            data="musiccancel:req",
             from_user=SimpleNamespace(id=2),
             answer=AsyncMock(),
-            message=SimpleNamespace(edit_text=AsyncMock()),
+            message=SimpleNamespace(edit_text=edit_text),
         )
         try:
-            asyncio.run(music_model_callback(cast(Any, callback)))
+            asyncio.run(music_cancel_callback(cast(Any, callback)))
             self.assertIn("req", _pending_music)
+            edit_text.assert_not_awaited()
         finally:
             _pending_music.pop("req", None)
 
@@ -479,36 +481,63 @@ class UxContractsTest(unittest.TestCase):
         finally:
             pending_prompt_requests.pop("req", None)
 
-    def test_music_progress_escapes_user_prompt(self):
-        from handlers.music import MUSIC_MODELS, _pending_music, music_model_callback
+    def test_music_model_choice_opens_provider_settings_without_generating(self):
+        """Picking a model shows that provider's settings; generation needs a second press."""
+        from handlers.music import _pending_music, music_model_callback
+        from state import pending_lyria_configs, pending_suno_configs
 
-        choice = next(iter(MUSIC_MODELS))
-        _pending_music["req"] = {"user_id": 1, "prompt": "<verse>&", "chat_id": 1}
-        message = SimpleNamespace(edit_text=AsyncMock())
+        for provider, model_key, store in (("suno", "suno-v6", pending_suno_configs),
+                                           ("lyria", "lyria-35", pending_lyria_configs)):
+            with self.subTest(provider=provider):
+                message = SimpleNamespace(edit_text=AsyncMock())
+                _pending_music["req"] = {"user_id": 1, "prompt": "<verse>&", "chat_id": 1}
+                callback = SimpleNamespace(
+                    data=f"musicsel:req:{provider}:{model_key}",
+                    from_user=SimpleNamespace(id=1),
+                    answer=AsyncMock(),
+                    message=message,
+                )
+                try:
+                    with patch("handlers.music.generate_music", new=AsyncMock()) as lyria_gen, \
+                         patch("handlers.music.generate_suno", new=AsyncMock()) as suno_gen:
+                        asyncio.run(music_model_callback(cast(Any, callback)))
+                    lyria_gen.assert_not_awaited()
+                    suno_gen.assert_not_awaited()
+                    self.assertIn("req", store)
+                    self.assertEqual(store["req"]["model"], model_key)
+                    self.assertEqual(store["req"]["provider"], provider)
+                    # The idea is echoed back to the user and must be escaped.
+                    self.assertIn("&lt;verse&gt;&amp;", message.edit_text.await_args.args[0])
+                finally:
+                    store.pop("req", None)
+                    _pending_music.pop("req", None)
+
+    def test_music_rejects_model_from_the_wrong_provider(self):
+        from handlers.music import _pending_music, music_model_callback
+        from state import pending_lyria_configs
+
+        _pending_music["req"] = {"user_id": 1, "prompt": "x", "chat_id": 1}
         callback = SimpleNamespace(
-            data=f"musicsel:req:{choice}",
+            data="musicsel:req:lyria:suno-v6",  # Suno model under the Lyria provider
             from_user=SimpleNamespace(id=1),
             answer=AsyncMock(),
-            message=message,
+            message=SimpleNamespace(edit_text=AsyncMock()),
         )
         try:
-            with patch("handlers.music.generate_music", new=AsyncMock(return_value=(None, None, "failed"))):
-                asyncio.run(music_model_callback(cast(Any, callback)))
-            rendered = message.edit_text.await_args_list[0].args[0]
-            self.assertIn("&lt;verse&gt;&amp;", rendered)
-            self.assertNotIn("req", _pending_music)
+            asyncio.run(music_model_callback(cast(Any, callback)))
+            self.assertNotIn("req", pending_lyria_configs)
+            self.assertIn("req", _pending_music)
         finally:
             _pending_music.pop("req", None)
 
     def test_music_ack_failure_keeps_pending_request(self):
-        from handlers.music import MUSIC_MODELS, _cooldowns, _pending_music, music_model_callback
+        from handlers.music import _cooldowns, _pending_music, music_model_callback
 
-        choice = next(iter(MUSIC_MODELS))
         user_id = 42
         _pending_music["req"] = {"user_id": user_id, "prompt": "music", "chat_id": 1}
         _cooldowns.pop(user_id, None)
         callback = SimpleNamespace(
-            data=f"musicsel:req:{choice}",
+            data="musicsel:req:suno:suno-v6",
             from_user=SimpleNamespace(id=user_id),
             answer=AsyncMock(side_effect=RuntimeError("answer failed")),
             message=SimpleNamespace(),
@@ -521,6 +550,110 @@ class UxContractsTest(unittest.TestCase):
         finally:
             _pending_music.pop("req", None)
             _cooldowns.pop(user_id, None)
+
+    def test_music_flow_offers_provider_model_and_settings_steps(self):
+        """The three levels each offer a way back, and none strands the user."""
+        from handlers.music import PROVIDERS, _model_keyboard, _provider_keyboard
+
+        provider_kb = _provider_keyboard("req")
+        provider_buttons = [b.text for row in provider_kb.inline_keyboard for b in row]
+        provider_callbacks = {b.callback_data for row in provider_kb.inline_keyboard for b in row}
+
+        self.assertEqual(len(PROVIDERS), 2)
+        self.assertTrue(any("Lyria" in text for text in provider_buttons))
+        self.assertTrue(any("Suno" in text for text in provider_buttons))
+        self.assertIn("musiccancel:req", provider_callbacks)
+
+        for provider in PROVIDERS:
+            with self.subTest(provider=provider):
+                keyboard = _model_keyboard("req", provider)
+                callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+                texts = [b.text for row in keyboard.inline_keyboard for b in row]
+
+                # One button per model of this provider, plus back and cancel.
+                self.assertEqual(len(texts), len(PROVIDERS[provider]['models']) + 2)
+                self.assertIn("musicprovback:req", callbacks)
+                self.assertIn("musiccancel:req", callbacks)
+                # Models are namespaced by provider so a wrong pairing is rejectable.
+                for model_key in PROVIDERS[provider]['models']:
+                    self.assertIn(f"musicsel:req:{provider}:{model_key}", callbacks)
+
+    def test_music_settings_screens_have_back_and_cancel(self):
+        from handlers.common import _lyria_cfg_keyboard, _lyria_cfg_text, _suno_cfg_keyboard
+        from state import pending_lyria_configs, pending_suno_configs
+
+        pending_suno_configs["req"] = {"cfg": {}, "prompt": "x", "label": "L"}
+        pending_lyria_configs["req"] = {"cfg": {}, "prompt": "x", "label": "L"}
+        try:
+            for provider, keyboard in (("suno", _suno_cfg_keyboard("req")),
+                                       ("lyria", _lyria_cfg_keyboard("req"))):
+                with self.subTest(provider=provider):
+                    callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+                    self.assertIn(f"{provider}back:req", callbacks)
+                    self.assertIn(f"{provider}cancel:req", callbacks)
+                    self.assertIn(f"{provider}gen:req", callbacks)
+                    # The generate callback must resolve to this provider.
+                    self.assertTrue(any(c.startswith(f"{provider}cfg:req:") for c in callbacks))
+            self.assertIn("Lyria", _lyria_cfg_text("req"))
+        finally:
+            pending_suno_configs.pop("req", None)
+            pending_lyria_configs.pop("req", None)
+
+    def test_settings_guard_resolves_provider_from_every_callback_kind(self):
+        """A wrong provider derivation silently broke Lyria's input/back/cancel."""
+        from handlers.music import _SETTINGS_SUFFIXES, _settings_guard
+        from state import pending_lyria_configs, pending_suno_configs
+
+        stores = {'suno': pending_suno_configs, 'lyria': pending_lyria_configs}
+        for provider, store in stores.items():
+            for suffix in _SETTINGS_SUFFIXES:
+                with self.subTest(provider=provider, suffix=suffix):
+                    rid = f"req_{provider}_{suffix}"
+                    store[rid] = {"user_id": 1, "chat_id": 2, "cfg": {}}
+                    callback = SimpleNamespace(
+                        data=f"{provider}{suffix}:{rid}:extra:more",
+                        from_user=SimpleNamespace(id=1),
+                        answer=AsyncMock(),
+                    )
+                    try:
+                        resolved, request_id, d = asyncio.run(_settings_guard(cast(Any, callback)))
+                        self.assertEqual(resolved, provider)
+                        self.assertEqual(request_id, rid)
+                        self.assertIsNotNone(d)
+                    finally:
+                        store.pop(rid, None)
+
+    def test_music_bare_command_asks_for_the_idea_instead_of_providers(self):
+        from handlers.music import _pending_music, _music_awaiting_idea, cmd_music
+
+        sent = {}
+
+        async def fake_send(*args, **kwargs):
+            sent.update(kwargs)
+            return SimpleNamespace(message_id=7)
+
+        message = SimpleNamespace(
+            text="/music",
+            chat=SimpleNamespace(id=-100, is_forum=False, type="supergroup"),
+            from_user=SimpleNamespace(id=5, username="u", first_name="U"),
+            message_thread_id=None,
+            bot=SimpleNamespace(send_message=fake_send),
+        )
+        try:
+            with patch("handlers.music.safe_send", new=AsyncMock(side_effect=fake_send)):
+                asyncio.run(cmd_music(cast(Any, message)))
+
+            self.assertIn((-100, 5), _music_awaiting_idea)
+            # Only a cancel button — the provider list waits for the idea.
+            callbacks = [b.callback_data for row in sent["reply_markup"].inline_keyboard for b in row]
+            request_id = list(_pending_music)[0]
+            self.assertEqual(callbacks, [f"musiccancel:{request_id}"])
+            self.assertTrue(all(not c.startswith("musicprov:") for c in callbacks))
+        finally:
+            _music_awaiting_idea.pop((-100, 5), None)
+            for rid in list(_pending_music):
+                if _pending_music[rid].get("user_id") == 5:
+                    _pending_music.pop(rid, None)
 
     def test_generation_keyboards_offer_back_or_cancel(self):
         from handlers.common import _providers_keyboard, _temp_keyboard, _tts_cfg_keyboard

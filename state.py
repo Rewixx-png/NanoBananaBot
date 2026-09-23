@@ -12,6 +12,7 @@ pending_nsfw_configs = {}
 pending_tts_requests = {}
 pending_tts_configs = {}
 pending_suno_configs = {}
+pending_lyria_configs = {}
 pending_file_tasks = {}
 tts_voice_previews = {}
 generated_draw_messages = {}

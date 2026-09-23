@@ -10,17 +10,41 @@ from shared_types import gemini_post
 
 logger = logging.getLogger(__name__)
 
-# Model IDs (via Interactions API)
+# Model IDs (via the Gemini generateContent API)
+LYRIA_35   = "lyria-3.5"                 # Newest music model
 LYRIA_CLIP = "lyria-3-clip-preview"      # 30s clips, MP3
-LYRIA_PRO  = "lyria-3-pro-preview"        # Full songs, MP3/WAV
+LYRIA_PRO  = "lyria-3-pro-preview"       # Full songs, MP3
 _BLOCK_CHECK_MODEL = LYRIA_CLIP
 
 MUSIC_MODELS = {
-    "lyria-clip":  {"id": LYRIA_CLIP, "label": "🎵 Lyria 3 Clip",   "desc": "30-секундные клипы, MP3"},
-    "lyria-pro":   {"id": LYRIA_PRO,  "label": "🎼 Lyria 3 Pro",    "desc": "Полноценные песни до 2 мин, MP3/WAV"},
+    "lyria-35":    {"id": LYRIA_35,   "label": "🎵 Lyria 3.5",      "desc": "Новейшая, полноценные треки"},
+    "lyria-pro":   {"id": LYRIA_PRO,  "label": "🎼 Lyria 3 Pro",    "desc": "Песни до 2 мин"},
+    "lyria-clip":  {"id": LYRIA_CLIP, "label": "⚡ Lyria 3 Clip",   "desc": "Быстрые 30-секундные клипы"},
 }
 
 MUSIC_MODEL_LIST = list(MUSIC_MODELS.keys())
+
+# Lyria takes no structured generation options beyond temperature: the API
+# rejects responseMimeType, audioConfig and negativePrompt. Everything else
+# has to be expressed in the prompt text, which is what build_lyria_prompt
+# assembles from the settings screen.
+_LYRIA_TEMPERATURES = {'safe': 0.6, 'normal': 1.0, 'bold': 1.4, 'wild': 2.0}
+
+
+def build_lyria_prompt(idea: str, cfg: Optional[dict] = None) -> str:
+    """Fold the Lyria settings into one prompt, since the API has no fields for them."""
+    cfg = cfg or {}
+    parts = [(idea or '').strip()]
+    if (style := (cfg.get('style') or '').strip()):
+        parts.append(f'Style: {style}')
+    if (mood := (cfg.get('mood') or '').strip()):
+        parts.append(f'Mood: {mood}')
+    if str(cfg.get('instrumental', '0')) == '1':
+        parts.append('Instrumental only, no vocals and no lyrics.')
+    if (structure := (cfg.get('structure') or '').strip()):
+        parts.append(structure)
+    return '\n'.join(p for p in parts if p).strip() or 'instrumental music'
+
 
 def _clean_music_error(error: str) -> str:
     if "ClientConnectorDNSError" in error and "generativelanguage.googleapis.com" in error:
@@ -34,10 +58,15 @@ async def generate_music(
     prompt: str,
     model_key: str = "lyria-clip",
     output_format: str = "mp3",
+    cfg: Optional[dict] = None,
 ) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
     """Generate music via Lyria generateContent API. Falls back through all models."""
     if model_key not in MUSIC_MODELS:
         return None, None, f"Неизвестная модель: {model_key}"
+
+    cfg = cfg or {}
+    full_prompt = build_lyria_prompt(prompt, cfg)
+    temperature = _LYRIA_TEMPERATURES.get(str(cfg.get('temp', 'normal')), 1.0)
 
     # Fallback chain: selected model → other models
     model_chain = [model_key] + [k for k in MUSIC_MODEL_LIST if k != model_key]
@@ -48,8 +77,8 @@ async def generate_music(
         model_id = info["id"]
 
         payload = {
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 1.0},
+            "contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
+            "generationConfig": {"temperature": temperature},
             "safetySettings": [
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -69,7 +98,7 @@ async def generate_music(
                     cats = [r["category"].rsplit("_", 1)[-1] for r in ratings if r.get("blocked")]
                     cat_info = f" ({', '.join(cats)})" if cats else ""
                     if reason == "PROHIBITED_CONTENT":
-                        diag = await _diagnose_block(prompt)
+                        diag = await _diagnose_block(full_prompt)
                         if diag:
                             cat_info += diag
                     errors.append(f"{mk}: BLOCKED ({reason}{cat_info})")
