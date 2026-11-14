@@ -66,9 +66,9 @@ PROVIDER_MODELS: dict = {
         ('Recraft V3 (Дизайн)', 'recraft3'),
         ('FLUX.1 Dev (Реализм)', 'fluxdevr'),
         ('FLUX.1 Schnell (Быстро)', 'fluxschnellr'),
-        ('WAI Illustrious v12 🔞', 'wai12'),
-        ('WAI Illustrious v11 🔞', 'wai11'),
-        ('NSFW FLUX Dev 🔞', 'nsfwflux')
+        ('WAI Illustrious v12 ', 'wai12'),
+        ('WAI Illustrious v11 ', 'wai11'),
+        ('NSFW FLUX Dev ', 'nsfwflux')
     ]
 }
 
@@ -132,9 +132,9 @@ async def refresh_models():
             ('Recraft V3 (Дизайн)', 'recraft-ai/recraft-v3'),
             ('FLUX.1 Dev (Реализм)', 'black-forest-labs/flux-dev'),
             ('FLUX.1 Schnell (Быстро)', 'black-forest-labs/flux-schnell'),
-            ('WAI Illustrious v12 🔞', 'aisha-ai-official/wai-nsfw-illustrious-v12'),
-            ('WAI Illustrious v11 🔞', 'aisha-ai-official/wai-nsfw-illustrious-v11'),
-            ('NSFW FLUX Dev 🔞', 'aisha-ai-official/nsfw-flux-dev')
+            ('WAI Illustrious v12 ', 'aisha-ai-official/wai-nsfw-illustrious-v12'),
+            ('WAI Illustrious v11 ', 'aisha-ai-official/wai-nsfw-illustrious-v11'),
+            ('NSFW FLUX Dev ', 'aisha-ai-official/nsfw-flux-dev')
         ]
         all_models = custom_models.copy()
         custom_paths = {p for (_, p) in custom_models}
@@ -209,13 +209,13 @@ async def cmd_image(message: types.Message):
                 last_full_access = full_access_image_cooldowns.get(uid, 0)
                 remaining = FULL_ACCESS_CHAT_IMAGE_COOLDOWN - (current_time - last_full_access)
                 if remaining > 0:
-                    await message.reply(f'Не спамь блять картинками, подожди ещё {int(remaining)} сек.')
+                    await message.reply(f'Подожди ещё {int(remaining)} сек. перед следующей генерацией.')
                     return
             full_access_image_cooldowns[uid] = current_time
         else:
             last_time = user_image_cooldowns.get(uid, 0)
             if current_time - last_time < IMAGE_COOLDOWN_SECONDS:
-                await message.reply(f'Не спамь блять картинками, подожди еще {int(IMAGE_COOLDOWN_SECONDS - (current_time - last_time))} сек.')
+                await message.reply(f'Подожди ещё {int(IMAGE_COOLDOWN_SECONDS - (current_time - last_time))} сек. перед следующей генерацией.')
                 return
             user_image_cooldowns[uid] = current_time
     images_bytes = []
@@ -232,7 +232,7 @@ async def cmd_image(message: types.Message):
             images_bytes.append(downloaded_file.read())
         except Exception as e:
             logger.error(f"cmd_image download failed: {type(e).__name__}: {e}", exc_info=True)
-            await message.reply(f"❌ Telegram не отдал фото: {type(e).__name__}: {e}. Повтори /image с другим JPG или PNG.")
+            await message.reply("Не удалось скачать фото. Пришли JPG или PNG и повтори /image.")
             return
         if message.media_group_id:
             await asyncio.sleep(2.5)
@@ -250,9 +250,9 @@ async def cmd_image(message: types.Message):
         pending_prompt_requests[request_id] = {'user_id': message.from_user.id, 'chat_id': message.chat.id, 'source_message_id': message.message_id, 'message_thread_id': thread_id, 'prompt': prompt, 'images_bytes': images_bytes, 'file_ids': file_ids, 'prev_prompts': [], 'current_ai_prompt': None}
         photo_word = 'фотки' if len(images_bytes) > 1 else 'фотку'
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Исправить промпт', callback_data=f'pask:{request_id}')], [InlineKeyboardButton(text='Оставить мой промпт', callback_data=f'pbase:{request_id}')], [InlineKeyboardButton(text='Отмена', callback_data=f'imgcancel:{request_id}')]])
-        await message.reply(f"Вижу {photo_word}. Могу улучшить твой промпт по референсу или запустить генерацию как есть. Выбирай, а не гадай.", reply_markup=keyboard, **reply_kwargs)
+        await message.reply(f"Вижу {photo_word}. Могу улучшить промпт по референсу или запустить генерацию как есть.", reply_markup=keyboard, **reply_kwargs)
         return
-    await message.reply('Выбирай модель. Не знаешь разницу — бери Gemini.', reply_markup=_providers_keyboard(request_id, message.chat.id, len(images_bytes)), **reply_kwargs)
+    await message.reply('Выбери модель. Если не знаешь разницу, бери Gemini.', reply_markup=_providers_keyboard(request_id, message.chat.id, len(images_bytes)), **reply_kwargs)
 
 @media_router.callback_query(F.data.startswith('imgcancel:'))
 async def handle_image_cancel(callback: types.CallbackQuery):
@@ -304,7 +304,7 @@ async def handle_temp_select(callback: types.CallbackQuery):
         progress_task = None
         state_data = {'status': 'Инициализация...'}
         try:
-            await callback.message.edit_text(f'🌡️ {temp_label} ({temp_val})\n⏳ Запускаю генерацию...')
+            await callback.message.edit_text(f'{temp_label} ({temp_val})\nЗапускаю генерацию...')
             progress_task = asyncio.create_task(run_progress_bar(callback.bot, req['chat_id'], callback.message.message_id, selected_label, state_data=state_data))
         except Exception:
             pass
@@ -328,13 +328,14 @@ async def handle_temp_select(callback: types.CallbackQuery):
         return
     imgs = req.get('images_bytes') or ([req['image_bytes']] if req.get('image_bytes') else [])
     try:
-        await callback.message.edit_text(f'🌡️ {temp_label} ({temp_val}) — выбрано\n\nЧерез какую модель генерировать?', reply_markup=_providers_keyboard(request_id, req['chat_id'], len(imgs)))
+        await callback.message.edit_text(f'{temp_label} ({temp_val}). Выбрано.\n\nЧерез какую модель генерировать?', reply_markup=_providers_keyboard(request_id, req['chat_id'], len(imgs)))
     except Exception:
         pass
 
 async def _send_generation_result(bot, request_data, request_id, result_img, error_msg, model_label, imgs, reply_kwargs):
     if error_msg:
-        err_msg = await safe_send(bot.send_message, chat_id=request_data['chat_id'], text=f'⏳ Ошибка генерации, анализирую...', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
+        logging.error(f'Image generation failed: {error_msg}')
+        err_msg = await safe_send(bot.send_message, chat_id=request_data['chat_id'], text='Ошибка генерации. Разбираю причину...', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
         first_image = imgs[0] if imgs else None
         try:
             explanation = await asyncio.wait_for(explain_generation_error(request_data['prompt'] or '', error_msg, image_bytes=first_image), timeout=30)
@@ -346,12 +347,10 @@ async def _send_generation_result(bot, request_data, request_id, result_img, err
         if err_msg:
             try:
                 import html as _html_mod
-                safe_err = _html_mod.escape(error_msg)
                 safe_exp = _html_mod.escape(explanation)
                 from aiogram.types import InputRichMessage as _IRM_err, ReplyParameters as _RP_err
                 rich_err = (
-                    f'<details><summary>❌ Ошибка генерации</summary>'
-                    f'<b>Полная ошибка от API:</b>\n<pre>{safe_err}</pre>\n\n'
+                    f'<details><summary>Ошибка генерации</summary>'
                     f'<b>Пояснение:</b>\n{safe_exp}'
                     f'</details>'
                 )
@@ -362,27 +361,29 @@ async def _send_generation_result(bot, request_data, request_id, result_img, err
                 )
                 await bot.delete_message(chat_id=request_data['chat_id'], message_id=err_msg.message_id)
             except Exception:
-                await safe_send(bot.edit_message_text, chat_id=request_data['chat_id'], message_id=err_msg.message_id, text=f'❌ Ошибка:\n{error_msg}\n\n🧠 Пояснение:\n{explanation}')
+                await safe_send(bot.edit_message_text, chat_id=request_data['chat_id'], message_id=err_msg.message_id, text=f'Ошибка генерации.\n\n{explanation}')
         return
     if result_img:
         from handlers.common import _remember_generated_draw_message
-        caption = make_safe_caption(f"🎨 Ваш результат ({model_label}) по запросу: ", request_data['prompt']) if request_data['prompt'] else f'🎨 Ваш результат ({model_label}) готов.'
+        caption = make_safe_caption(f"Ваш результат ({model_label}) по запросу: ", request_data['prompt']) if request_data['prompt'] else f'Ваш результат ({model_label}) готов.'
         sent_photo = await safe_send(bot.send_photo, chat_id=request_data['chat_id'], photo=BufferedInputFile(result_img, filename='generated.jpg'), caption=caption, reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
         if sent_photo:
             _remember_generated_draw_message(request_data['chat_id'], sent_photo.message_id, result_img, request_data.get('prompt', ''), request_data.get('user_id', 0), request_data.get('username', ''), request_data.get('first_name', 'Аноним'))
-        upscale_msg = await safe_send(bot.send_message, chat_id=request_data['chat_id'], text='⬆️ Улучшаю качество через AI upscaler...', **reply_kwargs)
-        (upscaled, up_err) = await upscale_image(result_img)
+        upscale_msg = await safe_send(bot.send_message, chat_id=request_data['chat_id'], text='Улучшаю фото локально...', **reply_kwargs)
+        (upscaled, up_err) = await upscale_image(result_img, mode='photo_fast')
+        if up_err:
+            logger.warning(f'auto upscale failed: {up_err}')
         try:
             await bot.delete_message(chat_id=request_data['chat_id'], message_id=upscale_msg.message_id)
         except Exception:
             pass
         if upscaled:
-            await safe_send(bot.send_document, chat_id=request_data['chat_id'], document=BufferedInputFile(upscaled, filename='upscaled.png'), caption=f'✨ Улучшенная версия ({model_label}) 2x — без сжатия', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
+            await safe_send(bot.send_document, chat_id=request_data['chat_id'], document=BufferedInputFile(upscaled, filename='upscaled.png'), caption=f'Улучшенная версия ({model_label}) 2x, без сжатия', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
         from database import add_user_stat, log_prompt
         asyncio.create_task(add_user_stat(request_data.get('user_id', 0), request_data.get('username', ''), request_data.get('first_name', 'Аноним'), 'image'))
         asyncio.create_task(log_prompt(request_data.get('user_id', 0), request_data.get('username', ''), request_data.get('first_name', 'Аноним'), 'image', request_data.get('prompt', '')))
         return
-    await bot.send_message(chat_id=request_data['chat_id'], text='❌ Не удалось получить изображение.', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
+    await bot.send_message(chat_id=request_data['chat_id'], text='Не удалось получить изображение.', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
 
 @media_router.callback_query(F.data.startswith('nsfwinput:'))
 async def handle_nsfw_input(callback: types.CallbackQuery):
@@ -400,9 +401,9 @@ async def handle_nsfw_input(callback: types.CallbackQuery):
     await callback.answer()
     field_name = {'prompt': 'промпт', 'neg': 'негативный промпт', 'seed': 'seed (число, -1 = случайный)'}.get(field, field)
     _nsfw_awaiting_input[d['chat_id'], d['user_id']] = {'request_id': request_id, 'field': field, 'msg_id': callback.message.message_id}
-    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ Отмена', callback_data=f'nsfwcancel:{request_id}')]])
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Отмена', callback_data=f'nsfwcancel:{request_id}')]])
     try:
-        await callback.message.edit_text(f'✏️ Напиши {field_name} следующим сообщением:\n\n(просто отправь текст в чат)', reply_markup=cancel_kb)
+        await callback.message.edit_text(f'Пришли {field_name} следующим сообщением.', reply_markup=cancel_kb)
     except Exception:
         pass
 
@@ -489,7 +490,7 @@ async def handle_nsfw_generate(callback: types.CallbackQuery):
     progress_task = None
     state_data = {'status': 'Инициализация...'}
     try:
-        await callback.message.edit_text(f"⏳ Генерирую через {d['label']}...")
+        await callback.message.edit_text(f"Генерирую через {d['label']}...")
         progress_task = asyncio.create_task(run_progress_bar(callback.bot, d['chat_id'], callback.message.message_id, d['label'], state_data=state_data))
     except Exception:
         pass
@@ -512,17 +513,19 @@ async def handle_nsfw_generate(callback: types.CallbackQuery):
         await _send_generation_result(callback.bot, d, request_id, results[0], None, d['label'], None, reply_kwargs)
     else:
         from aiogram.types import InputMediaPhoto
-        caption = f"🎨 {d['label']} × {len(results)}\n{d['prompt'][:100]}" if d.get('prompt') else f"🎨 {d['label']} × {len(results)}"
+        caption = f"{d['label']} × {len(results)}\n{d['prompt'][:100]}" if d.get('prompt') else f"{d['label']} × {len(results)}"
         media = [InputMediaPhoto(media=BufferedInputFile(img, filename=f'nsfw_{i + 1}.jpg'), caption=caption if i == 0 else None) for (i, img) in enumerate(results)]
         await callback.bot.send_media_group(chat_id=d['chat_id'], media=media, reply_to_message_id=d['source_message_id'], **reply_kwargs)
-        upscale_msg = await callback.bot.send_message(chat_id=d['chat_id'], text='⬆️ Улучшаю первое фото...', **reply_kwargs)
-        (upscaled, _) = await upscale_image(results[0])
+        upscale_msg = await callback.bot.send_message(chat_id=d['chat_id'], text='Улучшаю первое фото локально...', **reply_kwargs)
+        (upscaled, up_err) = await upscale_image(results[0], mode='photo_fast')
+        if up_err:
+            logger.warning(f'auto upscale failed: {up_err}')
         try:
             await callback.bot.delete_message(chat_id=d['chat_id'], message_id=upscale_msg.message_id)
         except Exception:
             pass
         if upscaled:
-            await callback.bot.send_document(chat_id=d['chat_id'], document=BufferedInputFile(upscaled, filename='upscaled.png'), caption=f'✨ #{1} улучшенная версия 2x', reply_to_message_id=d['source_message_id'], **reply_kwargs)
+            await callback.bot.send_document(chat_id=d['chat_id'], document=BufferedInputFile(upscaled, filename='upscaled.png'), caption=f'#{1} улучшенная версия 2x', reply_to_message_id=d['source_message_id'], **reply_kwargs)
 
 async def _run_prompt_generation(callback: types.CallbackQuery, request_id: str):
     data = pending_prompt_requests.get(request_id)
@@ -531,20 +534,21 @@ async def _run_prompt_generation(callback: types.CallbackQuery, request_id: str)
         return
     await callback.answer()
     try:
-        await callback.message.edit_text('🧠 Gemini Pro анализирует фото и промт...')
+        await callback.message.edit_text('Gemini анализирует фото и промпт...')
     except Exception:
         pass
     (eng, rus, err) = await generate_image_prompt(data['prompt'], data['images_bytes'], data['prev_prompts'])
     if not eng:
         try:
-            await callback.message.edit_text(f'❌ Ошибка генерации промта: {err}')
+            logging.error(f'Prompt generation failed: {err}')
+            await callback.message.edit_text('Не удалось улучшить промпт. Попробуй другой вариант.')
         except Exception:
             pass
         return
     data['current_ai_prompt'] = eng
     data['prev_prompts'].append(eng)
-    rus_line = f'\n\n🇷🇺 По-русски:\n{escape(str(rus))}' if rus else ''
-    text = f'🤖 AI-промт готов:\n\n🇬🇧 English:\n<code>{escape(str(eng))}</code>{rus_line}'
+    rus_line = f'\n\nПо-русски:\n{escape(str(rus))}' if rus else ''
+    text = f'AI-промпт готов:\n\nEnglish:\n<code>{escape(str(eng))}</code>{rus_line}'
     try:
         await callback.message.edit_text(text, parse_mode='HTML', reply_markup=_prompt_ai_keyboard(request_id))
     except Exception:
@@ -650,7 +654,7 @@ async def handle_provider_select(callback: types.CallbackQuery):
             (allowed, remaining) = _check_daily_limit(uid, callback.message.chat.id if callback.message else request_data['chat_id'])
             if not allowed:
                 (req_limit, days) = chat_custom_limits.get(callback.message.chat.id if callback.message else request_data['chat_id'], (DAILY_GEN_LIMIT, 1))
-                await callback.answer(f'❌ Лимит {req_limit} генерации за {days} дн. исчерпан.\nДля безлимита свяжитесь с {PAYMENT_USERNAME} и пополните карту Тбанка на 10₽.', show_alert=True)
+                await callback.answer(f'Лимит {req_limit} генерации за {days} дн. исчерпан.\nДля безлимита свяжитесь с {PAYMENT_USERNAME} и пополните карту Тбанка на 10₽.', show_alert=True)
                 return
     models = PROVIDER_MODELS.get(provider, [])
     if not models:
@@ -775,7 +779,7 @@ async def handle_image_model_select(callback: types.CallbackQuery):
     state_data = {'status': 'Инициализация...'}
     if callback.message:
         try:
-            await callback.message.edit_text('⏳ Запускаю генерацию...')
+            await callback.message.edit_text('Запускаю генерацию...')
             progress_task = asyncio.create_task(run_progress_bar(callback.bot, request_data['chat_id'], callback.message.message_id, selected_label, state_data=state_data))
         except Exception:
             pass

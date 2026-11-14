@@ -17,9 +17,9 @@ LYRIA_PRO  = "lyria-3-pro-preview"       # Full songs, MP3
 _BLOCK_CHECK_MODEL = LYRIA_CLIP
 
 MUSIC_MODELS = {
-    "lyria-35":    {"id": LYRIA_35,   "label": "🎵 Lyria 3.5",      "desc": "Новейшая, полноценные треки"},
-    "lyria-pro":   {"id": LYRIA_PRO,  "label": "🎼 Lyria 3 Pro",    "desc": "Песни до 2 мин"},
-    "lyria-clip":  {"id": LYRIA_CLIP, "label": "⚡ Lyria 3 Clip",   "desc": "Быстрые 30-секундные клипы"},
+    "lyria-35":    {"id": LYRIA_35,   "label": "Lyria 3.5",      "desc": "Полноценные треки"},
+    "lyria-pro":   {"id": LYRIA_PRO,  "label": "Lyria 3 Pro",    "desc": "Песни до 2 мин"},
+    "lyria-clip":  {"id": LYRIA_CLIP, "label": "Lyria 3 Clip",   "desc": "Быстрые клипы по 30 секунд"},
 }
 
 MUSIC_MODEL_LIST = list(MUSIC_MODELS.keys())

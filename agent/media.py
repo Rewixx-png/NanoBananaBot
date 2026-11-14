@@ -77,11 +77,11 @@ async def _tool_search_image(
                 current_query = f"{query} hd"
 
         tried_queries.append(current_query)
-        await _st(f"🔍 Ищу картинку: «{current_query}» (попытка {rnd + 1}/{max_rounds})")
+        await _st(f"Ищу картинку: «{current_query}» (попытка {rnd + 1}/{max_rounds})")
 
         image_urls = await _search_image_urls(current_query)
 
-        await _st(f"📥 Нашёл {len(image_urls)} кандидатов, проверяю...")
+        await _st(f"Нашёл {len(image_urls)} кандидатов, проверяю...")
 
         for img_url in image_urls[:8]:
             img_bytes = await _download_bytes(img_url, max_bytes=10 * 1024 * 1024)
@@ -89,17 +89,17 @@ async def _tool_search_image(
                 continue
             relevant = await _image_is_relevant(img_bytes, search_desc)
             if relevant:
-                await _st("✅ Нашёл подходящую картинку, отправляю...")
+                await _st("Нашёл подходящую картинку, отправляю...")
                 ext = img_url.split("?")[0].rsplit(".", 1)[-1].lower()
                 fname = f"image.{ext}" if ext in ("jpg", "jpeg", "png", "webp") else "image.jpg"
                 await send_cb({
                     "type": "photo", "data": img_bytes,
-                    "caption": f"🖼 {search_desc[:900]}", "filename": fname,
+                    "caption": f"{search_desc[:900]}", "filename": fname,
                 })
                 safe_url = img_url.replace('\n', '').replace('\r', '').replace('\t', '')[:200]
                 return f"[ОТПРАВЛЕНО] Картинка найдена и отправлена. Источник: {safe_url} (запрос: '{current_query}')"
 
-        await _st(f"⚠️ Ни одна картинка не подошла, формулирую лучший запрос...")
+        await _st(f"Ни одна картинка не подошла, формулирую лучший запрос...")
 
     return f"[НЕ НАЙДЕНО] Не удалось найти подходящую картинку после {max_rounds} попыток. Пробовал: {tried_queries}. Скажи пользователю честно что не нашёл."
 
@@ -121,7 +121,7 @@ async def _tool_generate_image(prompt: str, send_cb: Callable, provider: str = "
         img_bytes, err = await generate_image_with_gpt(prompt, model=gpt_model)
         used_provider = f"OpenAI ({gpt_model})"
         if not img_bytes:
-            note = f"\n⚠️ OpenAI недоступен ({(err or '').split(':')[0].strip()[:80]}), сгенерировал через Gemini."
+            note = f"\nOpenAI недоступен ({(err or '').split(':')[0].strip()[:80]}), сгенерировал через Gemini."
             img_bytes, err = await generate_image_with_gemini(prompt)
             used_provider = "Gemini"
     else:
@@ -131,7 +131,7 @@ async def _tool_generate_image(prompt: str, send_cb: Callable, provider: str = "
     if not img_bytes:
         return f"Image generation failed: {err or 'no data'}"
 
-    caption = f"🎨 {prompt[:900]}{note}"
+    caption = f"{prompt[:900]}{note}"
     await send_cb({"type": "photo", "data": img_bytes, "caption": caption[:1024], "filename": "image.jpg"})
     return f"[ОТПРАВЛЕНО] Картинка через {used_provider}.{note}"
 
@@ -224,7 +224,7 @@ async def _tool_download_video(url: str, caption: str, send_cb: Callable) -> str
         with open(fpath, "rb") as f:
             data = f.read()
         await send_cb({"type": "video", "data": data,
-                       "caption": caption[:1024] or "📹 Видео", "filename": files[0]})
+                       "caption": caption[:1024] or "Видео", "filename": files[0]})
         return f"Video ({size // 1024 // 1024} MB) sent."
 
 
@@ -344,23 +344,23 @@ async def _tool_search_video(
                 current_query = f"{query} {creator}".strip()
 
         tried_queries.append(current_query)
-        await _st(f"🔎 Ищу видео: «{current_query}» (попытка {rnd + 1}/{max_rounds})")
+        await _st(f"Ищу видео: «{current_query}» (попытка {rnd + 1}/{max_rounds})")
 
         video_urls = await _find_video_urls(current_query, creator=creator)
         if not video_urls:
-            await _st("⚠️ Ссылок не нашёл, меняю запрос...")
+            await _st("Ссылок не нашёл, меняю запрос...")
             continue
 
-        await _st(f"📥 Нашёл {len(video_urls)} ссылок, проверяю автора и скачиваю...")
+        await _st(f"Нашёл {len(video_urls)} ссылок, проверяю автора и скачиваю...")
         for vid_url in video_urls[:6]:
             # Verify creator if specified
             if creator:
                 matches, found_name = await _verify_video_creator(vid_url, creator)
                 if not matches:
                     logger.debug(f"Creator mismatch: wanted={creator!r} found={found_name!r} url={vid_url[:60]}")
-                    await _st(f"⚠️ Видео не от {creator} (автор: {found_name or '?'}), пропускаю...")
+                    await _st(f"Видео не от {creator} (автор: {found_name or '?'}), пропускаю...")
                     continue
-                await _st(f"✅ Автор подтверждён: {found_name}, скачиваю...")
+                await _st(f"Автор подтверждён: {found_name}, скачиваю...")
 
             result = await _tool_download_video(vid_url, description or query, send_cb)
             if "sent" in result.lower() or "mb)" in result.lower():
@@ -370,7 +370,7 @@ async def _tool_search_video(
                 return f"[ОТПРАВЛЕНО] Видео скачано и отправлено{creator_info}. Источник: {safe_url}"
             logger.debug(f"search_video dl failed: {vid_url!r} → {result[:80]}")
 
-        await _st("⚠️ Ни одно видео не скачалось, ищу лучше...")
+        await _st("Ни одно видео не скачалось, ищу лучше...")
 
     return f"[НЕ НАЙДЕНО] Не удалось найти и скачать видео после {max_rounds} попыток. Пробовал: {tried_queries}. Скажи об этом пользователю честно."
 
@@ -383,7 +383,7 @@ async def _tool_tts(text: str, voice: str, lang: str, send_cb: Callable) -> str:
     if err or not audio:
         return f"TTS failed: {err or 'no audio'}"
     await send_cb({"type": "audio", "data": audio,
-                   "caption": f"🎙 {text[:200]}", "filename": "speech.ogg"})
+                   "caption": f"{text[:200]}", "filename": "speech.ogg"})
     return "Audio sent."
 
 

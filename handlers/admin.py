@@ -61,7 +61,7 @@ async def cmd_unban(message: types.Message):
     await remove_banned_user_db(target_id)
     if target_id in banned_user_ids:
         banned_user_ids.remove(target_id)
-    await message.reply(f'✅ Юзер {target_id} разбанен.')
+    await message.reply(f'Пользователь {target_id} разбанен.')
 
 @admin_router.message(Command('ban'))
 async def cmd_ban(message: types.Message):
@@ -72,7 +72,7 @@ async def cmd_ban(message: types.Message):
         return
     await add_banned_user_db(target_id)
     banned_user_ids.add(target_id)
-    await message.reply(f'🚫 Юзер {target_id} забанен навсегда.')
+    await message.reply(f'Пользователь {target_id} забанен навсегда.')
 
 @admin_router.message(Command('limit'))
 async def cmd_limit(message: types.Message):
@@ -90,7 +90,7 @@ async def cmd_limit(message: types.Message):
         return
     chat_custom_limits[message.chat.id] = (req_limit, days)
     await set_chat_limit_db(message.chat.id, req_limit, days)
-    await message.reply(f'✅ Установлен лимит для этого чата: {req_limit} генераций раз в {days} дней.')
+    await message.reply(f'Установлен лимит для этого чата: {req_limit} генераций раз в {days} дней.')
 
 def _stats_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='За сегодня', callback_data='stats:today')], [InlineKeyboardButton(text='За всё время', callback_data='stats:all')]])
@@ -99,7 +99,7 @@ def _stats_keyboard() -> InlineKeyboardMarkup:
 async def cmd_stats(message: types.Message):
     if message.from_user.id != OWNER_USER_ID:
         return
-    await message.reply('📊 Выберите период для статистики:', reply_markup=_stats_keyboard())
+    await message.reply('Выберите период для статистики:', reply_markup=_stats_keyboard())
 
 @admin_router.callback_query(F.data.startswith('stats:'))
 async def handle_stats(callback: types.CallbackQuery):
@@ -113,10 +113,10 @@ async def handle_stats(callback: types.CallbackQuery):
     today_str = str(date.today())
     if period == 'today':
         stats = await get_user_stats(today_str)
-        title = f'📊 Статистика за сегодня ({today_str}):'
+        title = f'Статистика за сегодня ({today_str}):'
     else:
         stats = await get_user_stats()
-        title = '📊 Статистика за всё время:'
+        title = 'Статистика за всё время:'
     if not stats:
         await callback.answer('Нет данных.')
         return
@@ -133,7 +133,7 @@ async def handle_stats(callback: types.CallbackQuery):
     for (uid, data) in sorted_users:
         un = f"@{data['username']}" if data['username'] else f"<a href='tg://user?id={uid}'>{data['name']}</a>"
         total = sum((data[k] for k in ['image', 'video', 'text', 'code']))
-        line = f'👤 {un} (<code>{uid}</code>)\n'
+        line = f'{un} (<code>{uid}</code>)\n'
         line += f"  Всего: {total} (Картинки: {data['image']}, Видео: {data['video']}, Текст: {data['text']}, Код: {data['code']})"
         lines.append(line)
     text = '\n\n'.join(lines)[:4000]
@@ -159,12 +159,12 @@ async def cmd_prompts(message: types.Message):
     if not prompts:
         await message.reply('Нет логов промптов.')
         return
-    lines = [f'📝 Последние {len(prompts)} промптов' + (f' от {user_id}' if user_id else '') + ':\n']
+    lines = [f'Последние {len(prompts)} промптов' + (f' от {user_id}' if user_id else '') + ':\n']
     for p in prompts:
         import datetime
         dt = datetime.datetime.fromtimestamp(p['created_at']).strftime('%H:%M:%S')
         un = f"@{p['username']}" if p['username'] else f"{p['first_name']}"
-        lines.append(f"[{dt}] 👤 {un} ({p['user_id']}) - <b>{p['gen_type']}</b>:\n<pre>{p['prompt'][:300]}</pre>")
+        lines.append(f"[{dt}] {un} ({p['user_id']}) - <b>{p['gen_type']}</b>:\n<pre>{p['prompt'][:300]}</pre>")
     text = '\n\n'.join(lines)[:4000]
     await message.reply(text, parse_mode='HTML')
 
@@ -183,10 +183,10 @@ async def cmd_vip(message: types.Message):
             except ValueError:
                 pass
     if not target_id:
-        await message.reply('Ответь на сообщение юзера или укажи /vip <user_id>')
+        await message.reply('Ответь на сообщение пользователя или укажи /vip <user_id>')
         return
     paid_unlimited_until[target_id] = time.time() + 86400
-    await message.reply(f'✅ Юзер {target_id} получил безлимит на 24 часа.')
+    await message.reply(f'Пользователь {target_id} получил безлимит на 24 часа.')
 
 def _check_daily_limit(user_id: int, chat_id: int) -> tuple:
     (req_limit, days) = chat_custom_limits.get(chat_id, (DAILY_GEN_LIMIT, 1))

@@ -6,7 +6,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Message
 from aiogram.exceptions import TelegramRetryAfter
-from config import BOT_TOKEN_2, DUAL_HISTORY_SIZE, BANNED_USER_IDS, TELEGRAM_API_URL, TELEGRAM_API_IS_LOCAL
+from config import BOT_TOKEN_2, DUAL_HISTORY_SIZE, BANNED_USER_IDS, TELEGRAM_API_URL, TELEGRAM_API_IS_LOCAL, DEEPSEEK_MODEL
 from keys import load_firecrawl_keys, remove_key
 from state import dual_histories, dual_tasks
 from aiogram.client.telegram import TelegramAPIServer
@@ -161,7 +161,7 @@ async def _search_web(query: str) -> str:
 async def _call_deepseek(system_prompt: str, prompt: str) -> str:
     text = await deepseek_text(
         prompt=prompt, system_prompt=system_prompt,
-        model="deepseek-v4-flash", temperature=1.3, max_tokens=600, timeout=30,
+        model=DEEPSEEK_MODEL, temperature=1.3, max_tokens=600, timeout=30,
     )
     return text or ""
 

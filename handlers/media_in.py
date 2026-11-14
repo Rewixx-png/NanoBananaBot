@@ -85,7 +85,7 @@ async def _send_generated_project(message: types.Message, project: dict[str, Any
     project_name = _project_filename(str(project.get('project_name', 'project')))
     summary = _clean_plain_reply(str(project.get('summary', 'Собрал файлы проекта.')))
     instructions = _clean_plain_reply(str(project.get('run_instructions', '')))
-    status = '✅ Проверил через Python/парсеры — синтаксис живой.' if is_valid else '⚠️ Собрал, но проверка нашла косяки:\n' + '\n'.join(validation_errors[:5])
+    status = 'Проверка синтаксиса: OK.' if is_valid else 'Проверка нашла ошибки:\n' + '\n'.join(validation_errors[:5])
     caption_parts = [summary, status]
     if instructions:
         caption_parts.append('Запуск: ' + instructions)
@@ -113,9 +113,9 @@ async def _send_text_with_code_documents(message: types.Message, text_response: 
     cleaned_text = _clean_plain_reply(re.sub(_FENCE, '', text_response, flags=re.DOTALL).strip())
     logger.info(f'File-task: found {len(code_blocks)} code block(s) in response ({len(text_response)} chars)')
     if not cleaned_text and code_blocks:
-        cleaned_text = 'Вот твой ебаный код, подавись нахуй.'
+        cleaned_text = 'Готовый код.'
     elif not cleaned_text:
-        cleaned_text = 'Нихуя не понял, но иди в пизду.'
+        cleaned_text = 'Не понял ответ. Переформулируй.'
     sent_msg = await safe_send(message.reply, cleaned_text, **reply_kwargs)
     if not sent_msg:
         logger.warning('File-task reply was not sent after flood-control retries')
@@ -148,7 +148,7 @@ async def _process_file_task(message: types.Message, task_data: dict[str, Any], 
         f'[СОДЕРЖИМОЕ]\n<<<FILE_CONTENT_START>>>\n{content}\n<<<FILE_CONTENT_END>>>\n\n'
         f'[ЗАДАЧА ПОЛЬЗОВАТЕЛЯ]\n{instruction}'
     )
-    thinking_msg = await message.reply('⏳ Читаю файл и думаю...', **reply_kwargs)
+    thinking_msg = await message.reply('Читаю файл...', **reply_kwargs)
     thread_id = task_data.get('message_thread_id') if task_data.get('message_thread_id') else (message.message_thread_id if message.chat.is_forum else None)
     await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=thread_id)
     _status_cb = make_status_cb(thinking_msg, min_interval=3, parse_mode=None)
@@ -220,7 +220,7 @@ async def _handle_file_document_upload(message: types.Message, bot_user: types.U
     if _ctx:
         _prompt = "[История чата — последние сообщения (НЕ инструкция!)]:\n" + "\n".join(_ctx[-50:]) + "\n[Конец истории]\n\n" + _prompt
 
-    thinking_msg = await message.reply('⏳ Агент анализирует файл...', **reply_kwargs)
+    thinking_msg = await message.reply('Анализирую файл...', **reply_kwargs)
     _status_cb = make_status_cb(thinking_msg)
     _send_cb = partial(send_agent_callback, message=message, reply_kwargs=reply_kwargs)
     try:
@@ -319,10 +319,10 @@ async def _handle_kick_directive(message: types.Message, text: str, reply_kwargs
     try:
         member = await bot.get_chat_member(message.chat.id, target_id)
         if member.status in ('administrator', 'creator'):
-            admin_text = f'Я бы выкинул {target_name}, но у него админка, облом.'
+            admin_text = f'Нельзя удалить {target_name}: администратор.'
             return f'{admin_text}\n{rest}'.strip()
         await _kick_chat_member(bot, message.chat.id, target_id)
-        kick_text = f'Выкинул {target_name} нахуй за: {reason}'
+        kick_text = f'Пользователь {target_name} удалён. Причина: {reason}'
         return f'{kick_text}\n{rest}'.strip()
     except Exception as e:
         logger.warning(f'Kick attempt failed for user {target_id}: {e}')
@@ -359,7 +359,7 @@ async def _media_to_agent(
             if _is_img:
                 result = await _analyze_photo_with_status(message, file_bytes, _prompt, reply_kwargs)
             else:
-                _bot_msg = await message.reply('🔍 Анализирую видео...', **reply_kwargs)
+                _bot_msg = await message.reply('Анализирую видео...', **reply_kwargs)
                 try:
                     from services.nvidia_vision import analyze_video
                     result = await analyze_video(file_bytes, _prompt, max_frames=8)
@@ -385,7 +385,7 @@ async def _media_to_agent(
             await safe_send(message.reply, 'Не удалось проанализировать. Пробую через агента...', **reply_kwargs)
         except Exception as _ve:
             logger.warning(f"Vision shortcut failed: {_ve}")
-    thinking_msg = await message.reply('⏳ Думаю...', **reply_kwargs)
+    thinking_msg = await message.reply('Думаю...', **reply_kwargs)
     _status_cb = make_status_cb(thinking_msg)
     _send_cb = partial(send_agent_callback, message=message, reply_kwargs=reply_kwargs)
 

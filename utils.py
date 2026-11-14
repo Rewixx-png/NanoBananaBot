@@ -1,6 +1,10 @@
 import logging
+import time
 from aiogram import Bot
 from config import CHAT_ID, ALLOWED_USER_IDS, BANNED_USER_IDS, TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID, ADMIN_IDS
+
+_MEMBERSHIP_CACHE: dict[int, tuple[bool, float]] = {}
+_MEMBERSHIP_CACHE_TTL = 30.0
 
 def is_banned(user_id: int) -> bool:
     return user_id in BANNED_USER_IDS
@@ -24,12 +28,18 @@ async def check_membership(bot: Bot, user_id: int, chat_id: int=None) -> bool:
         return True
     if chat_id in (TEXT_ONLY_CHAT_ID, FULL_ACCESS_CHAT_ID):
         return True
+    now = time.monotonic()
+    cached = _MEMBERSHIP_CACHE.get(user_id)
+    if cached and now - cached[1] < _MEMBERSHIP_CACHE_TTL:
+        return cached[0]
     try:
         member = await bot.get_chat_member(chat_id=CHAT_ID, user_id=user_id)
-        return member.status in ['member', 'administrator', 'creator']
+        allowed = member.status in ['member', 'administrator', 'creator']
     except Exception as e:
         logging.error(f'Ошибка проверки подписки: {e}')
-        return False
+        allowed = False
+    _MEMBERSHIP_CACHE[user_id] = (allowed, now)
+    return allowed
 
 
 import html as _html

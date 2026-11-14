@@ -20,6 +20,7 @@ from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarku
 
 from config import (
     TEXT_ONLY_CHAT_ID,
+    SUNO_LYRICS_MAX_CHARS,
 )
 
 from state import (
@@ -94,11 +95,11 @@ _RANDOM_GIF_PATHS = [
 ]
 
 _TEMP_OPTIONS = [
-    (0.1, '🎯 Точный', 'строго следует промпту, почти без вариаций'),
-    (0.5, '⚖️ Умеренный', 'баланс точности и разнообразия'),
-    (1.0, '✨ Стандарт', 'стандартная генерация (по умолчанию)'),
-    (1.5, '🎨 Творческий', 'больше вариативности и интерпретации'),
-    (2.0, '🌀 Безумный', 'максимальная непредсказуемость')
+    (0.1, 'Точный', 'строго следует промпту, почти без вариаций'),
+    (0.5, 'Умеренный', 'баланс точности и разнообразия'),
+    (1.0, 'Стандарт', 'обычная генерация'),
+    (1.5, 'Творческий', 'больше вариативности и интерпретации'),
+    (2.0, 'Безумный', 'максимальная непредсказуемость')
 ]
 
 _NSFW_STEPS = [20, 25, 28, 35, 50]
@@ -110,7 +111,7 @@ _NSFW_CLIP_SKIP = [1, 2, 3]
 _NSFW_PAG = [0, 1, 2, 3, 5]
 _NSFW_RESCALE = [0.5, 0.7, 1.0]
 
-_TTS_LANGS = [('🇷🇺 RU', 'ru-RU'), ('🇬🇧 EN', 'en-US'), ('🇯🇵 JA', 'ja-JP')]
+_TTS_LANGS = [('RU', 'ru-RU'), ('EN', 'en-US'), ('JA', 'ja-JP')]
 _TTS_TEMPS = [0.1, 0.5, 1.0, 1.5, 2.0]
 TTS_VOICES = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Leda', 'Orus', 'Aoede', 'Callirrhoe', 'Autonoe', 'Enceladus', 'Iapetus', 'Umbriel', 'Algieba', 'Despina', 'Erinome', 'Algenib', 'Rasalgethi', 'Laomedeia', 'Achernar', 'Alnilam', 'Schedar', 'Gacrux', 'Pulcherrima', 'Achird', 'Zubenelgenubi', 'Vindemiatrix', 'Sadachbia', 'Sadaltager', 'Sulafat']
 
@@ -132,7 +133,7 @@ _NSFW_CFG_DEFAULTS: dict[str, Any] = {
 }
 
 _NSFW_KEYBOARD_LAYOUT = (
-    ('actions',      False, (('✏️ Промпт', 'prompt'), ('🚫 Негативный', 'neg'))),
+    ('actions',      False, (('Промпт', 'prompt'), ('Негативный промпт', 'neg'))),
     ('header',       False, '— Шаги —'),
     ('options',      False, ('steps',     _NSFW_STEPS)),
     ('header',       False, '— CFG Scale —'),
@@ -150,7 +151,7 @@ _NSFW_KEYBOARD_LAYOUT = (
     ('header',       True,  '— Guidance Rescale —'),
     ('options',      True,  ('rescale',   _NSFW_RESCALE)),
     ('special_wai',  True,  None),
-    ('generate',     False, '🚀 Генерировать'),
+    ('generate',     False, 'Сгенерировать'),
 )
 
 _TTS_CFG_DEFAULTS: dict[str, Any] = {
@@ -158,16 +159,16 @@ _TTS_CFG_DEFAULTS: dict[str, Any] = {
 }
 
 _TTS_KEYBOARD_LAYOUT = (
-    ('actions',  False, (('✏️ Текст', 'prompt'), ('🎭 Сцена', 'scene'))),
-    ('actions',  False, (('🎭 Стиль', 'style'), ('🎭 Темп', 'pace'), ('🎭 Акцент', 'accent'))),
+    ('actions',  False, (('Текст', 'prompt'), ('Сцена', 'scene'))),
+    ('actions',  False, (('Стиль', 'style'), ('Темп', 'pace'), ('Акцент', 'accent'))),
     ('header',   False, '— Температура —'),
     ('options',  False, ('temp',  _TTS_TEMPS)),
     ('header',   False, '— Язык —'),
     ('options',  False, ('lang',  _TTS_LANGS)),
     ('header',   False, '— Голос —'),
     ('chunked',  False, ('voice', TTS_VOICES, 3)),
-    ('preview',  False, '🔊 Прослушать голос'),
-    ('generate', False, '🚀 Генерировать'),
+    ('preview',  False, 'Прослушать голос'),
+    ('generate', False, 'Сгенерировать'),
 )
 
 _SUNO_CFG_DEFAULTS: dict[str, Any] = {
@@ -181,13 +182,13 @@ _SUNO_WEIRDNESS = [0.0, 0.25, 0.5, 0.65, 1.0]
 _SUNO_AUDIO_WEIGHTS = [0.0, 0.25, 0.5, 0.65, 1.0]
 _SUNO_VARIETY = [('0 точно', 0), ('1 норма', 1), ('2 разно', 2), ('3 смело', 3), ('4 макс', 4)]
 _SUNO_DURATIONS = [30, 60, 90, 120, 180, 240, 360]
-_SUNO_VOCAL = [('— любой', ''), ('👨 муж', 'm'), ('👩 жен', 'f')]
+_SUNO_VOCAL = [('Любой', ''), ('Мужской', 'm'), ('Женский', 'f')]
 
 _SUNO_KEYBOARD_LAYOUT = (
-    ('actions',  False, (('✏️ Стиль', 'style'), ('📝 Текст песни', 'lyrics'))),
-    ('actions',  False, (('🏷 Название', 'title'), ('🚫 Исключить', 'neg'))),
+    ('actions',  False, (('Стиль', 'style'), ('Текст песни', 'lyrics'))),
+    ('actions',  False, (('Название', 'title'), ('Исключить', 'neg'))),
     ('header',   False, '— Вокал —'),
-    ('options',  False, ('instrumental', (('🎹 Инструментал', '1'), ('🎤 С вокалом', '0')))),
+    ('options',  False, ('instrumental', (('Инструментал', '1'), ('С вокалом', '0')))),
     ('options',  False, ('vocal', _SUNO_VOCAL)),
     ('header',   False, '— Точность стиля (styleWeight) —'),
     ('options',  False, ('style_weight', _SUNO_STYLE_WEIGHTS)),
@@ -199,25 +200,25 @@ _SUNO_KEYBOARD_LAYOUT = (
     ('chunked',  False, ('variety', _SUNO_VARIETY, 3)),
     ('header',   False, '— Длительность, сек —'),
     ('chunked',  False, ('duration', _SUNO_DURATIONS, 4)),
-    ('generate', False, '🚀 Генерировать'),
+    ('generate', False, 'Сгенерировать'),
 )
 
 _LYRIA_CFG_DEFAULTS: dict[str, Any] = {
     'style': '', 'mood': '', 'structure': '', 'instrumental': '0', 'temp': 'normal',
 }
 
-_LYRIA_TEMPS = [('😐 safe', 'safe'), ('🙂 normal', 'normal'), ('🔥 bold', 'bold'), ('🤪 wild', 'wild')]
+_LYRIA_TEMPS = [('Спокойный', 'safe'), ('Обычный', 'normal'), ('Смелый', 'bold'), ('Дикий', 'wild')]
 
 # Lyria exposes only temperature as a real API option; style/mood/structure
 # are folded into the prompt text (see build_lyria_prompt).
 _LYRIA_KEYBOARD_LAYOUT = (
-    ('actions',  False, (('✏️ Стиль', 'style'), ('🎭 Настроение', 'mood'))),
-    ('actions',  False, (('📝 Структура', 'structure'),)),
+    ('actions',  False, (('Стиль', 'style'), ('Настроение', 'mood'))),
+    ('actions',  False, (('Структура', 'structure'),)),
     ('header',   False, '— Вокал —'),
-    ('options',  False, ('instrumental', (('🎹 Инструментал', '1'), ('🎤 С вокалом', '0')))),
+    ('options',  False, ('instrumental', (('Инструментал', '1'), ('С вокалом', '0')))),
     ('header',   False, '— Креативность (temperature) —'),
     ('chunked',  False, ('temp', _LYRIA_TEMPS, 2)),
-    ('generate', False, '🚀 Генерировать'),
+    ('generate', False, 'Сгенерировать'),
 )
 
 async def safe_send(coro_func, *args, **kwargs):
@@ -490,10 +491,10 @@ def _validate_generated_files(files: list[dict[str, str]]) -> tuple[bool, list[s
 def _fallback_generation_error_explanation(error_msg: str) -> str:
     lowered = (error_msg or '').lower()
     if 'ключ' in lowered or 'quota' in lowered or '429' in lowered or 'исчерпан' in lowered:
-        return 'Ключи или квота на генерацию сейчас сдохли. Это не твой промпт, это сервисы опять легли мордой в пол.'
+        return 'Лимит ключей исчерпан. Попробуй позже или выбери другого провайдера.'
     if 'policy' in lowered or 'safety' in lowered or 'цензур' in lowered or 'blocked' in lowered:
-        return 'Похоже, генератор словил цензуру или safety-фильтр. Переформулируй мягче, а то он обосрался раньше меня.'
-    return 'Генератор вернул ошибку, а мозги для пояснения тоже не ответили. Короче, сервис тупит — попробуй позже или упрости запрос.'
+        return 'Генератор отклонил запрос по safety-фильтру. Переформулируй промпт.'
+    return 'Генератор вернул ошибку. Попробуй ещё раз или упрости запрос.'
 
 def _is_text_filename(filename: str) -> bool:
     return os.path.splitext((filename or '').lower())[1] in SAFE_TEXT_EXTS
@@ -682,8 +683,8 @@ async def run_progress_bar(bot, chat_id: int, message_id: int, model_label: str,
             time_str = f'{elapsed // 60}:{elapsed % 60:02d}'
         filled = pos % BAR_LEN
         bar = '■' * filled + '□' * (BAR_LEN - filled)
-        status_info = f"\nℹ️ {state_data['status']}" if state_data and state_data.get('status') else ""
-        text = f'⏳ Генерация...\n[{bar}]\nПрошло: {time_str}\nМодель: {model_label}{status_info}'
+        status_info = f"\n{state_data['status']}" if state_data and state_data.get('status') else ""
+        text = f'Генерация...\n[{bar}]\nПрошло: {time_str}\nМодель: {model_label}{status_info}'
         try:
             await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
         except Exception as e:
@@ -760,15 +761,15 @@ def _track_user(message: types.Message):
         chat_members_cache[cid][uid] = (message.from_user.first_name or 'Аноним', message.from_user.username)
 
 def _temp_message() -> str:
-    lines = ['🌡️ Выберите температуру генерации:\n', 'Температура влияет на то, насколько точно ИИ следует промпту.', 'Диапазон: 0.1 (точно) — 2.0 (творческий хаос)\n']
+    lines = ['Выберите температуру генерации:\n', 'Температура влияет на то, насколько точно модель следует промпту.', 'Диапазон: 0.1 (точно) - 2.0 (творческий хаос)\n']
     for (val, label, desc) in _TEMP_OPTIONS:
-        lines.append(f'{label} — {desc}')
+        lines.append(f'{label} ({val}): {desc}')
     return '\n'.join(lines)
 
 def _temp_keyboard(request_id: str) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=f'{label} ({val})', callback_data=f'ptmp:{request_id}:{i}')] for (i, (val, label, _)) in enumerate(_TEMP_OPTIONS)]
     rows.append([
-        InlineKeyboardButton(text='← Назад', callback_data=f'imgback:{request_id}'),
+        InlineKeyboardButton(text='Назад', callback_data=f'imgback:{request_id}'),
         InlineKeyboardButton(text='Отмена', callback_data=f'imgcancel:{request_id}'),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -778,7 +779,7 @@ def _providers_keyboard(request_id: str, chat_id: int, photo_count: int=0) -> In
     all_providers = ['gemini', 'flux', 'nsfw'] if chat_id == TEXT_ONLY_CHAT_ID else ['gemini', 'gpt', 'flux', 'nsfw']
     providers = [p for p in all_providers if PROVIDER_MODELS.get(p)]
     labels = {'gemini': 'Gemini', 'gpt': 'GPT', 'flux': 'FLUX', 'nsfw': 'Replicate'}
-    photo_label = f' 📎{photo_count} фото' if photo_count > 1 else ''
+    photo_label = f' · {photo_count} фото' if photo_count > 1 else ''
     rows = [[InlineKeyboardButton(text=labels[p] + (photo_label if p not in ('flux', 'nsfw') else ''), callback_data=f'imgprov:{request_id}:{p}') for p in providers]]
     rows.append([InlineKeyboardButton(text='Отмена', callback_data=f'imgcancel:{request_id}')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -799,8 +800,8 @@ def _nsfw_cfg_text(request_id: str) -> str:
     is_wai = 'flux' not in d.get('model', '')
     extra = ''
     if is_wai:
-        extra = f"\n\nКол-во: {cfg.get('batch', 1)} шт  |  Планировщик: {cfg.get('scheduler', 'DPM++ 2M Karras')}\nCLIP Skip: {cfg.get('clip_skip', 2)}  |  PAG: {cfg.get('pag_scale', 0)}  |  Rescale: {cfg.get('rescale', 1.0)}\nПрепромпт: {('✅' if cfg.get('prepend', True) else '❌')}  |  Seed: {cfg.get('seed', -1)}"
-    return f'''⚙️ {label}\n\n📝 Промпт:\n"{prompt}"\n\n🚫 Негативный промпт:\n{neg_display}\n\nШаги: {cfg.get('steps', 28)}  |  CFG: {cfg.get('cfg', 7.0)}  |  Размер: {cfg.get('size', '896x1152')}{extra}'''
+        extra = f"\n\nКол-во: {cfg.get('batch', 1)} шт  |  Планировщик: {cfg.get('scheduler', 'DPM++ 2M Karras')}\nCLIP Skip: {cfg.get('clip_skip', 2)}  |  PAG: {cfg.get('pag_scale', 0)}  |  Rescale: {cfg.get('rescale', 1.0)}\nПрепромпт: {('вкл' if cfg.get('prepend', True) else 'выкл')}  |  Seed: {cfg.get('seed', -1)}"
+    return f'''{label}\n\nПромпт:\n"{prompt}"\n\nНегативный промпт:\n{neg_display}\n\nШаги: {cfg.get('steps', 28)}  |  CFG: {cfg.get('cfg', 7.0)}  |  Размер: {cfg.get('size', '896x1152')}{extra}'''
 
 def _cfg_keyboard(request_id: str, pending_dict: dict, layout: tuple, defaults: dict, prefix: str, is_wai: bool = True) -> InlineKeyboardMarkup:
     """Build config keyboard from layout data."""
@@ -811,7 +812,7 @@ def _cfg_keyboard(request_id: str, pending_dict: dict, layout: tuple, defaults: 
         return v if isinstance(v, tuple) else (str(v), v)
 
     def _checked(cb_val, current):
-        return '✅' if str(cb_val) == str(current) else ''
+        return '✓ ' if str(cb_val) == str(current) else ''
 
     def _option_row(field, values, current):
         return [InlineKeyboardButton(
@@ -841,11 +842,11 @@ def _cfg_keyboard(request_id: str, pending_dict: dict, layout: tuple, defaults: 
             cur_seed = cfg.get('seed', -1)
             rows.append([
                 InlineKeyboardButton(
-                    text=f"{'✅' if cur_pre else '❌'} Препромпт качества",
+                    text=f"Препромпт: {'вкл' if cur_pre else 'выкл'}",
                     callback_data=f"{prefix}cfg:{request_id}:prepend:{'0' if cur_pre else '1'}",
                 ),
                 InlineKeyboardButton(
-                    text=f'🎲 Seed: {cur_seed}',
+                    text=f'Seed: {cur_seed}',
                     callback_data=f'{prefix}input:{request_id}:seed',
                 ),
             ])
@@ -855,22 +856,22 @@ def _cfg_keyboard(request_id: str, pending_dict: dict, layout: tuple, defaults: 
             rows.append([InlineKeyboardButton(text=payload, callback_data=f'{prefix}gen:{request_id}')])
     if prefix == 'tts':
         rows.append([
-            InlineKeyboardButton(text='← Назад', callback_data=f'ttsback:{request_id}'),
+            InlineKeyboardButton(text='Назад', callback_data=f'ttsback:{request_id}'),
             InlineKeyboardButton(text='Отмена', callback_data=f'ttsabort:{request_id}'),
         ])
     elif prefix == 'nsfw':
         rows.append([
-            InlineKeyboardButton(text='← Назад', callback_data=f'nsfwback:{request_id}'),
+            InlineKeyboardButton(text='Назад', callback_data=f'nsfwback:{request_id}'),
             InlineKeyboardButton(text='Отмена', callback_data=f'imgcancel:{request_id}'),
         ])
     elif prefix == 'suno':
         rows.append([
-            InlineKeyboardButton(text='← Назад', callback_data=f'sunoback:{request_id}'),
+            InlineKeyboardButton(text='Назад', callback_data=f'sunoback:{request_id}'),
             InlineKeyboardButton(text='Отмена', callback_data=f'sunocancel:{request_id}'),
         ])
     elif prefix == 'lyria':
         rows.append([
-            InlineKeyboardButton(text='← Назад', callback_data=f'lyriaback:{request_id}'),
+            InlineKeyboardButton(text='Назад', callback_data=f'lyriaback:{request_id}'),
             InlineKeyboardButton(text='Отмена', callback_data=f'lyriacancel:{request_id}'),
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -883,8 +884,72 @@ def _nsfw_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
 def _tts_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
     return _cfg_keyboard(request_id, pending_tts_configs, _TTS_KEYBOARD_LAYOUT, _TTS_CFG_DEFAULTS, 'tts')
 
+def _suno_quick_text(request_id: str) -> str:
+    """Beginner-friendly Suno screen: only the choices most users need."""
+    d = pending_suno_configs.get(request_id, {})
+    cfg = d.get('cfg', {})
+    idea = escape(str(d.get('prompt', '')[:300]))
+    style = (cfg.get('style') or '').strip()
+    lyrics = (cfg.get('lyrics') or '').strip()
+    duration = int(cfg.get('duration', 60))
+    instrumental = str(cfg.get('instrumental', '0')) == '1'
+    lines = [
+        f"<b>{escape(str(d.get('label', 'Suno V6')))}</b>",
+        f"<b>Идея:</b> {idea or '<i>не задана</i>'}",
+        f"<b>Стиль:</b> {escape(style[:160]) if style else '<i>возьму из идеи</i>'}",
+    ]
+    if instrumental:
+        lines.append("<b>Вокал:</b> нет, инструментал")
+    elif lyrics:
+        lines.append(f"<b>Текст:</b> {len(lyrics)} / {SUNO_LYRICS_MAX_CHARS} символов")
+    else:
+        lines.append("<b>Текст:</b> нет, Suno придумает сам")
+    lines.append(f"<b>Длительность:</b> {duration} с")
+    return "\n".join(lines)
+
+
+def _suno_quick_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    d = pending_suno_configs.get(request_id, {})
+    cfg = d.get('cfg', {})
+    instrumental = str(cfg.get('instrumental', '0')) == '1'
+    duration = int(cfg.get('duration', 60))
+    durations = [30, 60, 120, 180]
+    index = durations.index(duration) if duration in durations else 1
+    next_duration = durations[(index + 1) % len(durations)]
+    rows = [
+        [InlineKeyboardButton(text='Сгенерировать', callback_data=f'sunogen:{request_id}')],
+    ]
+    if instrumental:
+        rows.append([InlineKeyboardButton(text='Стиль', callback_data=f'sunoinput:{request_id}:style')])
+    else:
+        rows.append([
+            InlineKeyboardButton(text='Текст песни', callback_data=f'sunoinput:{request_id}:lyrics'),
+            InlineKeyboardButton(text='Стиль', callback_data=f'sunoinput:{request_id}:style'),
+        ])
+    rows.append([
+        InlineKeyboardButton(
+            text=f"Инструментал: {'вкл' if instrumental else 'выкл'}",
+            callback_data=f"sunocfg:{request_id}:instrumental:{'0' if instrumental else '1'}",
+        ),
+        InlineKeyboardButton(
+            text=f'Длительность: {duration} с',
+            callback_data=f'sunocfg:{request_id}:duration:{next_duration}',
+        ),
+    ])
+    rows.append([InlineKeyboardButton(text='Все настройки', callback_data=f'sunoall:{request_id}')])
+    rows.append([
+        InlineKeyboardButton(text='Назад', callback_data=f'sunoback:{request_id}'),
+        InlineKeyboardButton(text='Отмена', callback_data=f'sunocancel:{request_id}'),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _suno_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
-    return _cfg_keyboard(request_id, pending_suno_configs, _SUNO_KEYBOARD_LAYOUT, _SUNO_CFG_DEFAULTS, 'suno')
+    keyboard = _cfg_keyboard(request_id, pending_suno_configs, _SUNO_KEYBOARD_LAYOUT, _SUNO_CFG_DEFAULTS, 'suno')
+    keyboard.inline_keyboard.insert(-1, [
+        InlineKeyboardButton(text='Быстрый режим', callback_data=f'sunoquick:{request_id}')
+    ])
+    return keyboard
 
 def _suno_cfg_text(request_id: str) -> str:
     d = pending_suno_configs.get(request_id, {})
@@ -900,26 +965,26 @@ def _suno_cfg_text(request_id: str) -> str:
         return text if len(text) <= limit else text[:limit - 3] + '...'
 
     lines = [
-        f"🎼 <b>{escape(str(d.get('label', 'Suno')))}</b>",
+        f"<b>{escape(str(d.get('label', 'Suno')))}</b>",
         '',
-        f"💡 <b>Идея:</b> {escape(prompt)}",
-        f"✏️ <b>Стиль:</b> {escape(_cut(style)) if style else '<i>берётся из идеи</i>'}",
+        f"<b>Идея:</b> {escape(prompt)}",
+        f"<b>Стиль:</b> {escape(_cut(style)) if style else '<i>берётся из идеи</i>'}",
     ]
     if instrumental:
-        lines.append('🎹 <b>Инструментал:</b> без вокала')
+        lines.append('<b>Инструментал:</b> без вокала')
     else:
-        lines.append(f"📝 <b>Текст:</b> {escape(_cut(lyrics)) if lyrics else '<i>Suno придумает сам</i>'}")
-        lines.append(f"🎤 <b>Голос:</b> {vocal}")
+        lines.append(f"<b>Текст:</b> {escape(_cut(lyrics)) if lyrics else '<i>Suno придумает сам</i>'}")
+        lines.append(f"<b>Голос:</b> {vocal}")
     if cfg.get('title'):
-        lines.append(f"🏷 <b>Название:</b> {escape(str(cfg['title']))}")
+        lines.append(f"<b>Название:</b> {escape(str(cfg['title']))}")
     if cfg.get('neg'):
-        lines.append(f"🚫 <b>Исключить:</b> {escape(_cut(str(cfg['neg'])))}")
+        lines.append(f"<b>Исключить:</b> {escape(_cut(str(cfg['neg'])))}")
     lines.append(
-        f"⚖️ styleWeight {cfg.get('style_weight', 0.65)} · "
+        f"styleWeight {cfg.get('style_weight', 0.65)} · "
         f"creativity {cfg.get('weirdness', 0.25)} · "
         f"audio {cfg.get('audio_weight', 0.5)}"
     )
-    lines.append(f"🎲 разнообразие {cfg.get('variety', 1)} · ⏱ {cfg.get('duration', 60)}с")
+    lines.append(f"Разнообразие {cfg.get('variety', 1)} · {cfg.get('duration', 60)} с")
     return '\n'.join(lines)
 
 def _lyria_cfg_keyboard(request_id: str) -> InlineKeyboardMarkup:
@@ -932,31 +997,37 @@ def _lyria_cfg_text(request_id: str) -> str:
     cfg = d.get('cfg', {})
     idea = d.get('prompt', '')
     instrumental = str(cfg.get('instrumental', '0')) == '1'
-    temp = {'safe': 'safe 😐', 'normal': 'normal 🙂', 'bold': 'bold 🔥', 'wild': 'wild 🤪'}.get(
-        str(cfg.get('temp', 'normal')), 'normal')
+    temp = {'safe': 'Спокойный', 'normal': 'Обычный', 'bold': 'Смелый', 'wild': 'Дикий'}.get(
+        str(cfg.get('temp', 'normal')), 'Обычный')
 
     def _cut(text, limit=80):
         text = str(text).replace('\n', ' / ')
         return escape(text if len(text) <= limit else text[:limit - 3] + '...')
 
     lines = [
-        f"🎼 <b>{escape(str(d.get('label', 'Lyria')))}</b>",
+        f"<b>{escape(str(d.get('label', 'Lyria')))}</b>",
         '',
-        f"💡 <b>Идея:</b> {_cut(idea, 120)}",
+        f"<b>Идея:</b> {_cut(idea, 120)}",
     ]
-    for field, icon, name in (('style', '✏️', 'Стиль'), ('mood', '🎭', 'Настроение'),
-                              ('structure', '📝', 'Структура')):
+    for field, name in (('style', 'Стиль'), ('mood', 'Настроение'),
+                        ('structure', 'Структура')):
         value = (cfg.get(field) or '').strip()
-        lines.append(f"{icon} <b>{name}:</b> {_cut(value) if value else '<i>не задано</i>'}")
-    lines.append(f"🎹 <b>Инструментал:</b> {'без вокала' if instrumental else 'с вокалом'}")
-    lines.append(f"🎛 <b>Креативность:</b> {temp}")
+        lines.append(f"<b>{name}:</b> {_cut(value) if value else '<i>не задано</i>'}")
+    lines.append(f"<b>Инструментал:</b> {'без вокала' if instrumental else 'с вокалом'}")
+    lines.append(f"<b>Креативность:</b> {temp}")
     lines.append('')
-    lines.append('<i>Lyria не принимает структурных настроек, кроме temperature — '
-                 'стиль, настроение и структура вклеиваются в промпт.</i>')
+    lines.append('<i>Lyria принимает только temperature. Стиль, настроение и структура вклеиваются в промпт.</i>')
     return '\n'.join(lines)
 
 def _prompt_ai_keyboard(request_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Использовать этот промт', callback_data=f'puse:{request_id}')], [InlineKeyboardButton(text='🔄 Другой вариант', callback_data=f'pother:{request_id}'), InlineKeyboardButton(text='📝 Мой промт', callback_data=f'pbase:{request_id}')], [InlineKeyboardButton(text='Отмена', callback_data=f'imgcancel:{request_id}')]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='Использовать промпт', callback_data=f'puse:{request_id}')],
+        [
+            InlineKeyboardButton(text='Другой вариант', callback_data=f'pother:{request_id}'),
+            InlineKeyboardButton(text='Мой промпт', callback_data=f'pbase:{request_id}'),
+        ],
+        [InlineKeyboardButton(text='Отмена', callback_data=f'imgcancel:{request_id}')],
+    ])
 
 def _tts_cfg_text(request_id: str) -> str:
     d = pending_tts_configs.get(request_id, {})
@@ -969,14 +1040,14 @@ def _tts_cfg_text(request_id: str) -> str:
     accent = cfg.get('accent', '')[:50]
     extra = ''
     if scene:
-        extra += f'\n🎭 Сцена: "{scene}..."'
+        extra += f'\nСцена: "{scene}..."'
     if style:
-        extra += f'\n🎭 Стиль: "{style}..."'
+        extra += f'\nСтиль: "{style}..."'
     if pace:
-        extra += f'\n🎭 Темп: "{pace}..."'
+        extra += f'\nТемп: "{pace}..."'
     if accent:
-        extra += f'\n🎭 Акцент: "{accent}..."'
-    return f'''🎙️ {label}\n\n📝 Текст:\n"{prompt}"\n\nГолос: {cfg.get('voice', 'Puck')}\nТемпература: {cfg.get('temp', 1.0)}\nЯзык: {cfg.get('lang', 'ru-RU')}{extra}'''
+        extra += f'\nАкцент: "{accent}..."'
+    return f'''{label}\n\nТекст:\n"{prompt}"\n\nГолос: {cfg.get('voice', 'Puck')}\nТемпература: {cfg.get('temp', 1.0)}\nЯзык: {cfg.get('lang', 'ru-RU')}{extra}'''
 def make_status_cb(thinking_msg, *, min_interval=1.5, parse_mode='HTML'):
     """Factory: returns an async status callback that edits thinking_msg with throttling.
 

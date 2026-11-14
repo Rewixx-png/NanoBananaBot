@@ -31,9 +31,9 @@ SUNO_POLL_TIMEOUT = 420
 SUNO_TIMEOUT = 60
 
 SUNO_MODELS = {
-    'suno-v6': {'id': 'V6', 'label': '🤘 Suno V6', 'desc': 'Лучшее качество, живые вокалы'},
-    'suno-v6-wild': {'id': 'V6_WILD', 'label': '🔥 Suno V6 Wild', 'desc': 'Смелые эксперименты'},
-    'suno-v6-mini': {'id': 'V6_MINI', 'label': '⚡ Suno V6 Mini', 'desc': 'Быстро и дёшево'},
+    'suno-v6': {'id': 'V6', 'label': 'Suno V6', 'desc': 'Лучшее качество, живые вокалы'},
+    'suno-v6-wild': {'id': 'V6_WILD', 'label': 'Suno V6 Wild', 'desc': 'Смелые эксперименты'},
+    'suno-v6-mini': {'id': 'V6_MINI', 'label': 'Suno V6 Mini', 'desc': 'Быстро и дёшево'},
 }
 
 # Documented body codes; HTTP status is 200 even for failures.
@@ -75,7 +75,14 @@ async def _get_detail(session: aiohttp.ClientSession, task_id: str, key: str) ->
 
 def build_payload(prompt: str, model_id: str, cfg: dict) -> dict:
     """Map the /music settings UI onto the API's custom-mode body."""
-    style = (cfg.get('style') or '').strip() or (prompt or '').strip()
+    idea = (prompt or '').strip()
+    style = (cfg.get('style') or '').strip()
+    if idea and style and idea.casefold() != style.casefold():
+        # The API has no separate idea field in custom mode, so keep both:
+        # the idea describes the song, the style refines the sound.
+        style_text = f'{idea[:700]}, {style[:300]}'[:1000]
+    else:
+        style_text = (idea or style)[:1000]
     instrumental = str(cfg.get('instrumental', '0')) == '1'
     lyrics = (cfg.get('lyrics') or '').strip()
 
@@ -90,8 +97,8 @@ def build_payload(prompt: str, model_id: str, cfg: dict) -> dict:
         'variety': int(cfg.get('variety', 1)),
     }
     # In custom mode the API needs at least one of style/lyrics/negativeTags.
-    if style:
-        payload['style'] = style
+    if style_text:
+        payload['style'] = style_text
     if lyrics and not instrumental:
         payload['lyrics'] = lyrics
     if cfg.get('title'):
@@ -114,14 +121,18 @@ async def generate_suno(
     model_key: str = 'suno-v6',
     cfg: Optional[dict] = None,
     status_cb=None,
+    cancel_event=None,
 ) -> Tuple[Optional[list[dict]], Optional[str]]:
     """Generate a song. Returns (tracks, error).
 
     Each track is ``{'audio': bytes, 'cover': bytes | None, 'title': str,
     'tags': str, 'duration': float}``. Suno always returns two variations.
+    ``cancel_event`` stops polling and abandons the remote task.
     """
     if model_key not in SUNO_MODELS:
         return None, f'Неизвестная модель Suno: {model_key}'
+    if _is_cancelled(cancel_event):
+        return None, 'Suno: генерация отменена.'
     cfg = cfg or {}
     model_id = SUNO_MODELS[model_key]['id']
 
@@ -149,7 +160,8 @@ async def generate_suno(
                 if not task_id:
                     last_error = 'Suno не вернул taskId.'
                     continue
-                return await _await_tracks(session, task_id, key, status_cb)
+                logger.info(f'Suno task created: {task_id} (model={model_id})')
+                return await _await_tracks(session, task_id, key, status_cb, cancel_event)
 
             message = body.get('msg') or _CODE_MESSAGES.get(code, f'код {code}')
             described = f'{_CODE_MESSAGES.get(code, "Ошибка Suno")}: {message}'
@@ -167,10 +179,13 @@ async def generate_suno(
     return None, f'Suno: {last_error}{detail}'
 
 
-async def _await_tracks(session, task_id: str, key: str, status_cb) -> Tuple[Optional[list], Optional[str]]:
+async def _await_tracks(session, task_id: str, key: str, status_cb, cancel_event=None) -> Tuple[Optional[list], Optional[str]]:
     """Poll the task until tracks are ready, then download audio and covers."""
     waited = 0
     while waited <= SUNO_POLL_TIMEOUT:
+        if _is_cancelled(cancel_event):
+            logger.info(f'Suno task cancelled by user: {task_id} (waited={waited}s)')
+            return None, 'Suno: генерация отменена.'
         try:
             body = await _get_detail(session, task_id, key)
         except Exception as e:
@@ -182,9 +197,12 @@ async def _await_tracks(session, task_id: str, key: str, status_cb) -> Tuple[Opt
         ready = [t for t in tracks if t.get('audio_url') or t.get('audioUrl')]
 
         if ready:
-            downloaded = await _download_tracks(session, ready)
+            downloaded = await _download_tracks(session, ready, cancel_event)
             if downloaded:
                 return downloaded, None
+            if _is_cancelled(cancel_event):
+                logger.info(f'Suno task cancelled during download: {task_id}')
+                return None, 'Suno: генерация отменена.'
             return None, 'Suno: не удалось скачать готовые треки.'
 
         # Documented failure signals; the API omits `status` on success.
@@ -196,20 +214,46 @@ async def _await_tracks(session, task_id: str, key: str, status_cb) -> Tuple[Opt
                 reason = 'текст или стиль содержат запрещённые слова'
             return None, f'Suno не смог сгенерировать: {reason}'
 
+        if waited % 30 == 0:
+            logger.info(
+                f'Suno task {task_id}: status={status or "PENDING"}, '
+                f'ready={len(ready)}/{len(tracks)}, waited={waited}s'
+            )
         if status_cb:
             try:
-                await status_cb(f'🎼 Suno генерирует… ({waited}с)')
+                await status_cb(f'Suno генерирует… ({waited}с)')
             except Exception:
                 pass
-        await asyncio.sleep(SUNO_POLL_INTERVAL)
+        if await _wait_or_cancel(cancel_event, SUNO_POLL_INTERVAL):
+            logger.info(f'Suno task cancelled by user: {task_id} (waited={waited}s)')
+            return None, 'Suno: генерация отменена.'
         waited += SUNO_POLL_INTERVAL
 
+    logger.warning(f'Suno task timed out: {task_id} after {SUNO_POLL_TIMEOUT}s')
     return None, f'Suno: таймаут {SUNO_POLL_TIMEOUT}с — задача {task_id} не завершилась.'
 
 
-async def _download_tracks(session, tracks: list[dict]) -> list[dict]:
+def _is_cancelled(cancel_event) -> bool:
+    return cancel_event is not None and cancel_event.is_set()
+
+
+async def _wait_or_cancel(cancel_event, seconds: float) -> bool:
+    """Sleep for seconds, returning True as soon as cancellation is requested."""
+    if cancel_event is None:
+        await asyncio.sleep(seconds)
+        return False
+    try:
+        await asyncio.wait_for(cancel_event.wait(), timeout=seconds)
+    except asyncio.TimeoutError:
+        return False
+    return True
+
+
+async def _download_tracks(session, tracks: list[dict], cancel_event=None) -> list[dict]:
     result = []
     for track in tracks:
+        if _is_cancelled(cancel_event):
+            break
         audio_url = track.get('audio_url') or track.get('audioUrl')
         if not audio_url:
             continue
@@ -223,6 +267,8 @@ async def _download_tracks(session, tracks: list[dict]) -> list[dict]:
         except Exception as e:
             logger.warning(f'Suno audio download failed: {type(e).__name__}: {e}')
             continue
+        if _is_cancelled(cancel_event):
+            break
 
         cover = None
         cover_url = track.get('image_url') or track.get('imageUrl')

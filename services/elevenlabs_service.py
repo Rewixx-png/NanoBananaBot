@@ -30,11 +30,12 @@ from config import (
     ELEVENLABS_VOICE_CHANGER_MODEL,
     ELEVENLABS_VOICE_CHANGER_TIMEOUT,
     ELEVENLABS_VOICE_DESIGN_TIMEOUT,
+    ELEVENLABS_VOICE_DESIGN_MODEL,
 )
 
 logger = logging.getLogger(__name__)
 
-TIER_ORDER = {'enterprise': 0, 'business': 1, 'scale': 2, 'pro': 3, 'creator': 4, 'starter': 5, 'free': 6}
+TIER_ORDER = {'enterprise': 0, 'business': 1, 'scale': 2, 'pro': 3, 'creator': 4, 'payg': 4, 'starter': 5, 'free': 6}
 
 # Persistent session — lives for the bot's lifetime, avoids Connection closed
 _session: Optional[aiohttp.ClientSession] = None
@@ -207,7 +208,7 @@ async def elevenlabs_tts(text: str, voice_id: str, model: str = ELEVENLABS_TTS_M
             "stability": stability,
             "similarity_boost": similarity_boost,
             "style": style,
-            "speed": speed,
+            "speed": max(0.7, min(1.2, float(speed))),
         },
     }
     resp, _, err = await _try_with_keys(f"text-to-speech/{voice_id}", json=payload, timeout=ELEVENLABS_TTS_TIMEOUT)
@@ -327,19 +328,53 @@ async def elevenlabs_voice_changer(audio_bytes: bytes, voice_id: str, model: str
         return None, msg
     return None, err or "неизвестная ошибка"
 
+def _format_stt_text(data: dict) -> str:
+    """Prefer speaker-labelled transcript when Scribe returns multiple speakers."""
+    words = data.get("words") or []
+    speakers = {
+        word.get("speaker_id")
+        for word in words
+        if word.get("type") == "word" and word.get("speaker_id")
+    }
+    if len(speakers) <= 1:
+        return (data.get("text") or "").strip()
+
+    lines: list[str] = []
+    current = None
+    for word in words:
+        if word.get("type") not in ("word", "spacing"):
+            continue
+        speaker = word.get("speaker_id")
+        if not speaker:
+            speaker = current if word.get("type") == "spacing" and current else "speaker_0"
+        if speaker != current:
+            if lines:
+                lines.append("\n\n")
+            suffix = speaker.rsplit("_", 1)[-1]
+            label = f"Спикер {int(suffix) + 1}" if suffix.isdigit() else speaker
+            lines.append(f"{label}: ")
+            current = speaker
+        lines.append(word.get("text") or "")
+    text = "".join(lines).strip()
+    cleaned = "\n".join(line.rstrip() for line in text.split("\n")).strip()
+    return cleaned or (data.get("text") or "").strip()
+
+
 async def elevenlabs_stt(audio_bytes: bytes, language: str = None) -> tuple[Optional[str], Optional[str]]:
-    """Transcribe audio to text using Scribe v2. 90+ langs, speaker diarization.
+    """Transcribe audio to text using Scribe v2 with speaker diarization.
     Returns (text, error)."""
     form = aiohttp.FormData()
     form.add_field("file", audio_bytes, filename="audio.mp3", content_type="audio/mpeg")
     form.add_field("model_id", ELEVENLABS_STT_MODEL)
+    form.add_field("diarize", "true")
+    form.add_field("timestamps_granularity", "word")
     if language:
         form.add_field("language_code", language)
     resp, _, err = await _try_with_keys("speech-to-text", method="POST", data=form, timeout=ELEVENLABS_STT_TIMEOUT)
     if resp and resp.status == 200:
         data = await _safe_resp_json(resp)
         if data:
-            return data.get("text", ""), None
+            return _format_stt_text(data), None
         return None, "пустой ответ от API"
     if resp:
         body = await _safe_resp_text(resp)
@@ -352,22 +387,52 @@ async def elevenlabs_stt(audio_bytes: bytes, language: str = None) -> tuple[Opti
 # ── Voice Design (generate new voices from prompt) ──────────────────────────
 
 async def elevenlabs_design_voice(name: str, prompt: str, description: str = "") -> str:
-    """Generate a new voice or raise with the provider's diagnostic."""
-    payload = {
-        "name": name,
-        "text": prompt,
-        "description": description or f"Generated voice: {name}",
+    """Design a voice with eleven_ttv_v3, then create it from the first preview."""
+    design_payload = {
+        "voice_description": description or prompt,
+        "model_id": ELEVENLABS_VOICE_DESIGN_MODEL,
+        "auto_generate_text": True,
     }
-    response, _, error = await _try_with_keys("voice-generation/generate-voice", json=payload, timeout=ELEVENLABS_VOICE_DESIGN_TIMEOUT)
-    if response and response.status == 200:
-        data = await _safe_resp_json(response)
-        voice_id = data.get("voice_id", "") if data else ""
+    response, key_info, error = await _try_with_keys(
+        "text-to-voice/design", json=design_payload,
+        timeout=ELEVENLABS_VOICE_DESIGN_TIMEOUT,
+    )
+    if not (response and response.status == 200):
+        if response:
+            body = await _safe_resp_text(response)
+            error = f"HTTP {response.status}: {body[:300]}"
+        message = error or "provider returned no response"
+        logger.error(f"ElevenLabs voice design failed: {message}")
+        raise RuntimeError(f"ElevenLabs voice design: {message}")
+
+    data = await _safe_resp_json(response)
+    previews = (data or {}).get("previews") or []
+    generated_voice_id = previews[0].get("generated_voice_id") if previews else ""
+    if not generated_voice_id:
+        raise RuntimeError("ElevenLabs voice design: no previews")
+    if not key_info or not key_info.get("key"):
+        raise RuntimeError("ElevenLabs voice design: no key for preview")
+
+    create_payload = {
+        "voice_name": name,
+        "voice_description": description or prompt,
+        "generated_voice_id": generated_voice_id,
+    }
+    create_response = await _request(
+        "POST", "text-to-voice", key_info["key"],
+        json=create_payload, timeout=ELEVENLABS_VOICE_DESIGN_TIMEOUT,
+    )
+    if create_response and create_response.status == 200:
+        created = await _safe_resp_json(create_response)
+        voice_id = (created or {}).get("voice_id", "")
         if voice_id:
             return voice_id
-        error = "successful response contained no voice_id"
-    elif response:
-        body = await _safe_resp_text(response)
-        error = f"HTTP {response.status}: {body[:300]}"
+        error = "created voice response contained no voice_id"
+    elif create_response:
+        body = await _safe_resp_text(create_response)
+        error = f"HTTP {create_response.status}: {body[:300]}"
+    else:
+        error = "provider returned no response"
     message = error or "provider returned no response"
-    logger.error(f"ElevenLabs voice design failed: {message}")
+    logger.error(f"ElevenLabs voice design create failed: {message}")
     raise RuntimeError(f"ElevenLabs voice design: {message}")

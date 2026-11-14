@@ -102,6 +102,19 @@
 
 ---
 
+### 🎧 Voice Lab (`/voice`)
+
+- **TTS**: ElevenLabs V4 / V4 Turbo / V3 / Flash / Multilingual; V3/V4 понимают теги вроде `[whispers]`, `[laughs]`
+- **Клонирование**: голос по записи 1–5 минут
+- **Voice Design**: генерация голоса по текстовому описанию на `eleven_ttv_v3`
+- **Музыка**: ElevenLabs Music `music_v2_5`, до 30 секунд
+- **Звуковые эффекты**: ElevenLabs SFX, до 5 секунд
+- **Распознавание речи**: Scribe v2 с диаризацией — реплики разделяются на «Спикер 1 / Спикер 2»
+- **Очистка и смена голоса**: voice isolator + MVSEP (вокал/инструментал) + voice changer
+- MVSEP-токен задаётся через `MVSEP_API_TOKEN` в `.env`
+
+---
+
 ### 🔍 Анализ медиа
 
 | Тип | Что делает |

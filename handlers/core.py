@@ -25,74 +25,72 @@ PUBLIC_COMMANDS = [
 
 _MAIN_MENU_TEXT = (
     "<b>Hatani AI</b>\n"
-    "Я тут. Пиши задачу нормально или выбирай, что будем разносить.\n\n"
-    "<i>Команды — быстрый путь. Кнопки — если не хочешь вспоминать синтаксис.</i>"
+    "Пиши задачу или выбери раздел.\n"
+    "Могу ответить, найти информацию, создать медиа и запустить код."
 )
 
 _GUIDES = {
     "image": (
         "<b>Картинка</b>\n"
-        "Отправь <code>/image что нарисовать</code>. Фото или альбом прикрепляй как референс.\n\n"
+        "Отправь <code>/image описание</code>. Фото или альбом можно прикрепить как референс.\n\n"
         "Пример: <code>/image рыжий кот-космонавт, кинопостер</code>"
     ),
     "video": (
         "<b>Видео</b>\n"
-        "Отправь <code>/video что должно произойти</code>. Прикрепишь фото — бот его анимирует.\n\n"
-        "Рендер может занять до пяти минут, так что не долби кнопку повторно."
+        "Отправь <code>/video описание</code>. Если прикрепить фото, бот анимирует его.\n\n"
+        "Генерация занимает до 5 минут."
     ),
     "music": (
         "<b>Музыка</b>\n"
-        "Отправь <code>/music описание трека</code> — или просто <code>/music</code> и напиши описание сообщением.\n\n"
-        "Дальше выбираешь провайдера, у каждого свои модели и настройки:\n"
-        "• <b>Lyria by Google</b> — стиль, настроение, структура, креативность. Быстро.\n"
-        "• <b>Suno V6</b> — песни с вокалом: стиль, текст, название, инструментал, пол голоса, "
-        "точность стиля, креатив, разнообразие, длительность. Отдаёт два варианта.\n\n"
+        "Отправь <code>/music описание</code> или просто <code>/music</code> и пришли описание сообщением.\n\n"
+        "Lyria: инструментал, структура, креативность.\n"
+        "Suno: песни с вокалом, текст, настройки, два варианта.\n\n"
         "Пример: <code>/music мрачный synthwave без вокала</code>"
     ),
     "figma": (
         "<b>Figma</b>\n"
-        "Отправь <code>/figma описание интерфейса</code>. Нужен подключённый Figma Plugin.\n\n"
+        "Отправь <code>/figma описание интерфейса</code>. Нужен запущенный Figma-плагин.\n\n"
         "Пример: <code>/figma экран музыкального плеера в тёмной теме</code>"
     ),
     "up": (
         "<b>Апскейл фото</b>\n"
-        "Прикрепи одно фото и добавь команду <code>/up</code>. Результат придёт документом без сжатия."
+        "Прикрепи фото и отправь <code>/up</code>. Результат придёт документом без сжатия."
     ),
 }
 
 HELP_PAGES = (
     (
         "<b>Быстрый старт</b>\n"
-        "Пиши задачу обычным сообщением — агент сам выберет нужный инструмент.\n\n"
-        "• Ответить боту: упомяни его или сделай реплай.\n"
-        "• Картинка: <code>/image промпт</code>.\n"
-        "• Видео: <code>/video промпт</code>.\n"
-        "• Если застрял — вернись в <code>/start</code>, а не долби одну кнопку десять раз."
+        "Пиши задачу сообщением. Бот сам выберет инструмент.\n\n"
+        "В группе упомяни бота или ответь реплаем.\n"
+        "Команды: <code>/image</code>, <code>/video</code>, <code>/music</code>.\n"
+        "<code>/start</code> открывает меню."
     ),
     (
         "<b>Создание</b>\n"
-        "• <code>/image</code> — картинка по тексту или референсу.\n"
-        "• <code>/video</code> — видео по тексту или фото.\n"
-        "• <code>/music</code> — музыка по описанию.\n"
-        "• <code>/figma</code> — макет через подключённый плагин.\n"
-        "• <code>/up</code> — улучшить прикреплённое фото без сжатия."
+        "<code>/image</code>: картинка по описанию или референсу.\n"
+        "<code>/video</code>: видео по тексту или фото.\n"
+        "<code>/music</code>: музыка по описанию.\n"
+        "<code>/figma</code>: макет через плагин.\n"
+        "<code>/up</code>: апскейл прикреплённого фото."
     ),
     (
         "<b>Голос и аудио</b>\n"
-        "Открой <code>/voice</code>: там озвучка, клонирование голоса, распознавание речи, очистка шума и Voice Changer.\n\n"
+        "В <code>/voice</code>: озвучка, клонирование голоса, распознавание речи, очистка шума и Voice Changer.\n\n"
         "Быстрый TTS: <code>/tts текст</code>. Внутри каждого шага есть возврат и отмена."
     ),
     (
         "<b>Агент и инструменты</b>\n"
-        "Агент умеет искать свежие данные, скачивать медиа, собирать проекты, анализировать файлы, строить графики, переводить и создавать QR.\n\n"
-        "Пиши результат, а не название инструмента: «найди», «скачай», «собери», «проанализируй». Если ничего не найдено — бот обязан сказать это прямо, а не выдумывать херню."
+        "Агент ищет информацию, скачивает медиа, собирает проекты, анализирует файлы, строит графики, переводит и создаёт QR.\n\n"
+        "Пиши задачу, а не название инструмента: «найди», «скачай», «собери», «проанализируй».\n"
+        "Если результат не найден, бот скажет об этом прямо."
     ),
     (
         "<b>Команды</b>\n"
         "<code>/start</code> меню · <code>/help</code> справка · <code>/clear</code> очистить память\n"
         "<code>/image</code> картинка · <code>/video</code> видео · <code>/music</code> музыка\n"
-        "<code>/tts</code> озвучка · <code>/voice</code> Voice Lab · <code>/up</code> апскейл\n\n"
-        "Дополнительно: <code>/figma</code>, <code>/bull</code>, <code>/all</code>; <code>/dual</code> — только в специальной беседе."
+        "<code>/tts</code> озвучка · <code>/voice</code> голос · <code>/up</code> апскейл\n\n"
+        "Дополнительно: <code>/figma</code>, <code>/bull</code>, <code>/all</code>; <code>/dual</code>: только в специальной беседе."
     ),
 )
 
@@ -102,25 +100,22 @@ def _help_view(page: int) -> tuple[str, InlineKeyboardMarkup]:
     rows = []
     navigation = []
     if page > 0:
-        navigation.append(InlineKeyboardButton(text="← Раньше", callback_data=f"help:{page - 1}"))
+        navigation.append(InlineKeyboardButton(text="Назад", callback_data=f"help:{page - 1}"))
     if page < len(HELP_PAGES) - 1:
-        navigation.append(InlineKeyboardButton(text="Дальше →", callback_data=f"help:{page + 1}"))
+        navigation.append(InlineKeyboardButton(text="Далее", callback_data=f"help:{page + 1}"))
     if navigation:
         rows.append(navigation)
     rows.append([
         InlineKeyboardButton(text="Главное меню", callback_data="menu:home"),
-        InlineKeyboardButton(text="✕ Закрыть", callback_data="menu:close"),
+        InlineKeyboardButton(text="Закрыть", callback_data="menu:close"),
     ])
-    text = f"{HELP_PAGES[page]}\n\n<i>Страница {page + 1} из {len(HELP_PAGES)}</i>"
+    text = f"{HELP_PAGES[page]}\n\n<i>{page + 1}/{len(HELP_PAGES)}</i>"
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 def _clear_confirmation_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Стереть всё", callback_data="menu:clear:confirm")],
-        [
-            InlineKeyboardButton(text="← Назад", callback_data="menu:tools"),
-            InlineKeyboardButton(text="✕ Закрыть", callback_data="menu:close"),
-        ],
+        [InlineKeyboardButton(text="Удалить историю", callback_data="menu:clear:confirm")],
+        [InlineKeyboardButton(text="Отмена", callback_data="menu:tools")],
     ])
 
 
@@ -154,7 +149,7 @@ async def menu_voice(callback: types.CallbackQuery):
 async def menu_clear(callback: types.CallbackQuery):
     await callback.answer()
     await callback.message.edit_text(
-        "<b>Стереть память чата?</b>\nИстория, контекст и последний файл исчезнут. Назад дороги нет, так что думай.",
+        "<b>Удалить историю этого чата?</b>\nИстория, контекст и последний файл тоже исчезнут.",
         reply_markup=_clear_confirmation_keyboard(),
         parse_mode="HTML",
     )
@@ -165,20 +160,20 @@ async def menu_clear_confirm(callback: types.CallbackQuery):
     await callback.answer()
     await _clear_chat(callback.message.chat.id)
     await callback.message.edit_text(
-        "Память стёрта. Начинай с чистого листа и не тащи старый мусор обратно.",
+        "История удалена.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="Главное меню", callback_data="menu:home"),
-            InlineKeyboardButton(text="✕ Закрыть", callback_data="menu:close"),
+            InlineKeyboardButton(text="Закрыть", callback_data="menu:close"),
         ]]),
     )
 @core_router.message(Command('clear'))
 async def cmd_clear(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
-        await message.reply('Доступ закрыт: сначала вступи в обязательную беседу, затем повтори /clear.')
+        await message.reply('Нет доступа. Сначала вступи в обязательную беседу.')
         return
     await message.reply(
-        "<b>Стереть память чата?</b>\nИстория, контекст и последний файл исчезнут. Назад дороги нет, так что думай.",
+        "<b>Удалить историю этого чата?</b>\nИстория, контекст и последний файл тоже исчезнут.",
         reply_markup=_clear_confirmation_keyboard(),
         parse_mode='HTML',
     )
@@ -198,14 +193,14 @@ async def cmd_help(message: types.Message):
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🤖 Чат и агент", callback_data="menu:chat"),
-            InlineKeyboardButton(text="🎨 Создать", callback_data="menu:create"),
+            InlineKeyboardButton(text="Чат и агент", callback_data="menu:chat"),
+            InlineKeyboardButton(text="Создать", callback_data="menu:create"),
         ],
         [
-            InlineKeyboardButton(text="🎙 Голос и аудио", callback_data="menu:voice"),
-            InlineKeyboardButton(text="🧰 Инструменты", callback_data="menu:tools"),
+            InlineKeyboardButton(text="Голос и аудио", callback_data="menu:voice"),
+            InlineKeyboardButton(text="Инструменты", callback_data="menu:tools"),
         ],
-        [InlineKeyboardButton(text="📖 Как пользоваться", callback_data="help:0")],
+        [InlineKeyboardButton(text="Как пользоваться", callback_data="help:0")],
     ])
 
 
@@ -213,24 +208,24 @@ def _section_view(section: str) -> tuple[str, InlineKeyboardMarkup]:
     if section == "chat":
         text = (
             "<b>Чат и агент</b>\n"
-            "Пиши задачу обычным сообщением. Я сам решу: ответить, поискать, запустить инструмент или собрать файл.\n\n"
+            "Пиши задачу сообщением. Бот ответит, найдёт информацию или запустит инструмент.\n\n"
             "Примеры: «найди свежие новости», «собери сайт», «скачай видео», «построй график»."
         )
         rows = [[InlineKeyboardButton(text="Возможности агента", callback_data="help:3")]]
     elif section == "create":
-        text = "<b>Создание</b>\nВыбирай, что будем создавать, и не тыкай наугад."
+        text = "<b>Создание</b>\nЧто создать?"
         rows = [
             [
-                InlineKeyboardButton(text="Картинку", callback_data="guide:image"),
+                InlineKeyboardButton(text="Картинка", callback_data="guide:image"),
                 InlineKeyboardButton(text="Видео", callback_data="guide:video"),
             ],
             [
-                InlineKeyboardButton(text="Музыку", callback_data="guide:music"),
+                InlineKeyboardButton(text="Музыка", callback_data="guide:music"),
                 InlineKeyboardButton(text="Figma", callback_data="guide:figma"),
             ],
         ]
     elif section == "tools":
-        text = "<b>Инструменты</b>\nБыстрые действия без стены бесполезного текста."
+        text = "<b>Инструменты</b>\nБыстрые действия."
         rows = [
             [InlineKeyboardButton(text="Улучшить фото", callback_data="guide:up")],
             [InlineKeyboardButton(text="Очистить память", callback_data="menu:clear")],
@@ -239,8 +234,8 @@ def _section_view(section: str) -> tuple[str, InlineKeyboardMarkup]:
     else:
         raise ValueError(f"Неизвестный раздел меню: {section}")
     rows.append([
-        InlineKeyboardButton(text="← Назад", callback_data="menu:home"),
-        InlineKeyboardButton(text="✕ Закрыть", callback_data="menu:close"),
+        InlineKeyboardButton(text="Назад", callback_data="menu:home"),
+        InlineKeyboardButton(text="Закрыть", callback_data="menu:close"),
     ])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -250,8 +245,8 @@ def _guide_view(name: str) -> tuple[str, InlineKeyboardMarkup]:
     if text is None:
         raise ValueError(f"Неизвестная инструкция: {name}")
     return text, InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="← К разделу", callback_data="menu:create" if name != "up" else "menu:tools"),
-        InlineKeyboardButton(text="✕ Закрыть", callback_data="menu:close"),
+        InlineKeyboardButton(text="Назад", callback_data="menu:create" if name != "up" else "menu:tools"),
+        InlineKeyboardButton(text="Закрыть", callback_data="menu:close"),
     ]])
 
 
@@ -282,13 +277,13 @@ async def menu_guide(callback: types.CallbackQuery):
 @core_router.callback_query(F.data == "menu:close")
 async def menu_close(callback: types.CallbackQuery):
     await callback.answer()
-    await callback.message.edit_text("Меню закрыто. Пиши задачу, когда перестанешь тупить.")
+    await callback.message.edit_text("Меню закрыто.")
 @core_router.message(Command('start'))
 async def cmd_start(message: types.Message):
     if message.chat.type == 'private':
         is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
         if not is_member:
-            await message.answer('Доступ закрыт: сначала вступи в обязательную беседу, потом возвращайся.')
+            await message.answer('Нет доступа. Сначала вступи в обязательную беседу.')
             return
     await message.answer(
         _MAIN_MENU_TEXT,
@@ -297,13 +292,13 @@ async def cmd_start(message: types.Message):
     )
 
 _ALL_PHRASES = [
-    'Эй вы, уроды, все сюда нахуй! 👇',
-    'Хуиданте сюда все, живо! 🔔',
-    'Ау, дебилы, слышите? Все сюда! 📢',
-    'Все ко мне, быстро, я сказал! 🗣️',
-    'Ну-ка все собрались, чего расползлись! 👊',
-    'Стоять всем! Сюда смотреть! 👁️',
-    'Эй ты, и ты, и ты тоже — все на месте! ⚡'
+    'Эй вы, уроды, все сюда нахуй!',
+    'Хуиданте сюда все, живо!',
+    'Ау, дебилы, слышите? Все сюда!',
+    'Все ко мне, быстро, я сказал!',
+    'Ну-ка все собрались, чего расползлись!',
+    'Стоять всем! Сюда смотреть!',
+    'Эй ты, и ты, и ты тоже, все на месте!'
 ]
 
 

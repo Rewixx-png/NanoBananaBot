@@ -2,6 +2,7 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 from aiogram import Bot, Dispatcher, BaseMiddleware
 
 
@@ -39,11 +40,25 @@ class CallbackAccessMiddleware(BaseMiddleware):
         data: dict,
     ) -> Any:
         callback_data = event.data or ""
+        started = time.monotonic()
+        access_ms = 0.0
         if callback_data in self._SAFE_EXACT or callback_data.startswith(self._SAFE_PREFIXES):
-            return await handler(event, data)
-        if not await callback_has_access(event):
-            return None
-        return await handler(event, data)
+            result = await handler(event, data)
+        else:
+            access_started = time.monotonic()
+            allowed = await callback_has_access(event)
+            access_ms = (time.monotonic() - access_started) * 1000
+            if not allowed:
+                result = None
+            else:
+                result = await handler(event, data)
+        total_ms = (time.monotonic() - started) * 1000
+        if total_ms >= 1000 or access_ms >= 1000:
+            logging.getLogger(__name__).warning(
+                "SLOW CALLBACK data=%s user=%s access_ms=%.0f total_ms=%.0f",
+                callback_data[:120], event.from_user.id, access_ms, total_ms,
+            )
+        return result
 
 class DualHistoryMiddleware(BaseMiddleware):
 

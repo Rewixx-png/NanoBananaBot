@@ -60,7 +60,7 @@ async def _tool_run_python(code: str, ws: "AgentWorkspace", status_cb: Callable 
         if status_cb:
             try:
                 await status_cb(
-                    f"⏳ Запускаю Python · {t}\n"
+                    f"Запускаю Python · {t}\n"
                     f"<pre><code class=\"language-python\">{safe_code}{dots}</code></pre>\n"
                     f"<pre><code>{live}</code></pre>"
                 )
@@ -71,7 +71,7 @@ async def _tool_run_python(code: str, ws: "AgentWorkspace", status_cb: Callable 
     if status_cb:
         safe_out = _html.escape(out[:2300]) if out else "<i>(нет вывода)</i>"
         await status_cb(
-            f"🐍 Выполнено:\n"
+            f"Выполнено:\n"
             f"<pre><code class=\"language-python\">{safe_code}{dots}</code></pre>\n"
             f"\n<b>Вывод:</b>\n"
             f"<pre><code>{safe_out}</code></pre>"
@@ -94,7 +94,7 @@ async def _tool_run_shell(command: str, ws: "AgentWorkspace", status_cb: Callabl
         if status_cb:
             try:
                 await status_cb(
-                    f"⏳ Выполняю · {t}\n"
+                    f"Выполняю · {t}\n"
                     f"<pre><code class=\"language-bash\">{safe_cmd}{dots}</code></pre>\n"
                     f"<pre><code>{live}</code></pre>"
                 )
@@ -106,7 +106,7 @@ async def _tool_run_shell(command: str, ws: "AgentWorkspace", status_cb: Callabl
     if status_cb:
         safe_out = _html.escape(out[:2300]) if out else "<i>(нет вывода)</i>"
         await status_cb(
-            f"💻 Выполнено:\n"
+            f"Выполнено:\n"
             f"<pre><code class=\"language-bash\">{safe_cmd}{dots}</code></pre>\n"
             f"\n<b>Вывод:</b>\n"
             f"<pre><code>{safe_out}</code></pre>"
@@ -140,7 +140,7 @@ async def _tool_analyze_image(
         ]}],
         "generationConfig": {"temperature": 0.4, "mediaResolution": "MEDIA_RESOLUTION_HIGH"},
     }
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
     last_err = ""
     for key in keys:
         try:
@@ -194,7 +194,7 @@ async def _tool_analyze_audio(
         ]}],
         "generationConfig": {"temperature": 0.4},
     }
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
     last_err = ""
     for key in keys[:5]:
         try:
@@ -292,13 +292,13 @@ with sync_playwright() as p:
             with open(screen_host, "rb") as image:
                 data = image.read()
             await send_cb({"type": "photo", "data": data,
-                           "caption": f"📸 {url[:80]}", "filename": "screenshot.png"})
+                           "caption": f"{url[:80]}", "filename": "screenshot.png"})
         out = f"Скриншот отправлен | {url}"
 
     if status_cb:
         safe = _html.escape(out[:2000]) if out else "<i>(нет вывода)</i>"
         await status_cb(
-            f"🌐 Playwright [{_html.escape(action)}]: <code>{_html.escape(url[:100])}</code>\n"
+            f"Playwright [{_html.escape(action)}]: <code>{_html.escape(url[:100])}</code>\n"
             f"<pre><code>{safe}</code></pre>"
         )
     return _snip_output(out)[:2000] or f"(exit {rc}, no output)"

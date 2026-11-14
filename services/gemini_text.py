@@ -48,7 +48,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
 
     if allow_web and _needs_web_lookup(_wq):
         clean_q = await _extract_search_query(_wq)
-        await _status(f'🔍 Ищу в инете: «{clean_q[:80]}»...')
+        await _status(f'Ищу: «{clean_q[:80]}»...')
         try:
             web_context, web_available = await asyncio.wait_for(
                 search_web_with_firecrawl(clean_q, status_cb=status_cb, raw_request=_wq),
@@ -61,7 +61,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
             return 'Не могу сейчас зайти в интернет — все Firecrawl ключи сдохли или отвалились.'
         if explicit_web_lookup:
             src_count = web_context.count('---') + 1 if web_context else 0
-            await _status(f'🧠 Нашёл {src_count} источника(-ов), синтезирую ответ через DeepSeek V4 Flash...')
+            await _status(f'Нашёл источников: {src_count}. Готовлю ответ...')
             if not web_context:
                 return f'Я искал «{clean_q}» — поиск вернул пустоту. Firecrawl не нашёл ни одного пригодного источника.'
 
@@ -99,7 +99,7 @@ async def generate_text_with_gemini(prompt: str, chat_id: int, username: str='',
                 raise RuntimeError('DeepSeek не ответил (все ключи недоступны)')
         except Exception as error:
             logging.error(f"DeepSeek text generation failed: {type(error).__name__}: {error}", exc_info=True)
-            if not is_owner and not explicit_web_lookup and not web_context:
+            if not explicit_web_lookup and not web_context:
                 try:
                     from services.groq_service import generate_text_with_groq
                     context_lines = chat_context_buffer.get(chat_id, [])[-8:]
@@ -202,7 +202,7 @@ async def generate_bull_roast(name: str, username: str = '') -> list:
 
     text = await deepseek_text(
         prompt=user_prompt, system_prompt=system,
-        model="deepseek-v4-flash", temperature=1.5, max_tokens=2000, timeout=20,
+        model=DEEPSEEK_MODEL, temperature=1.5, max_tokens=2000, timeout=20,
     )
     if text:
         lines = [l.strip() for l in text.splitlines() if l.strip()][:10]

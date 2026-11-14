@@ -37,19 +37,19 @@ async def cmd_r34(message: types.Message):
         tag = text.strip()
     tag = re.sub(r'[^a-zA-Z0-9_\- ]', '', tag)[:80]
 
-    wait_msg = await safe_send(message.reply, f'🔞 Ищу {count} артов «{tag}» на 16 booru-источниках...')
+    wait_msg = await safe_send(message.reply, f'18+ Ищу {count} артов «{tag}» на 16 booru-источниках...')
 
     try:
         results = await asyncio.wait_for(search_r34(tag, count), timeout=45)
     except asyncio.TimeoutError:
-        await wait_msg.edit_text(f'⏰ Поиск «{tag}» занял больше 45 секунд. Попробуй ещё раз.')
+        await wait_msg.edit_text(f'Поиск «{tag}» занял больше 45 секунд. Попробуй ещё раз.')
         return
 
     if not results:
-        await wait_msg.edit_text(f'🔞 Ничего не нашёл по тегу «{tag}». Может, другой тег?')
+        await wait_msg.edit_text(f'18+ Ничего не нашёл по тегу «{tag}». Может, другой тег?')
         return
 
-    await wait_msg.edit_text(f'🔞 Нашёл {len(results)}/{count} артов «{tag}», скачиваю...')
+    await wait_msg.edit_text(f'18+ Нашёл {len(results)}/{count} артов «{tag}», скачиваю...')
 
     async with aiohttp.ClientSession() as session:
         media_files = []
@@ -67,7 +67,7 @@ async def cmd_r34(message: types.Message):
         pass
 
     if media_files:
-        caption = f'🔞 {tag} — {", ".join(dict.fromkeys(sources))}'[:1024]
+        caption = f'18+ {tag}: {", ".join(dict.fromkeys(sources))}'[:1024]
         album = []
         for i, f in enumerate(media_files):
             if i == 0:
@@ -79,4 +79,4 @@ async def cmd_r34(message: types.Message):
         except Exception as e:
             logger.warning(f'Failed to send r34 album: {e}')
     else:
-        await safe_send(message.reply, f'🔞 Нашлись ссылки, но не смог скачать ни одной картинки «{tag}».')
+        await safe_send(message.reply, f'18+ Нашлись ссылки, но не смог скачать ни одной картинки «{tag}».')

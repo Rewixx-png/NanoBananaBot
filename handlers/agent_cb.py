@@ -122,7 +122,7 @@ async def send_agent_callback(media: dict, /, *, message: types.Message, reply_k
             _req = await message.bot.get_chat_member(message.chat.id, message.from_user.id)
             if _req.status not in ("administrator", "creator"):
                 await safe_send(message.bot.send_message, chat_id=message.chat.id,
-                    text="❌ Эту команду могут выполнять только администраторы.", **kw)
+                    text="Эту команду могут выполнять только администраторы.", **kw)
                 return
         except Exception:
             pass
@@ -156,7 +156,7 @@ async def send_agent_callback(media: dict, /, *, message: types.Message, reply_k
                 name=media.get("name"), expire_date=media.get("expire_date"),
                 member_limit=media.get("member_limit"))
             await safe_send(message.bot.send_message, chat_id=message.chat.id,
-                text=f"🔗 Пригласительная ссылка: {link.invite_link}", **kw)
+                text=f"Пригласительная ссылка: {link.invite_link}", **kw)
         except Exception as _e:
             logger.warning(f"tg_invite_link failed: {_e}")
         return
@@ -167,10 +167,10 @@ async def send_agent_callback(media: dict, /, *, message: types.Message, reply_k
                                           filename=media.get("filename", "photo.jpg"))
             await message.bot.set_my_profile_photo(photo=photo_buf)
             await safe_send(message.bot.send_message, chat_id=message.chat.id,
-                            text="✅ Аватарка бота обновлена!", **kw)
+                            text="Аватарка бота обновлена.", **kw)
         except Exception as _e:
             await safe_send(message.bot.send_message, chat_id=message.chat.id,
-                            text=f"❌ Не смог сменить аву бота: {_e}", **kw)
+                            text="Не удалось сменить аватар бота.", **kw)
         return
 
     if mtype == "tg_set_chat_description":
@@ -234,7 +234,7 @@ async def send_agent_callback(media: dict, /, *, message: types.Message, reply_k
             t = await message.bot.create_forum_topic(chat_id=message.chat.id,
                 name=media.get("name","Новый топик")[:128])
             await safe_send(message.bot.send_message, chat_id=message.chat.id,
-                text=f"✅ Топик «{t.name}» создан (thread_id: {t.message_thread_id})", **kw)
+                text=f"Топик «{t.name}» создан (thread_id: {t.message_thread_id})", **kw)
         except Exception as _e:
             logger.warning(f"tg_create_forum_topic failed: {_e}")
         return
@@ -273,7 +273,7 @@ async def send_agent_callback(media: dict, /, *, message: types.Message, reply_k
         try:
             link = await message.bot.export_chat_invite_link(chat_id=message.chat.id)
             await safe_send(message.bot.send_message, chat_id=message.chat.id,
-                text=f"🔗 Ссылка: {link}", **kw)
+                text=f"Ссылка: {link}", **kw)
         except Exception as _e:
             logger.warning(f"tg_export_link failed: {_e}")
         return
@@ -285,11 +285,11 @@ async def send_agent_callback(media: dict, /, *, message: types.Message, reply_k
                              filename=media.get("filename", "photo.jpg"))
             await message.bot.set_chat_photo(chat_id=message.chat.id, photo=photo_buf)
             await safe_send(message.bot.send_message, chat_id=message.chat.id,
-                            text="✅ Аватарка беседы обновлена!", **kw)
+                            text="Аватарка беседы обновлена.", **kw)
         except Exception as _e:
             logger.warning(f"tg_set_chat_photo failed: {_e}")
             await safe_send(message.bot.send_message, chat_id=message.chat.id,
-                            text=f"❌ Не смог сменить аватарку: {_e}", **kw)
+                            text="Не удалось сменить аватарку.", **kw)
         return
 
 

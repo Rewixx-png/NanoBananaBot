@@ -94,7 +94,7 @@ async def _voice_reply(message: Message, text: str, sent_msg: types.Message | No
         voice_message = await safe_send(
             message.reply_voice,
             BufferedInputFile(audio, "hutao.mp3"),
-            caption="🎙 Hu Tao",
+            caption="Hu Tao",
             **reply_kwargs,
         )
         if voice_message:
@@ -263,7 +263,7 @@ async def handle_voice_audio(message: types.Message):
     if message.video_note:
         if not prompt:
             prompt = 'Что происходит в этом видео?'
-        wait_msg = await message.reply('⏳ Смотрю твоё кружочек-видео...', **reply_kwargs)
+        wait_msg = await message.reply('Смотрю видео', **reply_kwargs)
         file_info = await message.bot.get_file(message.video_note.file_id)
         (_, temp_path) = tempfile.mkstemp(suffix='.mp4')
         await message.bot.download_file(file_info.file_path, destination=temp_path)
@@ -272,7 +272,7 @@ async def handle_voice_audio(message: types.Message):
         if os.path.exists(temp_path):
             os.remove(temp_path)
         await wait_msg.delete()
-        await message.reply(response or 'Нихуя не понял.', **reply_kwargs)
+        await message.reply(response or 'Не понял запрос. Переформулируй.', **reply_kwargs)
         asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text'))
         asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text', prompt))
         return
@@ -286,7 +286,7 @@ async def handle_voice_audio(message: types.Message):
         return
     if not prompt:
         prompt = 'Что сказано в этом голосовом? Транскрибируй и ответь по существу.'
-    wait_msg = await message.reply('⏳ Слушаю твою хуйню...', **reply_kwargs)
+    wait_msg = await message.reply('Слушаю аудио', **reply_kwargs)
     await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
     response = await analyze_voice_with_gemini(audio_bytes, mime_type, prompt)
     await wait_msg.delete()
@@ -300,6 +300,9 @@ async def handle_video(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
         logger.info(f'handle_video: not member, skip')
+        return
+    # A .txt file may be the user's song lyrics, not a media attachment.
+    if await handle_suno_input(message, {}):
         return
     bot_user = await message.bot.get_me()
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
@@ -341,16 +344,16 @@ async def handle_video(message: types.Message):
             return
         # Agent explicitly declined the media task — route only the caption to text.
         logger.info(f'handle_video: routing caption to text agent')
-        wait_msg = await message.reply('⏳ Думаю...', **reply_kwargs)
+        wait_msg = await message.reply('Думаю', **reply_kwargs)
         response = await generate_text_with_gemini(prompt, message.chat.id, username=message.from_user.first_name or message.from_user.username or 'Аноним')
         await wait_msg.delete()
-        await message.reply(response or 'Нихуя не понял.', **reply_kwargs)
+        await message.reply(response or 'Не понял запрос. Переформулируй.', **reply_kwargs)
         asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text'))
         asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text', prompt))
         return
     if not prompt:
         prompt = 'Внимательно посмотри это видео и скажи, что здесь происходит.'
-    wait_msg = await message.reply('⏳ Изучаю твое всратое видео кадр за кадром (24 FPS)...')
+    wait_msg = await message.reply('Анализирую видео')
     file_info = await message.bot.get_file(vid.file_id)
     (_, temp_vid_path) = tempfile.mkstemp(suffix='.mp4')
     await message.bot.download_file(file_info.file_path, destination=temp_vid_path)
@@ -362,9 +365,9 @@ async def handle_video(message: types.Message):
     code_blocks = re.findall('```(\\w*)\\n(.*?)```', text_response, re.DOTALL)
     cleaned_text = re.sub('```(\\w*)\\n(.*?)```', '', text_response, flags=re.DOTALL).strip()
     if not cleaned_text and code_blocks:
-        cleaned_text = 'Вот твой ебаный код, подавись нахуй.'
+        cleaned_text = 'Готовый код.'
     elif not cleaned_text:
-        cleaned_text = 'Нихуя не понял, но иди в пизду.'
+        cleaned_text = 'Не понял ответ. Переформулируй.'
     sent_msg = await message.reply(cleaned_text, **reply_kwargs)
     if code_blocks:
         for (lang, code) in code_blocks:
@@ -455,7 +458,7 @@ async def handle_text_messages(message: types.Message, state: FSMContext):
         reply_kwargs = {}
         if message.chat.is_forum and message.message_thread_id:
             reply_kwargs['message_thread_id'] = message.message_thread_id
-        thinking_msg = await message.reply('⏳ Думаю...', **reply_kwargs)
+        thinking_msg = await message.reply('Думаю', **reply_kwargs)
         await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
 
         _status_cb = make_status_cb(thinking_msg)
@@ -523,7 +526,7 @@ async def handle_text_messages(message: types.Message, state: FSMContext):
             agent_text = await _handle_kick_directive(message, agent_text, reply_kwargs)
             from handlers.voice import is_voice_auto
             if is_voice_auto(message.chat.id):
-                sent_msg = await safe_send(message.reply, "🎙 Ща озвучу тебе, зайка...", **reply_kwargs)
+                sent_msg = await safe_send(message.reply, "Озвучиваю", **reply_kwargs)
                 code_blocks = re.findall('```(\\w*)\\n(.*?)```', agent_text, re.DOTALL)
                 asyncio.create_task(_voice_reply(message, agent_text, sent_msg, reply_kwargs))
                 if code_blocks and sent_msg:
@@ -536,9 +539,9 @@ async def handle_text_messages(message: types.Message, state: FSMContext):
             code_blocks = re.findall('```(\\w*)\\n(.*?)```', agent_text, re.DOTALL)
             html_text = re.sub('```(\\w*)\\n(.*?)```', '', agent_text, flags=re.DOTALL).strip()
             if not html_text and code_blocks:
-                html_text = 'Вот твой ебаный код, подавись нахуй.'
+                html_text = 'Готовый код.'
             elif not html_text:
-                html_text = 'Нихуя не понял, но иди в пизду.'
+                html_text = 'Не понял ответ. Переформулируй.'
             try:
                 # Always try Rich Message first (supports $$, tables, formatting)
                 sent_msg = await send_rich_message(

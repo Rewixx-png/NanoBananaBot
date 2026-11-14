@@ -126,7 +126,7 @@ class RefactorContractsTest(unittest.TestCase):
         self.assertEqual(payloads, [{
             "type": "photo",
             "data": b"png",
-            "caption": "📸 https://example.com",
+            "caption": "https://example.com",
             "filename": "screenshot.png",
         }])
 

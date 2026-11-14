@@ -12,14 +12,20 @@ from handlers.common import (
     _nsfw_cfg_keyboard,
     _tts_cfg_text,
     _tts_cfg_keyboard,
-    _suno_cfg_text,
-    _suno_cfg_keyboard,
     _lyria_cfg_text,
     _lyria_cfg_keyboard,
 )
+from config import SUNO_LYRICS_MAX_CHARS
 from handlers.media_gen import _nsfw_awaiting_input
 from handlers.media_tts import _tts_awaiting_input
-from handlers.music import _suno_awaiting_input, _lyria_awaiting_input
+from handlers.music import (
+    _suno_awaiting_input,
+    _lyria_awaiting_input,
+    _render_settings,
+    _append_lyrics,
+    _lyrics_collect_text,
+    _lyrics_collect_keyboard,
+)
 from state import (
     pending_file_tasks,
     pending_nsfw_configs,
@@ -83,18 +89,81 @@ async def handle_nsfw_input(message: types.Message, reply_kwargs: dict) -> bool:
     return True
 
 
+async def _read_lyrics_chunk(message: types.Message) -> str | None:
+    """Text from a message or a small .txt document; None if unsupported."""
+    if message.text:
+        return message.text
+    document = getattr(message, 'document', None)
+    if not document:
+        return None
+    name = (getattr(document, 'file_name', '') or '').lower()
+    mime = (getattr(document, 'mime_type', '') or '').lower()
+    if not (name.endswith('.txt') or mime == 'text/plain'):
+        return None
+    if (getattr(document, 'file_size', 0) or 0) > 100_000:
+        return None
+    file_info = await message.bot.get_file(document.file_id)
+    downloaded = await message.bot.download_file(file_info.file_path)
+    return downloaded.read().decode('utf-8', errors='replace')
+
+
+async def _collect_suno_lyrics(message: types.Message, wait: dict) -> bool:
+    """Append one message/file to the Suno lyrics buffer and refresh the prompt."""
+    request_id = wait['request_id']
+    d = pending_suno_configs.get(request_id)
+    if not d:
+        _suno_awaiting_input.pop((message.chat.id, message.from_user.id), None)
+        return True
+    chunk = await _read_lyrics_chunk(message)
+    if chunk is None:
+        await message.reply("Пришли текст или .txt файл до 100 КБ.")
+        return True
+    buffer = wait.get('buffer') or ''
+    new_buffer, truncated = _append_lyrics(buffer, chunk)
+    wait['buffer'] = new_buffer
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    text = _lyrics_collect_text(new_buffer)
+    keyboard = _lyrics_collect_keyboard(request_id, bool(new_buffer))
+    try:
+        await message.bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=wait.get('msg_id'),
+            text=text,
+            reply_markup=keyboard,
+            parse_mode='HTML',
+        )
+    except Exception:
+        sent = await message.bot.send_message(
+            chat_id=message.chat.id, text=text, reply_markup=keyboard, parse_mode='HTML'
+        )
+        if sent:
+            wait['msg_id'] = sent.message_id
+            d['msg_id'] = sent.message_id
+    if truncated:
+        await message.reply(
+            f"Достигнут лимит {SUNO_LYRICS_MAX_CHARS} символов. Лишний текст не добавлен."
+        )
+    return True
+
+
 async def handle_suno_input(message: types.Message, reply_kwargs: dict) -> bool:  # noqa: ARG001
     """Consume Suno config field input. Returns True if consumed."""
     _suno_key = (message.chat.id, message.from_user.id)
     if _suno_key not in _suno_awaiting_input:
         return False
+    wait = _suno_awaiting_input.get(_suno_key)
+    if wait and wait.get('multi'):
+        return await _collect_suno_lyrics(message, wait)
     wait = _suno_awaiting_input.pop(_suno_key)
     request_id: str = wait['request_id']
     field: str = wait['field']
     msg_id: int = wait['msg_id']
     d = pending_suno_configs.get(request_id)
     if d:
-        new_val = message.text.strip()
+        new_val = (message.text or '').strip()
         if field == 'title':
             new_val = new_val[:80]
         d['cfg'][field] = new_val
@@ -102,19 +171,20 @@ async def handle_suno_input(message: types.Message, reply_kwargs: dict) -> bool:
             await message.delete()
         except Exception:
             pass
+        text, keyboard = _render_settings('suno', request_id)
         try:
             await message.bot.edit_message_text(
                 chat_id=message.chat.id,
                 message_id=msg_id,
-                text=_suno_cfg_text(request_id),
-                reply_markup=_suno_cfg_keyboard(request_id),
+                text=text,
+                reply_markup=keyboard,
                 parse_mode='HTML',
             )
         except Exception:
             await message.bot.send_message(
                 chat_id=d['chat_id'],
-                text=_suno_cfg_text(request_id),
-                reply_markup=_suno_cfg_keyboard(request_id),
+                text=text,
+                reply_markup=keyboard,
                 parse_mode='HTML',
             )
     return True

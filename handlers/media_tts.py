@@ -59,7 +59,7 @@ async def cmd_tts(message: types.Message):
     reply_kwargs = {}
     if message.chat.is_forum and thread_id:
         reply_kwargs['message_thread_id'] = thread_id
-    await message.reply('Выбирай TTS-модель. Не знаешь разницу — бери Flash.', reply_markup=keyboard, **reply_kwargs)
+    await message.reply('Выбери TTS-модель. Если не знаешь разницу, бери Flash.', reply_markup=keyboard, **reply_kwargs)
 
 @media_router.callback_query(F.data.startswith('ttsabort:'))
 async def handle_tts_abort(callback: types.CallbackQuery):
@@ -94,7 +94,7 @@ async def handle_tts_back(callback: types.CallbackQuery):
         await callback.message.edit_text('Выбирай TTS-модель.', reply_markup=_tts_model_keyboard(request_id))
     except Exception as e:
         logging.warning(f'TTS back edit failed: {type(e).__name__}: {e}', exc_info=True)
-        await callback.answer(f'Не удалось вернуться: {type(e).__name__}: {e}', show_alert=True)
+        await callback.answer('Не удалось вернуться. Открой /voice заново.', show_alert=True)
         return
     pending_tts_configs.pop(request_id, None)
     _tts_awaiting_input.pop((config['chat_id'], config['user_id']), None)
@@ -146,10 +146,16 @@ async def handle_tts_input(callback: types.CallbackQuery):
         await callback.answer('Только автор запроса.', show_alert=True)
         return
     await callback.answer()
-    field_prompts = {'prompt': '✏️ Напиши **текст для озвучки** следующим сообщением:\n\n(просто отправь текст в чат)', 'scene': '🎭 Опиши **сцену (окружение)** следующим сообщением:\n\nЭто задаст общий вайб и акустику. Примеры:\n🇷🇺 <i>Шумное кафе ранним утром, играет тихий джаз на фоне.</i>\n🇬🇧 <i>A busy train station with echoing announcements.</i>\n\n(отправь текст или нажми Отмена)', 'style': '🎭 Опиши **стиль (настроение)** следующим сообщением:\n\nУказывает эмоцию и характер речи. Примеры:\n🇷🇺 <i>радостно, агрессивно, шепотом, уставший.</i>\n🇬🇧 <i>energetic and upbeat, angry, whispering, tired.</i>\n\n(отправь текст или нажми Отмена)', 'pace': '🎭 Укажи **темп речи** следующим сообщением:\n\nС какой скоростью говорить. Примеры:\n🇷🇺 <i>очень быстро, медленно с длинными паузами, размеренно.</i>\n🇬🇧 <i>very fast, slow with dramatic pauses, steady.</i>\n\n(отправь текст или нажми Отмена)', 'accent': '🎭 Укажи **акцент или манеру** следующим сообщением:\n\nПримеры:\n🇷🇺 <i>с британским акцентом, французский акцент, грубый голос.</i>\n🇬🇧 <i>British accent, Southern US drawl, French accent.</i>\n\n(отправь текст или нажми Отмена)'}
-    prompt_text = field_prompts.get(field, f'✏️ Напиши {field} следующим сообщением:')
+    field_prompts = {
+        'prompt': 'Пришли текст для озвучки следующим сообщением.',
+        'scene': 'Опиши сцену: где происходит действие и какие звуки вокруг.',
+        'style': 'Опиши стиль речи: эмоцию, характер, манеру.',
+        'pace': 'Укажи темп речи.',
+        'accent': 'Укажи акцент или манеру.',
+    }
+    prompt_text = field_prompts.get(field, f'Пришли {field} следующим сообщением.')
     _tts_awaiting_input[d['chat_id'], d['user_id']] = {'request_id': request_id, 'field': field, 'msg_id': callback.message.message_id}
-    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ Отмена', callback_data=f'ttscancel:{request_id}')]])
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Отмена', callback_data=f'ttscancel:{request_id}')]])
     try:
         await callback.message.edit_text(prompt_text, reply_markup=cancel_kb, parse_mode='HTML')
     except Exception:
@@ -222,18 +228,19 @@ async def handle_tts_preview(callback: types.CallbackQuery):
     await callback.answer()
     reply_kwargs = {'message_thread_id': d.get('message_thread_id')} if d.get('message_thread_id') else {}
     if cached_file_id:
-        await callback.bot.send_voice(chat_id=d['chat_id'], voice=cached_file_id, caption=f'🔊 Проверка: {voice} ({lang})', reply_to_message_id=d['source_message_id'], **reply_kwargs)
+        await callback.bot.send_voice(chat_id=d['chat_id'], voice=cached_file_id, caption=f'Проверка: {voice} ({lang})', reply_to_message_id=d['source_message_id'], **reply_kwargs)
         return
     await callback.bot.send_chat_action(chat_id=d['chat_id'], action='record_voice', message_thread_id=d.get('message_thread_id'))
     test_phrases = {'ru-RU': 'Привет! Это проверка моего голоса. Как меня слышно?', 'en-US': 'Hello! This is a test of my voice. How do I sound?', 'ja-JP': 'こんにちは！これは私の声のテストです。どう聞こえますか？'}
     phrase = test_phrases.get(lang, test_phrases['ru-RU'])
     (audio_bytes, error_msg) = await generate_tts_with_gemini(phrase, d['model'], voice, temp, lang)
     if error_msg:
-        await callback.bot.send_message(chat_id=d['chat_id'], text=f'❌ Ошибка предпрослушивания:\n{error_msg}', reply_to_message_id=d['source_message_id'], **reply_kwargs)
+        logging.error(f'TTS preview failed: {error_msg}')
+        await callback.bot.send_message(chat_id=d['chat_id'], text='Не удалось создать превью голоса.', reply_to_message_id=d['source_message_id'], **reply_kwargs)
         return
     if audio_bytes:
         voice_file = BufferedInputFile(audio_bytes, filename='voice.ogg')
-        sent_msg = await callback.bot.send_voice(chat_id=d['chat_id'], voice=voice_file, caption=f'🔊 Проверка: {voice} ({lang})', reply_to_message_id=d['source_message_id'], **reply_kwargs)
+        sent_msg = await callback.bot.send_voice(chat_id=d['chat_id'], voice=voice_file, caption=f'Проверка: {voice} ({lang})', reply_to_message_id=d['source_message_id'], **reply_kwargs)
         if sent_msg.voice and sent_msg.voice.file_id:
             tts_voice_previews[cache_key] = sent_msg.voice.file_id
 
@@ -254,7 +261,7 @@ async def handle_tts_generate(callback: types.CallbackQuery):
     await callback.answer()
     reply_kwargs = {'message_thread_id': d.get('message_thread_id')} if d.get('message_thread_id') else {}
     try:
-        await callback.message.edit_text(f"⏳ Генерирую аудио через {d['label']}...")
+        await callback.message.edit_text(f"Генерирую аудио через {d['label']}...")
     except Exception:
         pass
     await callback.bot.send_chat_action(chat_id=d['chat_id'], action='record_voice', message_thread_id=d.get('message_thread_id'))
@@ -265,13 +272,14 @@ async def handle_tts_generate(callback: types.CallbackQuery):
     except Exception:
         pass
     if error_msg:
-        await callback.bot.send_message(chat_id=d['chat_id'], text=f'❌ Ошибка генерации аудио:\n{error_msg}', reply_to_message_id=d['source_message_id'], **reply_kwargs)
+        logging.error(f'TTS generation failed: {error_msg}')
+        await callback.bot.send_message(chat_id=d['chat_id'], text='Не удалось сгенерировать аудио.', reply_to_message_id=d['source_message_id'], **reply_kwargs)
         return
     if audio_bytes:
         voice_file = BufferedInputFile(audio_bytes, filename='voice.ogg')
-        await callback.bot.send_voice(chat_id=d['chat_id'], voice=voice_file, caption=f"🎙️ {d['label']} | Голос: {d['cfg'].get('voice', 'Puck')}", reply_to_message_id=d['source_message_id'], **reply_kwargs)
+        await callback.bot.send_voice(chat_id=d['chat_id'], voice=voice_file, caption=f"{d['label']} | Голос: {d['cfg'].get('voice', 'Puck')}", reply_to_message_id=d['source_message_id'], **reply_kwargs)
         from database import add_user_stat, log_prompt
         asyncio.create_task(add_user_stat(d['user_id'], d.get('username', ''), d.get('first_name', 'Аноним'), 'audio'))
         asyncio.create_task(log_prompt(d['user_id'], d.get('username', ''), d.get('first_name', 'Аноним'), 'audio', d['prompt']))
     else:
-        await callback.bot.send_message(chat_id=d['chat_id'], text='❌ Не удалось получить аудио.', reply_to_message_id=d['source_message_id'], **reply_kwargs)
+        await callback.bot.send_message(chat_id=d['chat_id'], text='Не удалось получить аудио.', reply_to_message_id=d['source_message_id'], **reply_kwargs)

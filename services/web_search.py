@@ -176,7 +176,7 @@ async def _extract_search_query(user_message: str) -> str:
     )
     q = await deepseek_text(
         user_message, system_prompt=system,
-        model='deepseek-chat', temperature=0.3, max_tokens=40, timeout=8,
+        model=_TEXT_MODEL_FALLBACKS[0], temperature=0.3, max_tokens=40, timeout=8,
     )
     if q:
         q = re.sub(r'\s+', ' ', q).strip()
@@ -417,7 +417,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
         if not top_urls:
             return ('', api_available)
 
-        await _st(f'📄 Читаю {len(top_urls)} страниц...')
+        await _st(f'Читаю страниц: {len(top_urls)}...')
         scrape_keys = await load_firecrawl_keys() or query_keys
         scraped_pages = await asyncio.gather(*[_firecrawl_scrape_url(u, scrape_keys) for u in top_urls], return_exceptions=True)
 
@@ -440,7 +440,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
                 candidate_links.extend(_extract_links_from_markdown(scraped)[:3])
 
         if len('\n'.join(parts)) < 5000 and candidate_links:
-            await _st('🔎 Копаю глубже...')
+            await _st('Проверяю связанные страницы...')
             seen_urls = set(top_urls)
             depth2_urls = []
             for u in candidate_links:
@@ -458,7 +458,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
                     parts.append(f'{url}\n{_clean_web_snippet(page_md[:5000])}')
                     depth3_candidates.extend(_extract_links_from_markdown(page_md)[:4])
                 if len('\n'.join(parts)) < 9000 and depth3_candidates:
-                    await _st('🕳️ Лезу на третий уровень...')
+                    await _st('Проверяю ещё один уровень ссылок...')
                     seen_urls.update(depth2_urls)
                     depth3_urls = []
                     for u in depth3_candidates:
@@ -512,7 +512,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
 
     variants = await _plan_firecrawl_queries(raw_request or query, query)
     if variants:
-        await _st(f'🧭 Составил {len(variants)} поисковых запросов, начинаю копать...')
+        await _st(f'Составил запросов: {len(variants)}.')
     queue = list(variants)
     max_attempts = 16
     while queue and len(attempted) < max_attempts:
@@ -520,7 +520,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
         if variant.casefold() in {a.casefold() for a in attempted}:
             continue
         attempted.append(variant)
-        await _st(f'🔎 Firecrawl запрос {len(attempted)}/{max_attempts}: «{variant[:80]}»')
+        await _st(f'Запрос {len(attempted)}/{max_attempts}: «{variant[:80]}»')
         context, available = await _run_query(variant)
         any_available = any_available or available
         if len(context) > len(best_context):
@@ -531,9 +531,9 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
         if context and quality >= 55:
             if context not in relevant_contexts:
                 relevant_contexts.append(context)
-            await _st(f'✅ Источник подходит ({quality}/100). Ищу ещё, чтобы не отвечать по одной ссылке...')
+            await _st(f'Источник подходит ({quality}/100). Ищу ещё...')
             if len(relevant_contexts) >= 3 or len('\n\n---\n\n'.join(relevant_contexts)) >= 14000:
-                await _st(f'🧠 Собрал {len(relevant_contexts)} нормальных источника(-ов), синтезирую...')
+                await _st(f'Собрал источников: {len(relevant_contexts)}. Готовлю ответ...')
                 return (_merge_contexts(relevant_contexts), True)
             refined = await _refine_queries(relevant_contexts + weak_contexts, attempted)
             if refined:
@@ -541,20 +541,20 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
             continue
         if context:
             weak_contexts.append(context)
-            await _st(f'⚠️ Результат слабый ({quality}/100), пробую другой запрос...')
+            await _st(f'Результат слабый ({quality}/100). Пробую другой запрос...')
             logging.info(f'Firecrawl context rejected as {reason} for {query!r} via {variant!r}, quality={quality}')
         if len(attempted) in {4, 8, 12} and (weak_contexts or relevant_contexts):
             refined = await _refine_queries(relevant_contexts + weak_contexts, attempted)
             if refined:
-                await _st(f'🧭 По найденным данным составил ещё {len(refined)} запросов...')
+                await _st(f'Составил ещё запросов: {len(refined)}.')
                 queue.extend(refined)
 
     if relevant_contexts:
-        await _st(f'🧠 Собрал {len(relevant_contexts)} нормальных источника(-ов), синтезирую...')
+        await _st(f'Собрал источников: {len(relevant_contexts)}. Готовлю ответ...')
         extra = [c for c in usable_contexts if c not in relevant_contexts]
         return (_merge_contexts(relevant_contexts + extra), True)
     if usable_contexts:
-        await _st(f'🧠 Собрал несколько зацепок, синтезирую аккуратно...')
+        await _st('Собрал несколько источников. Готовлю ответ...')
         return (_merge_contexts(usable_contexts), True)
     if any_available:
         return ('', True)
@@ -603,7 +603,7 @@ async def synthesize_web_answer(prompt: str, web_context: str) -> str:
     user_text = f'Запрос пользователя: {clean_query}\n\nFirecrawl-контекст:\n{web_context[:14000]}'
     answer = await deepseek_text(
         user_text, system_prompt=system,
-        model='deepseek-chat', temperature=0.3, max_tokens=800, timeout=25,
+        model=_TEXT_MODEL_FALLBACKS[0], temperature=0.3, max_tokens=800, timeout=25,
     )
     if answer and not answer.upper().startswith(_WEB_SEARCH_DIRECTIVE):
         return answer

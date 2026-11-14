@@ -141,17 +141,17 @@ async def _execute_tool(
         q = (args.get("query") or "").strip()
         if not q:
             return "Ошибка: пустой поисковый запрос. Уточни что искать.", None
-        await _st(f"🔎 Ищу: «{html.escape(q[:80])}»")
+        await _st(f"Ищу: «{html.escape(q[:80])}»")
         return await _fc_search(q), None
     if name == "scrape_url":
         url = (args.get("url") or "").strip()
         if not url:
             return "Ошибка: пустой URL. Укажи ссылку для парсинга.", None
-        await _st("📄 Читаю страницу...")
+        await _st("Читаю страницу...")
         return await _fc_scrape(url), None
 
     if name == "generate_project":
-        await _st("⚙️ Генерирую проект...")
+        await _st("Генерирую проект...")
         try:
             p = await asyncio.wait_for(generate_project_with_gemini(args.get("prompt", "")), timeout=AGENT_PROJECT_TIMEOUT)
         except asyncio.TimeoutError:
@@ -293,11 +293,11 @@ async def _execute_tool(
         ), None
 
     if name == "list_image_models":
-        await _st("📋 Запрашиваю модели OpenAI...")
+        await _st("Запрашиваю модели OpenAI...")
         return await _tool_list_image_models(), None
 
     if name == "generate_image":
-        await _st("🎨 Генерирую картинку...")
+        await _st("Генерирую картинку...")
         return await _tool_generate_image(
             args.get("prompt", ""), _send,
             provider=args.get("provider", "gemini"),
@@ -305,32 +305,32 @@ async def _execute_tool(
         ), None
 
     if name == "download_image":
-        await _st("⬇️ Скачиваю картинку...")
+        await _st("Скачиваю картинку...")
         return await _tool_download_image(args.get("url", ""), args.get("caption", ""), _send), None
 
     if name == "download_video":
-        await _st("📹 Скачиваю видео (до 2 мин)...")
+        await _st("Скачиваю видео (до 2 мин)...")
         return await _tool_download_video(args.get("url", ""), args.get("caption", ""), _send), None
 
     if name == "text_to_speech":
-        await _st("🎙 Озвучиваю...")
+        await _st("Озвучиваю...")
         return await _tool_tts(args.get("text", ""), args.get("voice", "Kore"), args.get("language", "ru-RU"), _send), None
 
     if name == "run_python":
         import html as _html
         code = args.get("code", "")
         safe_code = _html.escape(code[:300])
-        await _st(f"🐍 Запускаю Python в sandbox:\n<pre><code class=\"language-python\">{safe_code}{'…' if len(code) > 300 else ''}</code></pre>")
+        await _st(f"Запускаю Python в sandbox:\n<pre><code class=\"language-python\">{safe_code}{'…' if len(code) > 300 else ''}</code></pre>")
         return await _tool_run_python(code, ws, _st), None
 
     if name == "analyze_audio":
-        await _st("🎧 Анализирую аудио...")
+        await _st("Анализирую аудио...")
         return await _tool_analyze_audio(
             path=args.get("path", ""), question=args.get("question", ""), ws=ws
         ), None
 
     if name == "analyze_image":
-        await _st("🔍 Анализирую изображение через Gemini...")
+        await _st("Анализирую изображение через Gemini...")
         return await _tool_analyze_image(
             path=args.get("path", ""), question=args.get("question", ""), ws=ws
         ), None
@@ -339,11 +339,11 @@ async def _execute_tool(
         import html as _html
         cmd = args.get("command", "")
         safe_cmd = _html.escape(cmd[:300])
-        await _st(f"💻 Выполняю команду в sandbox:\n<pre><code class=\"language-bash\">{safe_cmd}</code></pre>")
+        await _st(f"Выполняю команду в sandbox:\n<pre><code class=\"language-bash\">{safe_cmd}</code></pre>")
         return await _tool_run_shell(cmd, ws, _st), None
 
     if name == "playwright_browse":
-        await _st(f"🌐 Открываю браузер: {args.get('url', '')[:80]}...")
+        await _st(f"Открываю браузер: {args.get('url', '')[:80]}...")
         return await _tool_playwright_browse(
             url=args.get("url", ""),
             action=args.get("action", "screenshot"),
@@ -366,35 +366,35 @@ async def _execute_tool(
         # Показываем в статус-сообщении — обрезаем хвост для отображения
         display = log_text[-2500:] if len(log_text) > 2500 else log_text
         safe_log = _html.escape(display)
-        await _st(f"📋 <b>Логи бота:</b>\n<pre><code>{safe_log}</code></pre>")
+        await _st(f"<b>Логи бота:</b>\n<pre><code>{safe_log}</code></pre>")
         return log_text, None  # агент видит полный текст
 
     if name == "read_file":
         return ws.read(args.get("path", "")), None
 
     if name == "fetch_json":
-        await _st(f"🌐 {args.get('url', '')[:60]}...")
+        await _st(f"{args.get('url', '')[:60]}...")
         return await _tool_fetch_json(args.get("url", "")), None
 
     if name == "calculate":
         return _ast_eval(args.get("expression", "0")), None
 
     if name == "qr_code":
-        await _st("🔲 Генерирую QR...")
+        await _st("Генерирую QR...")
         return await _tool_qr_code(args.get("text", ""), args.get("caption", ""), _send), None
 
     if name == "translate":
-        await _st(f"🌍 Перевожу на {args.get('target_language', '?')}...")
+        await _st(f"Перевожу на {args.get('target_language', '?')}...")
         return await _tool_translate(args.get("text", ""), args.get("target_language", "English")), None
 
     if name == "send_workspace_file":
-        await _st(f"📤 Отправляю файл из workspace: {args.get('path', '')}...")
+        await _st(f"Отправляю файл из workspace: {args.get('path', '')}...")
         return await _tool_send_workspace_file(
             args.get("path", ""), args.get("caption", ""), ws, _send
         ), None
 
     if name == "create_file":
-        await _st(f"📄 Создаю {args.get('filename', '')}...")
+        await _st(f"Создаю {args.get('filename', '')}...")
         return await _tool_create_file(
             args.get("filename", "file.txt"), args.get("content", ""),
             args.get("caption", ""), _send,
@@ -406,7 +406,7 @@ async def _execute_tool(
         import os as _os2
         if not path or not _os2.path.isfile(path):
             return f"Файл не найден: {path}. Используй путь из workspace.", None
-        await _st("🔍 Анализирую изображение через NVIDIA Vision...")
+        await _st("Анализирую изображение через NVIDIA Vision...")
         try:
             with open(path, "rb") as f:
                 img_bytes = f.read()
@@ -448,34 +448,34 @@ async def run_agent(
         try: await status_cb(t)
         except Exception as e: logger.debug(f"status_cb suppressed: {e}")
 
-    _TOOL_STATUS: dict[str, tuple[str, str, str]] = {
-        "think": (_E["think"], "💭", "Формулирую план"),
-        "web_search": (_E["search"], "🔍", "Веб-поиск"),
-        "scrape_url": (_E["link"], "🔗", "Читаю страницу"),
-        "fetch_json": (_E["globe"], "🌐", "Запрашиваю данные"),
-        "generate_project": (_E["screen"], "🖥", "Генерирую проект"),
-        "list_image_models": (_E["info"], "ℹ️", "Запрашиваю модели"),
-        "generate_image": (_E["sparkle"], "✨", "Рисую"),
-        "search_and_send_image": (_E["eyes"], "👀", "Ищу картинку"),
-        "download_image": (_E["download"], "⬇️", "Скачиваю картинку"),
-        "search_and_send_video": (_E["play"], "▶️", "Ищу видео"),
-        "download_video": (_E["download"], "⬇️", "Скачиваю видео"),
-        "text_to_speech": (_E["microphone"], "🎙", "Озвучиваю"),
-        "run_python": (_E["screen"], "🖥", "Запускаю Python"),
-        "analyze_audio": (_E["music"], "🎵", "Анализирую аудио"),
-        "analyze_image": (_E["eyes"], "👀", "Анализирую фото"),
-        "run_shell": (_E["screen"], "🖥", "Выполняю команду"),
-        "playwright_browse": (_E["globe"], "🌐", "Открываю браузер"),
-        "write_file": (_E["pencil"], "✏️", "Записываю файл"),
-        "read_bot_logs": (_E["chart"], "📊", "Читаю логи бота"),
-        "read_file": (_E["attachment"], "📎", "Читаю файл"),
-        "calculate": (_E["idea"], "💡", "Считаю"),
-        "translate": (_E["globe"], "🌐", "Перевожу"),
-        "qr_code": (_E["link"], "🔗", "Генерирую QR"),
-        "create_file": (_E["pencil"], "✏️", "Создаю файл"),
-        "send_workspace_file": (_E["attachment"], "📎", "Отправляю файл"),
-        "send_with_buttons": (_E["chat"], "💬", "Отправляю кнопки"),
-        "reply": (_E["chat"], "💬", "Формулирую ответ"),
+    _TOOL_STATUS: dict[str, str] = {
+        "think": "Формулирую план",
+        "web_search": "Веб-поиск",
+        "scrape_url": "Читаю страницу",
+        "fetch_json": "Запрашиваю данные",
+        "generate_project": "Генерирую проект",
+        "list_image_models": "Запрашиваю модели",
+        "generate_image": "Рисую",
+        "search_and_send_image": "Ищу картинку",
+        "download_image": "Скачиваю картинку",
+        "search_and_send_video": "Ищу видео",
+        "download_video": "Скачиваю видео",
+        "text_to_speech": "Озвучиваю",
+        "run_python": "Запускаю Python",
+        "analyze_audio": "Анализирую аудио",
+        "analyze_image": "Анализирую фото",
+        "run_shell": "Выполняю команду",
+        "playwright_browse": "Открываю браузер",
+        "write_file": "Записываю файл",
+        "read_bot_logs": "Читаю логи бота",
+        "read_file": "Читаю файл",
+        "calculate": "Считаю",
+        "translate": "Перевожу",
+        "qr_code": "Генерирую QR",
+        "create_file": "Создаю файл",
+        "send_workspace_file": "Отправляю файл",
+        "send_with_buttons": "Отправляю кнопки",
+        "reply": "Формулирую ответ",
     }
     _DETAIL_FIELDS = {
         "web_search": "query", "scrape_url": "url", "fetch_json": "url",
@@ -488,9 +488,7 @@ async def run_agent(
     _start_ts = _time.monotonic()
 
     def _fmt_status(name: str, args: dict) -> str:
-        emoji_id, emoji, label = _TOOL_STATUS.get(
-            name, (_E["lightning"], "⚡️", name.replace("_", " "))
-        )
+        label = _TOOL_STATUS.get(name, name.replace("_", " "))
         elapsed = int(_time.monotonic() - _start_ts)
         minutes, seconds = divmod(elapsed, 60)
         duration = f"{minutes}м {seconds}с" if minutes else f"{seconds}с"
@@ -498,13 +496,10 @@ async def run_agent(
         detail = " ".join(detail.split())
         if len(detail) > 120:
             detail = detail[:119] + "…"
-        lines = [f'<tg-emoji emoji-id="{emoji_id}">{emoji}</tg-emoji> <b>{html.escape(label)}</b>']
+        lines = [f'<b>{html.escape(label)}</b>']
         if detail:
             lines.append(f"└ <i>{html.escape(detail)}</i>")
-        lines.append(
-            '<tg-emoji emoji-id="5386367538735104399">⌛</tg-emoji> '
-            f"<i>Работаю · {duration}</i>"
-        )
+        lines.append(f"<i>Работаю · {duration}</i>")
         return "\n".join(lines)
 
     # Gemini Pro Agent drives every agent step, including tool calls.

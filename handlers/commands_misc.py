@@ -4,13 +4,18 @@ import logging
 import re
 import uuid
 
-from aiogram import Router, types
+from aiogram import F, Router, types
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, Message
+from aiogram.types import (
+    BufferedInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from config import FULL_ACCESS_CHAT_ID
 from dual_bot import BOT1_DUAL_NAME, BOT2_DUAL_NAME, start_dual, stop_dual
-from services.upscale_service import upscale_image
+from services.upscale_service import MODE_LABELS, upscale_image
 from utils import check_membership, is_banned
 
 from services.gemini_text import generate_text_with_gemini
@@ -19,12 +24,30 @@ from handlers.common import _track_user, safe_send
 logger = logging.getLogger(__name__)
 commands_misc_router = Router()
 
+_upscale_pending: dict[str, dict] = {}
+
+
+def _upscale_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text='Аниме', callback_data=f'upscale:anime:{request_id}'),
+            InlineKeyboardButton(text='Реалистичное фото', callback_data=f'upscale:photo:{request_id}'),
+        ],
+        [InlineKeyboardButton(text='Отмена', callback_data=f'upscale:cancel:{request_id}')],
+    ])
+
+
+def _drop_upscale_pending(uid: int) -> None:
+    for request_id, item in list(_upscale_pending.items()):
+        if item.get('user_id') == uid:
+            _upscale_pending.pop(request_id, None)
+
 
 @commands_misc_router.message(Command("up"))
 async def cmd_up(message: types.Message):
     is_member = await check_membership(message.bot, message.from_user.id, message.chat.id)
     if not is_member:
-        await message.reply('Доступ закрыт: сначала вступи в обязательную беседу, потом улучшай фото.')
+        await message.reply('Нет доступа. Сначала вступи в обязательную беседу.')
         return
     if not message.photo:
         await message.reply('Фото не прикреплено. Отправь одно фото с подписью /up.')
@@ -36,37 +59,100 @@ async def cmd_up(message: types.Message):
         image_bytes = downloaded.read()
     except Exception as e:
         logger.error(f'/up download failed: {type(e).__name__}: {e}', exc_info=True)
-        await wait_msg.edit_text(f'❌ Telegram не отдал фото: {type(e).__name__}: {e}. Повтори /up с другим JPG или PNG.')
+        await wait_msg.edit_text('Не удалось скачать фото. Пришли JPG или PNG и повтори /up.')
         return
 
-    await wait_msg.edit_text('Улучшаю фото в 2 раза. Не запускай второй апскейл, пока этот не закончен...')
-    upscaled, error = await upscale_image(image_bytes)
-    if not upscaled:
-        logger.error(f'/up upscale failed: {error}')
-        await wait_msg.edit_text(f'Апскейлер упал: {error}. Попробуй другое фото или повтори позже.')
+    _drop_upscale_pending(message.from_user.id)
+    request_id = uuid.uuid4().hex[:10]
+    thread_id = message.message_thread_id if getattr(message.chat, 'is_forum', False) else None
+    _upscale_pending[request_id] = {
+        'user_id': message.from_user.id,
+        'chat_id': message.chat.id,
+        'source_message_id': message.message_id,
+        'message_id': wait_msg.message_id,
+        'image_bytes': image_bytes,
+        'message_thread_id': thread_id,
+    }
+    await wait_msg.edit_text(
+        "<b>Как улучшить фото?</b>\n"
+        "Выбери режим. Локально, 2x, без сжатия. Качественные модели, дольше. Фото до 2048 px.\n\n"
+        "Аниме: рисунки, иллюстрации, скриншоты.\n"
+        "Реалистичное: обычные фото.",
+        reply_markup=_upscale_keyboard(request_id),
+        parse_mode='HTML',
+    )
+
+
+@commands_misc_router.callback_query(F.data.startswith('upscale:'))
+async def handle_upscale_choice(callback: types.CallbackQuery):
+    parts = callback.data.split(':', 2)
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    _, mode, request_id = parts
+    item = _upscale_pending.pop(request_id, None)
+    if not item or callback.from_user.id != item['user_id']:
+        await callback.answer('Запрос устарел. Отправь /up заново.', show_alert=True)
+        return
+    if mode == 'cancel':
+        await callback.answer('Отменено.')
+        try:
+            await callback.message.edit_text('Апскейл отменён.')
+        except Exception:
+            pass
+        return
+    if mode not in MODE_LABELS:
+        await callback.answer('Неизвестный режим.', show_alert=True)
         return
 
+    await callback.answer('Улучшаю...')
+    label = MODE_LABELS[mode]
     try:
-        await wait_msg.edit_text('Результат готов. Отправляю файл без сжатия...')
+        await callback.message.edit_text(
+            f'Улучшаю фото локально: {label}. Качественная модель, может занять несколько минут...'
+        )
     except Exception:
         pass
+
     try:
-        await asyncio.wait_for(
-            message.reply_document(
-                document=BufferedInputFile(upscaled, filename="upscaled.png"),
-                caption="Готово. Версия 2x без сжатия — забирай.",
-            ),
-            timeout=120,
+        upscaled, error = await asyncio.wait_for(
+            upscale_image(item['image_bytes'], mode=mode), timeout=600
         )
     except asyncio.TimeoutError:
-        await wait_msg.edit_text("Telegram не принял файл за 120 секунд. Попробуй фото поменьше.")
+        upscaled, error = None, 'Локальный апскейлер не успел за 600 секунд.'
+    if not upscaled:
+        logger.error(f'/up upscale failed ({mode}): {error}')
+        try:
+            await callback.message.edit_text(
+                f'Не удалось улучшить фото.\n\n{error}'
+            )
+        except Exception:
+            pass
         return
+
+    kwargs = {}
+    if item.get('message_thread_id'):
+        kwargs['message_thread_id'] = item['message_thread_id']
+    if item.get('source_message_id'):
+        kwargs['reply_to_message_id'] = item['source_message_id']
+    try:
+        await callback.message.bot.send_document(
+            chat_id=item['chat_id'],
+            document=BufferedInputFile(upscaled, filename='upscaled.png'),
+            caption=f'Готово. {label}, 2x, без сжатия.',
+            **kwargs,
+        )
     except Exception as e:
         logger.error(f'/up send failed: {type(e).__name__}: {e}', exc_info=True)
-        await wait_msg.edit_text(f"Telegram не принял результат: {type(e).__name__}: {e}. Попробуй исходное фото поменьше или повтори /up позже.")
+        try:
+            await callback.message.edit_text(
+                'Не удалось отправить результат. Попробуй фото поменьше.'
+            )
+        except Exception:
+            pass
         return
     try:
-        await wait_msg.delete()
+        await callback.message.delete()
     except Exception as e:
         logger.warning(f'/up status cleanup failed after successful send: {type(e).__name__}: {e}')
 
@@ -83,7 +169,7 @@ async def cmd_figma(message: types.Message):
         return
     thread_id = message.message_thread_id if message.chat.is_forum else None
     reply_kwargs = {'message_thread_id': thread_id} if thread_id else {}
-    thinking_msg = await message.reply('🎨 Генерирую дизайн в Figma...', **reply_kwargs)
+    thinking_msg = await message.reply('Генерирую дизайн в Figma...', **reply_kwargs)
     try:
         spec_prompt = (
             'Ты — профессиональный UI/UX дизайнер. Сгенерируй JSON-спецификацию дизайна для Figma Plugin API.\n'
@@ -126,13 +212,13 @@ async def cmd_figma(message: types.Message):
 
         from figma_bridge import enqueue_and_wait
         session_id = uuid.uuid4().hex
-        await thinking_msg.edit_text('🎨 Жду пока плагин создаст дизайн в Figma...')
+        await thinking_msg.edit_text('Жду пока плагин создаст дизайн в Figma...')
         node_id = await enqueue_and_wait(session_id, spec, timeout=120.0)
 
         if node_id is None:
             try:
                 await thinking_msg.edit_text(
-                    '⏰ Плагин не ответил за 2 минуты.\n'
+                    'Плагин не ответил за 2 минуты.\n'
                     'Убедись что плагин NanoHatani Bridge запущен в Figma и файл открыт.'
                 )
             except Exception as e:
@@ -168,7 +254,7 @@ async def cmd_figma(message: types.Message):
                 message.bot.send_document,
                 chat_id=message.chat.id,
                 document=doc,
-                caption=f'🎨 {prompt[:180]}',
+                caption=f'{prompt[:180]}',
                 reply_to_message_id=message.message_id,
                 **reply_kwargs
             )
@@ -176,7 +262,7 @@ async def cmd_figma(message: types.Message):
             await safe_send(
                 message.bot.send_message,
                 chat_id=message.chat.id,
-                text=f'✅ Дизайн создан в Figma (node `{node_id}`). Рендер недоступен без file_key.',
+                text=f'Дизайн создан в Figma (node `{node_id}`). Рендер недоступен без file_key.',
                 reply_to_message_id=message.message_id,
                 **reply_kwargs
             )
@@ -207,9 +293,9 @@ async def cmd_dual(message: Message):
     thread_id = message.message_thread_id
     started = start_dual(chat_id, thread_id)
     if started:
-        await message.reply(f"🤖 {BOT1_DUAL_NAME} vs {BOT2_DUAL_NAME} — начали базарить. /stopdual чтобы заткнуть.")
+        await message.reply(f"{BOT1_DUAL_NAME} vs {BOT2_DUAL_NAME}. /stopdual чтобы остановить.")
     else:
-        await message.reply("Уже идёт, тупой.")
+        await message.reply("Уже идёт.")
 
 
 @commands_misc_router.message(Command("stopdual"))

@@ -9,9 +9,11 @@ from typing import Optional
 
 import aiohttp
 
+from config import DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+
 logger = logging.getLogger(__name__)
 
-DEEPSEEK_BASE = "https://api.deepseek.com/v1"
+DEEPSEEK_BASE = DEEPSEEK_BASE_URL
 _dead_until: dict[str, float] = {}
 _COOLDOWN = 30.0
 
@@ -163,7 +165,7 @@ def _openai_response_to_gemini(data: dict) -> dict:
 async def deepseek_chat(
     messages: list[dict],
     system_prompt: str = "",
-    model: str = "deepseek-v4-flash",
+    model: str = DEEPSEEK_MODEL,
     temperature: float = 1.0,
     max_tokens: int = 800,
     thinking: bool = False,
@@ -196,7 +198,7 @@ async def deepseek_chat(
                     return await resp.json()
                 body = await resp.text()
                 logger.warning(f"DeepSeek HTTP {resp.status}: {body[:200]}")
-                if resp.status in (429, 401, 403):
+                if resp.status in (429, 401, 402):
                     _mark_dead(key); continue
         except Exception as e:
             logger.warning(f"DeepSeek: {type(e).__name__}: {e}")
@@ -207,7 +209,7 @@ async def deepseek_chat(
 async def deepseek_text(
     prompt: str,
     system_prompt: str = "",
-    model: str = "deepseek-v4-flash",
+    model: str = DEEPSEEK_MODEL,
     temperature: float = 1.0,
     max_tokens: int = 800,
     timeout: int = 90,
@@ -241,6 +243,6 @@ async def explain_generation_error(prompt: str, error_msg: str, image_bytes: byt
     )
     result = await deepseek_text(
         user_text, system_prompt='',
-        model='deepseek-chat', temperature=0.5, max_tokens=200, timeout=25,
+        model=DEEPSEEK_MODEL, temperature=0.5, max_tokens=200, timeout=25,
     )
     return (result or '').strip()

@@ -56,7 +56,7 @@ async def cmd_video(message: types.Message):
             image_bytes = downloaded.read()
         except Exception as e:
             logger.error(f"Failed to download photo: {type(e).__name__}: {e}", exc_info=True)
-            await message.reply(f"❌ Telegram не отдал фото: {type(e).__name__}: {e}. Повтори /video с другим JPG или PNG.")
+            await message.reply("Не удалось скачать фото. Пришли JPG или PNG и повтори /video.")
             return
     if message.video:
         try:
@@ -64,7 +64,7 @@ async def cmd_video(message: types.Message):
             video_bytes = downloaded.read()
         except Exception as e:
             logger.error(f"Failed to download video: {type(e).__name__}: {e}", exc_info=True)
-            await message.reply(f"❌ Telegram не отдал видео: {type(e).__name__}: {e}. Повтори /video с MP4 поменьше.")
+            await message.reply("Не удалось скачать видео. Пришли MP4 поменьше и повтори /video.")
             return
     request_id = uuid.uuid4().hex[:10]
     pending_video_requests[request_id] = {'user_id': message.from_user.id, 'chat_id': message.chat.id, 'source_message_id': message.message_id, 'message_thread_id': message.message_thread_id if message.chat.is_forum else None, 'prompt': prompt, 'image_bytes': image_bytes, 'video_bytes': video_bytes}
@@ -72,7 +72,7 @@ async def cmd_video(message: types.Message):
     reply_kwargs = {}
     if message.chat.is_forum and message.message_thread_id:
         reply_kwargs['message_thread_id'] = message.message_thread_id
-    await message.reply('Выбирай видеомодель. Не знаешь разницу — бери быструю.', reply_markup=keyboard, **reply_kwargs)
+    await message.reply('Выбери видеомодель. Если не знаешь разницу, бери быструю.', reply_markup=keyboard, **reply_kwargs)
 
 @media_router.callback_query(F.data.startswith('veocancel:'))
 async def handle_video_cancel(callback: types.CallbackQuery):
@@ -127,7 +127,7 @@ async def handle_veo_model_select(callback: types.CallbackQuery):
     state_data = {'status': 'Инициализация...'}
     if callback.message:
         try:
-            await callback.message.edit_text('⏳ Запускаю генерацию видео...')
+            await callback.message.edit_text('Запускаю генерацию видео...')
             progress_task = asyncio.create_task(run_progress_bar(callback.bot, request_data['chat_id'], callback.message.message_id, model_label, state_data=state_data))
         except Exception:
             pass
@@ -152,7 +152,8 @@ async def handle_veo_model_select(callback: types.CallbackQuery):
                 (video_bytes, error_msg) = (None, start_err)
     except Exception as e:
         logger.exception(f"Критическая ошибка во время генерации Veo: {e}")
-        (video_bytes, error_msg) = (None, f"Внутренняя ошибка сервера: {type(e).__name__}: {e}")
+        logging.error(f'Video generation crashed: {type(e).__name__}: {e}', exc_info=True)
+        (video_bytes, error_msg) = (None, 'Внутренняя ошибка сервера.')
     finally:
         if progress_task:
             progress_task.cancel()
@@ -162,7 +163,8 @@ async def handle_veo_model_select(callback: types.CallbackQuery):
                 pass
         await delete_pending_gen(gen_id)
     if error_msg:
-        error_sent_msg = await safe_send(callback.bot.send_message, chat_id=request_data['chat_id'], text=f'❌ Ошибка генерации видео:\n{error_msg}\n\n⏳ Ща спрошу у мозгов, че не так...', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
+        logging.error(f'Video generation failed: {error_msg}')
+        error_sent_msg = await safe_send(callback.bot.send_message, chat_id=request_data['chat_id'], text='Ошибка генерации видео. Разбираю причину...', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
         image_for_explain = request_data.get('image_bytes')
         try:
             explanation = await asyncio.wait_for(explain_generation_error(request_data['prompt'], error_msg, image_bytes=image_for_explain), timeout=30)
@@ -173,16 +175,16 @@ async def handle_veo_model_select(callback: types.CallbackQuery):
             explanation = _fallback_generation_error_explanation(error_msg)
         if error_sent_msg:
             try:
-                await safe_send(callback.bot.edit_message_text, chat_id=request_data['chat_id'], message_id=error_sent_msg.message_id, text=f'❌ Ошибка генерации видео:\n{error_msg}\n\n🧠 Пояснение:\n{explanation}')
+                await safe_send(callback.bot.edit_message_text, chat_id=request_data['chat_id'], message_id=error_sent_msg.message_id, text=f'Ошибка генерации видео.\n\n{explanation}')
             except Exception:
                 pass
         return
     if video_bytes:
         video_file = BufferedInputFile(video_bytes, filename='generated.mp4')
-        caption = make_safe_caption(f"🎬 Видео ({model_label}) по запросу: ", request_data['prompt'])
+        caption = make_safe_caption(f"Видео ({model_label}) по запросу: ", request_data['prompt'])
         await callback.bot.send_video(chat_id=request_data['chat_id'], video=video_file, caption=caption, reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
         from database import add_user_stat, log_prompt
         asyncio.create_task(add_user_stat(request_data.get('user_id', 0), request_data.get('username', ''), request_data.get('first_name', 'Аноним'), 'video'))
         asyncio.create_task(log_prompt(request_data.get('user_id', 0), request_data.get('username', ''), request_data.get('first_name', 'Аноним'), 'video', request_data.get('prompt', '')))
         return
-    await callback.bot.send_message(chat_id=request_data['chat_id'], text='❌ Не удалось получить видео.', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
+    await callback.bot.send_message(chat_id=request_data['chat_id'], text='Не удалось получить видео.', reply_to_message_id=request_data['source_message_id'], **reply_kwargs)
