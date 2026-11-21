@@ -2,12 +2,15 @@ import asyncio
 import logging
 import time
 import aiohttp
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 
 from keys import load_replicate_keys, remove_key
+from services.security_utils import is_safe_url
 from config import (
     REPLICATE_API_TIMEOUT,
+    REPLICATE_BASE_URL,
     REPLICATE_COLLECTIONS_URL,
+    REPLICATE_DEFAULT_MODEL,
     REPLICATE_DOWNLOAD_TIMEOUT,
     REPLICATE_POLL_ATTEMPTS,
     REPLICATE_POLL_INTERVAL,
@@ -18,22 +21,111 @@ from config import (
 _DYNAMIC_REPLICATE_VERSIONS: dict = {}
 
 _REPLICATE_MODELS = {
-    'recraft-ai/recraft-v3': {'version': 'e06217725b21e2c059a09b3f44b4aef56574173aee9976c9726bdc0f474d7f46', 'cfg_key': 'guidance_scale', 'input': lambda p: {'prompt': p, 'size': '1024x1024'}},
-    'black-forest-labs/flux-dev': {'version': '93d72f81bd019dde2bfcba9585a6f74e600b13a43a96eb01a42da54f5ab4df6a', 'cfg_key': 'guidance_scale', 'input': lambda p: {'prompt': p, 'width': 1024, 'height': 1024, 'steps': 28, 'guidance_scale': 3.5}},
-    'black-forest-labs/flux-schnell': {'version': 'c846a69991daf4c0e5d016514849d14ee5b2e6846ce6b9d6f21369e564cfe51e', 'cfg_key': 'guidance_scale', 'input': lambda p: {'prompt': p, 'width': 1024, 'height': 1024, 'steps': 4}},
-    'aisha-ai-official/wai-nsfw-illustrious-v12': {'version': '0fc0fa9885b284901a6f9c0b4d67701fd7647d157b88371427d63f8089ce140e', 'cfg_key': 'cfg_scale', 'input': lambda p: {'prompt': p, 'negative_prompt': 'lowres, bad anatomy, bad hands, text, error, missing fingers, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry', 'width': 896, 'height': 1152, 'steps': 28, 'cfg_scale': 7.0, 'scheduler': 'DPM++ 2M Karras'}},
-    'aisha-ai-official/wai-nsfw-illustrious-v11': {'version': 'c1d5b02687df6081c7953c74bcc527858702e8c153c9382012ccc3906752d3ec', 'cfg_key': 'cfg_scale', 'input': lambda p: {'prompt': p, 'negative_prompt': 'lowres, bad anatomy, bad hands, text, error, worst quality, low quality', 'width': 896, 'height': 1152, 'steps': 28, 'cfg_scale': 7.0}},
-    'aisha-ai-official/nsfw-flux-dev': {'version': 'fb4f086702d6a301ca32c170d926239324a7b7b2f0afc3d232a9c4be382dc3fa', 'cfg_key': 'guidance_scale', 'input': lambda p: {'prompt': p, 'width': 1024, 'height': 1024, 'steps': 28, 'guidance_scale': 3.5}}
+    'recraft-ai/recraft-v3': {
+        'version': 'e06217725b21e2c059a09b3f44b4aef56574173aee9976c9726bdc0f474d7f46',
+        'cfg_key': 'guidance_scale',
+        'input': lambda p: {'prompt': p, 'size': '1024x1024'},
+    },
+    'black-forest-labs/flux-dev': {
+        'version': '93d72f81bd019dde2bfcba9585a6f74e600b13a43a96eb01a42da54f5ab4df6a',
+        'cfg_key': 'guidance_scale',
+        'input': lambda p: {'prompt': p, 'width': 1024, 'height': 1024, 'steps': 28, 'guidance_scale': 3.5},
+    },
+    'black-forest-labs/flux-schnell': {
+        'version': 'c846a69991daf4c0e5d016514849d14ee5b2e6846ce6b9d6f21369e564cfe51e',
+        'cfg_key': 'guidance_scale',
+        'input': lambda p: {'prompt': p, 'width': 1024, 'height': 1024, 'steps': 4},
+    },
+    'aisha-ai-official/wai-nsfw-illustrious-v12': {
+        'version': '0fc0fa9885b284901a6f9c0b4d67701fd7647d157b88371427d63f8089ce140e',
+        'cfg_key': 'cfg_scale',
+        'input': lambda p: {
+            'prompt': p,
+            'negative_prompt': 'lowres, bad anatomy, bad hands, text, error, missing fingers, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry',
+            'width': 896,
+            'height': 1152,
+            'steps': 28,
+            'cfg_scale': 7.0,
+            'scheduler': 'DPM++ 2M Karras',
+        },
+    },
+    'aisha-ai-official/wai-nsfw-illustrious-v11': {
+        'version': 'c1d5b02687df6081c7953c74bcc527858702e8c153c9382012ccc3906752d3ec',
+        'cfg_key': 'cfg_scale',
+        'input': lambda p: {
+            'prompt': p,
+            'negative_prompt': 'lowres, bad anatomy, bad hands, text, error, worst quality, low quality',
+            'width': 896,
+            'height': 1152,
+            'steps': 28,
+            'cfg_scale': 7.0,
+        },
+    },
+    'aisha-ai-official/nsfw-flux-dev': {
+        'version': 'fb4f086702d6a301ca32c170d926239324a7b7b2f0afc3d232a9c4be382dc3fa',
+        'cfg_key': 'guidance_scale',
+        'input': lambda p: {'prompt': p, 'width': 1024, 'height': 1024, 'steps': 28, 'guidance_scale': 3.5},
+    },
 }
 
 
-async def fetch_replicate_image_models() -> list:
-    """Fetch available Replicate models from the text-to-image collection.
+def _apply_cfg_to_input(model: str, model_cfg: Optional[dict], model_input: dict, cfg: Optional[dict]) -> dict:
+    if not cfg:
+        return model_input
+    out = dict(model_input)
+    is_recraft = 'recraft' in model
+    is_wai = 'wai-nsfw-illustrious' in model
 
-    Returned newest-first: the collection is ordered roughly oldest-to-newest,
-    so a plain head-slice of it would drop the current models and keep the
-    2022-2023 SD1.5/SDXL relics.
-    """
+    size_str = str(cfg.get('size') or '')
+    if 'x' in size_str:
+        try:
+            w_str, h_str = size_str.lower().split('x', 1)
+            w, h = int(w_str), int(h_str)
+            if is_recraft:
+                out['size'] = f'{w}x{h}'
+            else:
+                out['width'] = w
+                out['height'] = h
+        except ValueError:
+            pass
+
+    if not is_recraft and cfg.get('steps') is not None:
+        out['steps'] = int(cfg['steps'])
+
+    if not is_recraft and cfg.get('cfg') is not None:
+        cfg_key = (model_cfg or {}).get('cfg_key', 'guidance_scale')
+        out[cfg_key] = float(cfg['cfg'])
+
+    if cfg.get('neg'):
+        out['negative_prompt'] = str(cfg['neg'])
+
+    if cfg.get('seed') is not None:
+        try:
+            seed_val = int(cfg['seed'])
+            if seed_val >= 0 or is_wai:
+                out['seed'] = seed_val
+        except (ValueError, TypeError):
+            pass
+
+    if is_wai:
+        if cfg.get('scheduler'):
+            out['scheduler'] = str(cfg['scheduler'])
+        if cfg.get('clip_skip') is not None:
+            out['clip_skip'] = int(cfg['clip_skip'])
+        if cfg.get('pag_scale') is not None:
+            out['pag_scale'] = float(cfg['pag_scale'])
+        if cfg.get('rescale') is not None:
+            out['guidance_rescale'] = float(cfg['rescale'])
+        if cfg.get('prepend') is not None:
+            out['prepend_preprompt'] = bool(cfg['prepend'])
+        if cfg.get('batch') is not None:
+            out['batch_size'] = max(1, min(4, int(cfg['batch'])))
+
+    return out
+
+
+async def fetch_replicate_image_models() -> list:
+    """Fetch available Replicate models from the text-to-image collection."""
     from shared_types import _models_cache, _MODELS_CACHE_TTL
     cache_key = 'replicate_image'
     now = time.time()
@@ -68,23 +160,22 @@ async def fetch_replicate_image_models() -> list:
 
 async def generate_image_with_replicate(
     prompt: str,
-    model: str = 'aisha-ai-official/wai-nsfw-illustrious-v12',
+    model: str = REPLICATE_DEFAULT_MODEL,
     state_data: dict = None,
-) -> Tuple[Optional[bytes], Optional[str]]:
-    """Generate an image via Replicate API (supports FLUX, WAI NSFW, etc.)."""
+    cfg: Optional[dict] = None,
+) -> Tuple[Optional[List[bytes]], Optional[str]]:
+    """Generate image(s) via Replicate API (supports FLUX, WAI NSFW, etc.)."""
     keys = await load_replicate_keys()
     if not keys:
         return (None, 'Нет Replicate ключей.')
     model_cfg = _REPLICATE_MODELS.get(model)
     dynamic_version = _DYNAMIC_REPLICATE_VERSIONS.get(model)
     if model_cfg:
-        # Prefer the version the API reports as latest — the pinned constant is
-        # only a fallback for when the collection has not been fetched yet.
         version = dynamic_version or model_cfg['version']
-        model_input = model_cfg['input'](prompt)
+        model_input = _apply_cfg_to_input(model, model_cfg, model_cfg['input'](prompt), cfg)
     elif dynamic_version:
         version = dynamic_version
-        model_input = {'prompt': prompt}
+        model_input = _apply_cfg_to_input(model, None, {'prompt': prompt}, cfg)
     else:
         return (None, f'Неизвестная Replicate модель: {model}')
     last_error = 'Все Replicate ключи недоступны.'
@@ -94,7 +185,7 @@ async def generate_image_with_replicate(
         headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json', 'Prefer': f'wait={REPLICATE_PREFER_WAIT}'}
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.post('https://api.replicate.com/v1/predictions', json={'version': version, 'input': model_input}, headers=headers, timeout=aiohttp.ClientTimeout(total=REPLICATE_API_TIMEOUT)) as resp:
+                async with session.post(f'{REPLICATE_BASE_URL}/predictions', json={'version': version, 'input': model_input}, headers=headers, timeout=aiohttp.ClientTimeout(total=REPLICATE_API_TIMEOUT)) as resp:
                     if resp.status not in (200, 201, 202):
                         err = await resp.text()
                         logging.warning(f'Replicate create {resp.status}: {err[:150]}')
@@ -102,7 +193,6 @@ async def generate_image_with_replicate(
                             await remove_key(key, resp.status)
                             continue
                         if resp.status == 429:
-                            # Throttled key is not dead — cool it down and try the next one.
                             await remove_key(key, 429)
                             last_error = f'Replicate 429: {err[:200]}'
                             continue
@@ -117,7 +207,7 @@ async def generate_image_with_replicate(
                     if status == 'failed':
                         return (None, prediction.get('error', 'Replicate: generation failed'))
                     await asyncio.sleep(REPLICATE_POLL_INTERVAL)
-                    async with session.get(f'https://api.replicate.com/v1/predictions/{pred_id}', headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as poll:
+                    async with session.get(f'{REPLICATE_BASE_URL}/predictions/{pred_id}', headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as poll:
                         prediction = await poll.json()
                         status = prediction.get('status')
                         output = prediction.get('output')
@@ -126,6 +216,8 @@ async def generate_image_with_replicate(
                 urls = output if isinstance(output, list) else [output]
                 results = []
                 for img_url in urls:
+                    if not isinstance(img_url, str) or not is_safe_url(img_url):
+                        continue
                     async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=REPLICATE_DOWNLOAD_TIMEOUT)) as dl:
                         if dl.status == 200:
                             results.append(await dl.read())

@@ -12,7 +12,7 @@ import time
 
 import aiosqlite
 
-from config import KEYHUNTER_DB
+from config import GEMINI_KEY_COOLDOWN_403, GEMINI_KEY_COOLDOWN_429, KEYHUNTER_DB
 
 _session_dead: dict[str, float] = {}  # key -> expiry timestamp
 _missing_db_warned = False
@@ -208,12 +208,12 @@ async def _retire_in_db(key: str) -> None:
 async def remove_key(key_to_remove, status_code=None):
     """Cool a key down in-process; a key that is permanently dead is also retired in KeyHunter."""
     if status_code == 429:
-        _session_dead[key_to_remove] = time.time() + 65
-        logging.info(f"Ключ {key_to_remove[:10]}... в кулдауне 65с (429 rate limit).")
+        _session_dead[key_to_remove] = time.time() + GEMINI_KEY_COOLDOWN_429
+        logging.info(f"Ключ {key_to_remove[:10]}... в кулдауне {int(GEMINI_KEY_COOLDOWN_429)}с (429 rate limit).")
         return
     if status_code == 403:
-        _session_dead[key_to_remove] = time.time() + 300
-        logging.info(f"Ключ {key_to_remove[:10]}... в кулдауне 300с (403 forbidden).")
+        _session_dead[key_to_remove] = time.time() + GEMINI_KEY_COOLDOWN_403
+        logging.info(f"Ключ {key_to_remove[:10]}... в кулдауне {int(GEMINI_KEY_COOLDOWN_403)}с (403 forbidden).")
         return
     _session_dead[key_to_remove] = time.time() + 86400 * 365
     await _retire_in_db(key_to_remove)

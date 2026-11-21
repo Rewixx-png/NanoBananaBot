@@ -4,10 +4,12 @@ import time
 import aiohttp
 from typing import Optional
 
+from config import GROQ_BASE_URL, GROQ_MODEL
+
 logger = logging.getLogger(__name__)
 
-_GROQ_BASE = "https://api.groq.com/openai/v1"
-_GROQ_MODEL = "openai/gpt-oss-120b"
+_GROQ_BASE = GROQ_BASE_URL
+_GROQ_MODEL = GROQ_MODEL
 
 # Key cache
 _keys_cache: list[str] = []

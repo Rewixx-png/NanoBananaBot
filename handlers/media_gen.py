@@ -14,7 +14,9 @@ from config import (
     TEXT_ONLY_CHAT_ID,
     FULL_ACCESS_CHAT_IMAGE_COOLDOWN,
     IMAGE_COOLDOWN_SECONDS,
+    VIDEO_COOLDOWN_SECONDS,
     PAYMENT_USERNAME,
+    PAYMENT_INFO,
     DAILY_GEN_LIMIT,
 )
 from state import (
@@ -97,17 +99,12 @@ VEO_MODELS: dict = {
     'omni0': ('Omni Flash (preview)', 'gemini-omni-flash-preview'),
 }
 
-VIDEO_COOLDOWN = 20
+VIDEO_COOLDOWN = VIDEO_COOLDOWN_SECONDS
 
-# Telegram allows at most 100 buttons per inline keyboard. The model list adds
-# one button per model plus a "back" row, so leave headroom: 6 curated models +
-# 84 from the Replicate collection + nav = 91. The collection is fetched
-# newest-first, so the cap trims the 2022-2023 SD1.5/SDXL tail, not new models.
+# Telegram allows at most 100 buttons per inline keyboard.
 REPLICATE_MENU_LIMIT = 90
 
 TTS_MODELS: dict = {
-    # Fallback only — refresh_models() replaces these with whatever the API
-    # advertises. Keep them pointed at models that still exist.
     'tts0': ('Gemini 3.8 Flash TTS', 'gemini-3.8-flash-tts'),
     'tts1': ('Gemini 3.8 Flash Lite TTS', 'gemini-3.8-flash-lite-tts'),
 }
@@ -149,9 +146,6 @@ async def refresh_models():
     from services.audio_service import fetch_gemini_tts_models
     veo_models = await fetch_veo_models()
     if veo_models:
-        # The live list is authoritative: drop the hardcoded fallback entries
-        # first, otherwise they survive alongside the fetched ones as stale
-        # duplicates (that is how "Veo 3.1 Lite" ended up listed twice).
         for key in [k for k in VEO_MODELS if k.startswith(('veo', 'omni'))]:
             del VEO_MODELS[key]
         for (i, (label, model_id)) in enumerate(veo_models):
@@ -495,7 +489,7 @@ async def handle_nsfw_generate(callback: types.CallbackQuery):
     except Exception:
         pass
     try:
-        (results, error_msg) = await generate_image_with_replicate(d['prompt'], model=d['model'], state_data=state_data)
+        (results, error_msg) = await generate_image_with_replicate(d['prompt'], model=d['model'], state_data=state_data, cfg=d.get('cfg'))
     except Exception as e:
         logger.exception(f"Критическая ошибка во время генерации NSFW: {e}")
         (results, error_msg) = (None, f"Внутренняя ошибка сервера: {type(e).__name__}: {e}")
@@ -654,7 +648,8 @@ async def handle_provider_select(callback: types.CallbackQuery):
             (allowed, remaining) = _check_daily_limit(uid, callback.message.chat.id if callback.message else request_data['chat_id'])
             if not allowed:
                 (req_limit, days) = chat_custom_limits.get(callback.message.chat.id if callback.message else request_data['chat_id'], (DAILY_GEN_LIMIT, 1))
-                await callback.answer(f'Лимит {req_limit} генерации за {days} дн. исчерпан.\nДля безлимита свяжитесь с {PAYMENT_USERNAME} и пополните карту Тбанка на 10₽.', show_alert=True)
+                extra_payment = f'\n{PAYMENT_INFO}' if PAYMENT_INFO else (f'\nДля безлимита свяжитесь с {PAYMENT_USERNAME}.' if PAYMENT_USERNAME else '')
+                await callback.answer(f'Лимит {req_limit} генерации за {days} дн. исчерпан.{extra_payment}', show_alert=True)
                 return
     models = PROVIDER_MODELS.get(provider, [])
     if not models:
@@ -749,7 +744,7 @@ async def handle_image_model_select(callback: types.CallbackQuery):
         await callback.answer('Неизвестная модель.', show_alert=True)
         return
     (provider, real_model) = model_info
-    selected_label = next((l for lst in PROVIDER_MODELS.values() for (l, m) in lst if next((k for (k, (p, rm)) in MODEL_TO_REAL.items() if rm == m and p == provider), None) == model_id), real_model)
+    selected_label = next((l for (l, m) in PROVIDER_MODELS.get(provider, []) if m == model_id), real_model)
     await callback.answer()
     if provider == 'gemini':
         request_data['selected_model'] = real_model
@@ -791,8 +786,6 @@ async def handle_image_model_select(callback: types.CallbackQuery):
             (result_img, error_msg) = await generate_image_with_gpt(request_data['prompt'], images_bytes=imgs, model=real_model, state_data=state_data)
         elif provider == 'flux':
             (result_img, error_msg) = await generate_image_with_nvidia(request_data['prompt'], model=real_model, state_data=state_data)
-        elif provider == 'nsfw':
-            (result_img, error_msg) = await generate_image_with_replicate(request_data['prompt'], model=real_model, state_data=state_data)
         else:
             (result_img, error_msg) = await generate_image_with_gemini(request_data['prompt'], images_bytes=imgs, model=real_model, temperature=request_data.get('temperature', 1.0), state_data=state_data)
     except Exception as e:

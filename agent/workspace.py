@@ -10,6 +10,7 @@ import pwd
 import shutil
 from config import (
     AGENT_RUN_TIMEOUT,
+    AGENT_SANDBOX_USER,
     AGENT_WORKSPACE_BASE,
     AGENT_WORKSPACE_FLUSH_INTERVAL,
     STALE_WORKSPACE_TTL,
@@ -19,7 +20,7 @@ from typing import Callable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_SANDBOX_USER = "hatani"
+_SANDBOX_USER = AGENT_SANDBOX_USER
 _RUN_TIMEOUT = AGENT_RUN_TIMEOUT
 _WS_BASE = AGENT_WORKSPACE_BASE
 

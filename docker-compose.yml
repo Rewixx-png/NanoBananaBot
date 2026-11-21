@@ -29,19 +29,19 @@ services:
     env_file:
       - .env
     environment:
-      TELEGRAM_API_URL: http://telegram-bot-api:8081
-      REDIS_URL: redis://localhost:6379
+      TELEGRAM_API_URL: ${TELEGRAM_API_URL:-http://telegram-bot-api:8081}
+      REDIS_URL: ${REDIS_URL:-redis://localhost:6379}
     dns:
       - 1.1.1.1
       - 8.8.8.8
     ports:
-      - "7432:7432"
-    working_dir: /root/Projects/NanoHatani
+      - "${FIGMA_BRIDGE_PORT:-7432}:${FIGMA_BRIDGE_PORT:-7432}"
+    working_dir: ${APP_DIR:-/app}
     volumes:
-      - /root/Projects/NanoHatani:/root/Projects/NanoHatani
+      - .:${APP_DIR:-/app}
       # KeyHunter DB directory — every provider key is read from here.
-      - /root/keyhunter:/root/keyhunter
-      - /root/cookies:/root/cookies
+      - ${KEYHUNTER_DIR:-/root/keyhunter}:/root/keyhunter
+      - ${COOKIES_DIR:-/root/cookies}:/root/cookies
       - tiktokhatanibot_telegram-bot-api-data:/var/lib/telegram-bot-api:ro
 
 volumes:

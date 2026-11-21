@@ -122,6 +122,68 @@ MIGRATIONS = [
         "description": "Remove unused agent tasks table",
         "sql": "DROP TABLE IF EXISTS agent_tasks;",
     },
+    {
+        "version": 4,
+        "description": "Suno Studio persistence — tracks, personas, custom voices, stems",
+        "sql": """
+            CREATE TABLE IF NOT EXISTS suno_tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                task_id TEXT NOT NULL,
+                audio_id TEXT NOT NULL,
+                title TEXT DEFAULT '',
+                tags TEXT DEFAULT '',
+                duration REAL DEFAULT 0,
+                model TEXT DEFAULT 'V6',
+                prompt TEXT DEFAULT '',
+                audio_url TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, task_id, audio_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_suno_tracks_user ON suno_tracks(user_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS suno_personas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                persona_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                style TEXT DEFAULT '',
+                source_task_id TEXT DEFAULT '',
+                source_audio_id TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, persona_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_suno_personas_user ON suno_personas(user_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS suno_voices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                task_id TEXT NOT NULL,
+                voice_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                style TEXT DEFAULT '',
+                skill_level TEXT DEFAULT 'beginner',
+                language TEXT DEFAULT 'ru',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, voice_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_suno_voices_user ON suno_voices(user_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS suno_stems (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                task_id TEXT NOT NULL,
+                source_title TEXT DEFAULT '',
+                sep_type TEXT DEFAULT 'separate_vocal',
+                stems_json TEXT DEFAULT '[]',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, task_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_suno_stems_user ON suno_stems(user_id, id DESC);
+        """,
+    },
 ]
 
 

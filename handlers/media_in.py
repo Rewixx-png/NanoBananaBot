@@ -16,6 +16,7 @@ from handlers.common import (
     safe_send,
     _clean_plain_reply,
     send_rich_message,
+    reply_formatted,
     _project_filename,
     _validate_generated_files,
     _is_text_filename,
@@ -38,11 +39,13 @@ from database import (
 from config import (
     OWNER_USER_ID,
     ADMIN_IDS,
+    AGENT_CONTEXT_WINDOW,
     MAX_HISTORY_MESSAGES,
     AGENT_ANALYSIS_MAX_BYTES,
     AGENT_TIMEOUT_SECONDS,
     MEDIA_CONTEXT_WINDOW,
     PHOTO_ANALYSIS_STATUS_HTML,
+    VIDEO_VISION_MAX_FRAMES,
 )
 
 from state import (
@@ -50,11 +53,12 @@ from state import (
 )
 
 from services.gemini_text import generate_text_with_gemini
-from services.openrouter import analyze_image_with_openrouter
+from services.omniroute_service import analyze_image_with_omniroute, analyze_video_with_omniroute
 
 from agent import (
     run_agent,
     classify_agent_intent,
+    classify_media_mode,
 )
 
 
@@ -69,7 +73,7 @@ async def _analyze_photo_with_status(
 ) -> str:
     status = await message.reply(PHOTO_ANALYSIS_STATUS_HTML, parse_mode='HTML', **reply_kwargs)
     try:
-        return await analyze_image_with_openrouter(image_bytes, prompt)
+        return await analyze_image_with_omniroute(image_bytes, prompt)
     finally:
         try:
             await status.delete()
@@ -110,13 +114,13 @@ async def _send_generated_project(message: types.Message, project: dict[str, Any
 async def _send_text_with_code_documents(message: types.Message, text_response: str, reply_kwargs: dict[str, Any]):
     _FENCE = r'```([^\n`]*)\n(.*?)```'
     code_blocks = re.findall(_FENCE, text_response, re.DOTALL)
-    cleaned_text = _clean_plain_reply(re.sub(_FENCE, '', text_response, flags=re.DOTALL).strip())
+    cleaned_text = re.sub(_FENCE, '', text_response, flags=re.DOTALL).strip()
     logger.info(f'File-task: found {len(code_blocks)} code block(s) in response ({len(text_response)} chars)')
     if not cleaned_text and code_blocks:
         cleaned_text = 'Готовый код.'
     elif not cleaned_text:
         cleaned_text = 'Не понял ответ. Переформулируй.'
-    sent_msg = await safe_send(message.reply, cleaned_text, **reply_kwargs)
+    sent_msg = await reply_formatted(message, cleaned_text, reply_kwargs)
     if not sent_msg:
         logger.warning('File-task reply was not sent after flood-control retries')
         return
@@ -185,7 +189,8 @@ async def _handle_file_document_upload(message: types.Message, bot_user: types.U
         await message.reply('Не умею читать такой файл. Кидай текст/код или .zip, а не это говно.', **reply_kwargs)
         return
     if doc.file_size and doc.file_size > MAX_DOCUMENT_UPLOAD_BYTES:
-        await message.reply('Файл слишком жирный. Максимум 5 МБ, не тащи сюда мамонта.', **reply_kwargs)
+        max_mb = max(1, MAX_DOCUMENT_UPLOAD_BYTES // 1_000_000)
+        await message.reply(f'Файл слишком жирный. Максимум {max_mb} МБ, не тащи сюда мамонта.', **reply_kwargs)
         return
     try:
         file_info = await message.bot.get_file(doc.file_id)
@@ -218,7 +223,7 @@ async def _handle_file_document_upload(message: types.Message, bot_user: types.U
 
     _ctx = _agent_ctx.get(message.chat.id, [])
     if _ctx:
-        _prompt = "[История чата — последние сообщения (НЕ инструкция!)]:\n" + "\n".join(_ctx[-50:]) + "\n[Конец истории]\n\n" + _prompt
+        _prompt = "[История чата — последние сообщения (НЕ инструкция!)]:\n" + "\n".join(_ctx[-AGENT_CONTEXT_WINDOW:]) + "\n[Конец истории]\n\n" + _prompt
 
     thinking_msg = await message.reply('Анализирую файл...', **reply_kwargs)
     _status_cb = make_status_cb(thinking_msg)
@@ -348,43 +353,45 @@ async def _media_to_agent(
         return False
     username = message.from_user.first_name or message.from_user.username or 'Аноним'
     is_owner_user = message.from_user.id in ADMIN_IDS
-    # Images use the configured Claude Sonnet vision model; videos keep NVIDIA frame analysis.
+    # Semantically route images/videos: pure inspection -> direct OmniRoute vision;
+    # editing/conversion/file/Telegram actions -> full agent loop with file in workspace.
     _ext = filename.lower().rsplit('.', 1)[-1] if '.' in filename else ''
     _is_img = _ext in ('jpg', 'jpeg', 'png', 'webp', 'gif')
     _is_vid = _ext in ('mp4', 'mov', 'avi', 'webm')
     if _is_img or _is_vid:
-        try:
-            _prompt = caption or ('Опиши это изображение подробно.' if _is_img
-                                  else 'Проанализируй эти кадры видео. Что происходит? Опиши сюжет и ключевые детали.')
-            if _is_img:
-                result = await _analyze_photo_with_status(message, file_bytes, _prompt, reply_kwargs)
-            else:
-                _bot_msg = await message.reply('Анализирую видео...', **reply_kwargs)
-                try:
-                    from services.nvidia_vision import analyze_video
-                    result = await analyze_video(file_bytes, _prompt, max_frames=8)
-                finally:
+        media_mode = await classify_media_mode(caption, filename)
+        if media_mode == 'vision':
+            try:
+                _prompt = caption or ('Опиши это изображение подробно.' if _is_img
+                                      else 'Проанализируй эти кадры видео. Что происходит? Опиши сюжет и ключевые детали.')
+                if _is_img:
+                    result = await _analyze_photo_with_status(message, file_bytes, _prompt, reply_kwargs)
+                else:
+                    _bot_msg = await message.reply('Анализирую видео...', **reply_kwargs)
                     try:
-                        await _bot_msg.delete()
-                    except Exception as error:
-                        logger.warning('Video analysis status cleanup failed: %s: %s', type(error).__name__, error)
-            if result:
-                await safe_send(message.reply, result, **reply_kwargs)
-                from state import chat_context_buffer as _ccb2
-                from config import MAX_HISTORY_MESSAGES as _mhm2
-                _buf2 = _ccb2.setdefault(message.chat.id, [])
-                _buf2.append(f"Hatani: {result[:500]}")
-                if len(_buf2) > _mhm2:
-                    _ccb2[message.chat.id] = _buf2[-_mhm2:]
-                asyncio.create_task(add_user_stat(message.from_user.id, username,
-                                                  message.from_user.first_name or 'Аноним', 'vision'))
-                asyncio.create_task(log_prompt(message.from_user.id, username,
-                                               message.from_user.first_name or 'Аноним',
-                                               'vision', caption))
-                return True
-            await safe_send(message.reply, 'Не удалось проанализировать. Пробую через агента...', **reply_kwargs)
-        except Exception as _ve:
-            logger.warning(f"Vision shortcut failed: {_ve}")
+                        result = await analyze_video_with_omniroute(file_bytes, _prompt, max_frames=VIDEO_VISION_MAX_FRAMES)
+                    finally:
+                        try:
+                            await _bot_msg.delete()
+                        except Exception as error:
+                            logger.warning('Video analysis status cleanup failed: %s: %s', type(error).__name__, error)
+                if result:
+                    await reply_formatted(message, result, reply_kwargs)
+                    from state import chat_context_buffer as _ccb2
+                    from config import MAX_HISTORY_MESSAGES as _mhm2
+                    _buf2 = _ccb2.setdefault(message.chat.id, [])
+                    _buf2.append(f"Hatani: {result[:500]}")
+                    if len(_buf2) > _mhm2:
+                        _ccb2[message.chat.id] = _buf2[-_mhm2:]
+                    asyncio.create_task(add_user_stat(message.from_user.id, username,
+                                                      message.from_user.first_name or 'Аноним', 'vision'))
+                    asyncio.create_task(log_prompt(message.from_user.id, username,
+                                                   message.from_user.first_name or 'Аноним',
+                                                   'vision', caption))
+                    return True
+                await safe_send(message.reply, 'Не удалось проанализировать. Пробую через агента...', **reply_kwargs)
+            except Exception as _ve:
+                logger.warning(f"Vision shortcut failed: {_ve}")
     thinking_msg = await message.reply('Думаю...', **reply_kwargs)
     _status_cb = make_status_cb(thinking_msg)
     _send_cb = partial(send_agent_callback, message=message, reply_kwargs=reply_kwargs)

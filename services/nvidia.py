@@ -5,7 +5,7 @@ import logging
 import aiohttp
 from typing import Tuple, Optional
 
-from config import NVIDIA_TIMEOUT
+from config import NVIDIA_IMAGE_BASE_URL, NVIDIA_IMAGE_MODEL, NVIDIA_TIMEOUT
 from keys import load_nvidia_keys, remove_key
 from services.gemini_text import translate_to_english
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 async def generate_image_with_nvidia(
     prompt: str,
-    model: str = 'black-forest-labs/flux.1-schnell',
+    model: str = NVIDIA_IMAGE_MODEL,
     state_data: dict = None,
 ) -> Tuple[Optional[bytes], Optional[str]]:
     """Generate an image via NVIDIA NIM (FLUX models)."""
@@ -24,7 +24,7 @@ async def generate_image_with_nvidia(
     if not api_keys:
         return (None, 'Нет живых ключей NVIDIA NIM в KeyHunter.')
     prompt_text = await translate_to_english(prompt) if prompt else 'A highly detailed beautiful picture'
-    url = f'https://ai.api.nvidia.com/v1/genai/{model}'
+    url = f'{NVIDIA_IMAGE_BASE_URL}/{model}'
     if 'schnell' in model:
         (steps, cfg_scale) = (4, 0)
     elif 'klein' in model:

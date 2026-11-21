@@ -10,14 +10,17 @@ _PRIVILEGED = {
     "tg_ban_user", "tg_unban_user", "tg_kick_user", "tg_restrict_member", "tg_promote_member",
     "tg_delete_message", "tg_pin_message", "tg_unpin_message",
     "tg_set_chat_title", "tg_set_chat_description", "tg_set_chat_photo",
-    "tg_set_bot_photo", "tg_create_invite_link", "read_bot_logs",
+    "tg_set_bot_photo", "tg_create_invite_link", "tg_export_invite_link",
+    "tg_create_forum_topic", "tg_close_forum_topic", "tg_approve_join_request",
+    "read_bot_logs",
 }
 
 
 async def _tg_api(method: str, params: dict) -> dict:
     """Direct Telegram Bot API call — returns parsed JSON."""
-    from config import BOT_TOKEN as _TK
-    url = f"https://api.telegram.org/bot{_TK}/{method}"
+    from config import BOT_TOKEN as _TK, TELEGRAM_API_URL as _BASE
+    base = (_BASE or "https://api.telegram.org").rstrip("/")
+    url = f"{base}/bot{_TK}/{method}"
     try:
         async with aiohttp.ClientSession() as s:
             async with s.post(url, json=params,
@@ -76,7 +79,8 @@ async def handle_tg_tool(
                   f"Тип: {c.get('type')}\nУчастников: {count}\n"
                   f"Описание: {c.get('description','—')}\nUsername: @{c.get('username','—')}")
         import html as _html
-        await _st(f"ℹ️ <b>Инфо о чате:</b>\n<pre>{_html.escape(result)}</pre>")
+        if _st:
+            await _st(f"ℹ️ <b>Инфо о чате:</b>\n<pre>{_html.escape(result)}</pre>")
         return result, None
 
     if name == "tg_ban_user":

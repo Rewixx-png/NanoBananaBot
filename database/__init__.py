@@ -10,6 +10,12 @@ from database.queries import (
     add_voice, get_voices, delete_voice,
     get_settings as get_voice_settings, save_settings as save_voice_settings,
 )
+from database.suno import (
+    save_suno_track, get_suno_tracks, get_suno_track_by_id, delete_suno_track,
+    save_suno_persona, get_suno_personas, delete_suno_persona,
+    save_suno_voice, get_suno_voices, get_suno_voice_by_id, delete_suno_voice,
+    save_suno_stems, get_suno_stems_list, get_suno_stems_by_id,
+)
 
 __all__ = [
     'init_db', 'DB_PATH',
@@ -22,4 +28,8 @@ __all__ = [
     'log_prompt', 'get_recent_prompts',
     'add_voice', 'get_voices', 'delete_voice',
     'get_voice_settings', 'save_voice_settings',
+    'save_suno_track', 'get_suno_tracks', 'get_suno_track_by_id', 'delete_suno_track',
+    'save_suno_persona', 'get_suno_personas', 'delete_suno_persona',
+    'save_suno_voice', 'get_suno_voices', 'get_suno_voice_by_id', 'delete_suno_voice',
+    'save_suno_stems', 'get_suno_stems_list', 'get_suno_stems_by_id',
 ]

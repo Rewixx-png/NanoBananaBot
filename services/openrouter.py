@@ -11,6 +11,7 @@ from services.security_utils import is_safe_url
 from config import (
     OPENROUTER_APP_TITLE,
     OPENROUTER_BASE_URL,
+    OPENROUTER_IMAGE_MODEL,
     OPENROUTER_POLICY_COOLDOWN_SECONDS,
     OPENROUTER_TEXT_MODEL,
     OPENROUTER_VISION_MODEL,
@@ -18,7 +19,6 @@ from config import (
     PHOTO_ANALYSIS_TIMEOUT,
 )
 from shared_types import _guess_image_mime
-
 
 
 _TEXT_POLICY_DEAD: dict[str, float] = {}
@@ -48,7 +48,6 @@ async def openrouter_chat(
         "model": model,
         "messages": request_messages,
         "max_tokens": max_tokens,
-        "reasoning": {"effort": "none"},
         "reasoning": {"effort": "none"},
         "stream": False,
     }
@@ -142,10 +141,9 @@ async def analyze_image_with_openrouter(image_bytes: bytes, prompt: str) -> str:
     return _response_text(data, OPENROUTER_VISION_MODEL)
 
 
-
 async def generate_image_with_openrouter(
     prompt: str,
-    model: str = 'google/gemini-3.1-flash-image-preview',
+    model: str = OPENROUTER_IMAGE_MODEL,
     images_bytes: Optional[List[bytes]] = None,
     state_data: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[bytes], Optional[str]]:

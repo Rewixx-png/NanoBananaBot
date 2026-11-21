@@ -15,6 +15,7 @@ from handlers.common import (
     _clean_plain_reply,
     _md_to_html,
     send_rich_message,
+    reply_formatted,
     _code_block_ext,
     _maybe_send_random_chat_media,
     _track_user,
@@ -70,18 +71,18 @@ async def _voice_reply(message: Message, text: str, sent_msg: types.Message | No
             tagged = text
 
         from database.voice import get_voices, get_settings
-        voices = await get_voices(7485721661)
-        voice_id = next((voice["voice_id"] for voice in voices if any(name in voice["name"].lower() for name in ("hutao", "хутао", "hu tao"))), None)
+        voices = await get_voices(OWNER_USER_ID)
+        voice_id = next((voice["voice_id"] for voice in voices if any(name in voice["name"].lower() for name in AUTO_VOICE_KEYWORDS)), None)
         if not voice_id:
-            await send_text_fallback("голос Hu Tao не найден")
+            await send_text_fallback(f"голос {AUTO_VOICE_CAPTION} не найден")
             return
 
         from services.elevenlabs_service import elevenlabs_tts
-        settings = await get_settings(7485721661)
+        settings = await get_settings(OWNER_USER_ID)
         audio = await elevenlabs_tts(
             tagged,
             voice_id,
-            model="eleven_v3",
+            model=AUTO_VOICE_TTS_MODEL,
             stability=settings["stability"],
             similarity_boost=settings["similarity_boost"],
             style=settings["style"],
@@ -93,8 +94,8 @@ async def _voice_reply(message: Message, text: str, sent_msg: types.Message | No
 
         voice_message = await safe_send(
             message.reply_voice,
-            BufferedInputFile(audio, "hutao.mp3"),
-            caption="Hu Tao",
+            BufferedInputFile(audio, "auto_voice.mp3"),
+            caption=AUTO_VOICE_CAPTION,
             **reply_kwargs,
         )
         if voice_message:
@@ -122,6 +123,10 @@ from database import (
 
 from config import (
     ADMIN_IDS,
+    OWNER_USER_ID,
+    AUTO_VOICE_CAPTION,
+    AUTO_VOICE_KEYWORDS,
+    AUTO_VOICE_TTS_MODEL,
     TEXT_COOLDOWN_SECONDS,
     PHOTO_ANALYSIS_MODEL_LABEL,
     DEEPSEEK_MODEL,
@@ -150,13 +155,6 @@ from utils import (
 logger = logging.getLogger(__name__)
 chat_router = Router()
 
-_CODE_MODIFY_WORDS = [
-    'адаптируй', 'измени', 'добавь', 'убери', 'исправь', 'переделай', 'улучши',
-    'замени', 'поправь', 'обнови', 'перепиши', 'доработай', 'дополни', 'сделай',
-    'adapt', 'modify', 'change', 'add', 'remove', 'fix', 'improve', 'update', 'refactor',
-    'зипку', 'zip', 'архив', 'файлы', 'отправь', 'скинь', 'норм', 'монолит',
-    'где', 'дай', 'покажи', 'пришли', 'заново', 'снова', 'ещё раз', 'не пришло', 'пересобери',
-]
 from handlers.media_in import (
     _analyze_photo_with_status,
     _handle_file_document_upload,
@@ -204,7 +202,7 @@ async def handle_album_photo(message: types.Message):
                 reply_kwargs,
             )
         except Exception as error:
-            logger.warning('Claude photo analysis failed: %s: %s', type(error).__name__, error, exc_info=True)
+            logger.warning('Photo analysis (%s) failed: %s: %s', PHOTO_ANALYSIS_MODEL_LABEL, type(error).__name__, error, exc_info=True)
             await message.reply(
                 f'{PHOTO_ANALYSIS_MODEL_LABEL} не смог проанализировать фото: '
                 f'{type(error).__name__}: {error}',
@@ -214,7 +212,7 @@ async def handle_album_photo(message: types.Message):
         if not result:
             await message.reply(f'{PHOTO_ANALYSIS_MODEL_LABEL} вернул пустой ответ.', **reply_kwargs)
             return
-        await message.reply(result, **reply_kwargs)
+        await reply_formatted(message, result, reply_kwargs)
         asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '',
                                           message.from_user.first_name or 'Аноним', 'vision'))
         asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '',
@@ -272,7 +270,7 @@ async def handle_voice_audio(message: types.Message):
         if os.path.exists(temp_path):
             os.remove(temp_path)
         await wait_msg.delete()
-        await message.reply(response or 'Не понял запрос. Переформулируй.', **reply_kwargs)
+        await reply_formatted(message, response or 'Не понял запрос. Переформулируй.', reply_kwargs)
         asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text'))
         asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text', prompt))
         return
@@ -290,7 +288,7 @@ async def handle_voice_audio(message: types.Message):
     await message.bot.send_chat_action(chat_id=message.chat.id, action='typing', message_thread_id=message.message_thread_id if message.chat.is_forum else None)
     response = await analyze_voice_with_gemini(audio_bytes, mime_type, prompt)
     await wait_msg.delete()
-    await message.reply(response or 'Нихуя не расслышал.', **reply_kwargs)
+    await reply_formatted(message, response or 'Нихуя не расслышал.', reply_kwargs)
     asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text'))
     asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text', prompt))
 
@@ -347,7 +345,7 @@ async def handle_video(message: types.Message):
         wait_msg = await message.reply('Думаю', **reply_kwargs)
         response = await generate_text_with_gemini(prompt, message.chat.id, username=message.from_user.first_name or message.from_user.username or 'Аноним')
         await wait_msg.delete()
-        await message.reply(response or 'Не понял запрос. Переформулируй.', **reply_kwargs)
+        await reply_formatted(message, response or 'Не понял запрос. Переформулируй.', reply_kwargs)
         asyncio.create_task(add_user_stat(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text'))
         asyncio.create_task(log_prompt(message.from_user.id, message.from_user.username or '', message.from_user.first_name or 'Аноним', 'text', prompt))
         return
@@ -368,7 +366,7 @@ async def handle_video(message: types.Message):
         cleaned_text = 'Готовый код.'
     elif not cleaned_text:
         cleaned_text = 'Не понял ответ. Переформулируй.'
-    sent_msg = await message.reply(cleaned_text, **reply_kwargs)
+    sent_msg = await reply_formatted(message, cleaned_text, reply_kwargs)
     if code_blocks:
         for (lang, code) in code_blocks:
             ext = _code_block_ext(lang)
@@ -436,7 +434,6 @@ async def handle_text_messages(message: types.Message, state: FSMContext):
             replied_text = message.reply_to_message.text[:500]
             prompt = f'[Контекст — ты написал ранее: «{replied_text}»]\n{prompt}'
         replied_code = None
-        is_code_forced = False
         if is_reply_to_bot and message.reply_to_message:
             replied_code = generated_code_messages.get((message.chat.id, message.reply_to_message.message_id))
             if replied_code:
@@ -449,10 +446,6 @@ async def handle_text_messages(message: types.Message, state: FSMContext):
                     f'[Контекст — ты ранее сгенерировал этот код по запросу: «{prev_prompt[:300]}»]\n'
                     f'[Файлы которые ты отправил:]\n{files_ctx}\n\n'
                     f'[Новый запрос/правки пользователя:]\n{web_query}'
-                )
-                is_code_forced = (
-                    any(w in web_query.lower() for w in _CODE_MODIFY_WORDS) or
-                    len(web_query.strip()) <= 10
                 )
         username = message.from_user.first_name or message.from_user.username or 'Аноним'
         reply_kwargs = {}
@@ -548,7 +541,7 @@ async def handle_text_messages(message: types.Message, state: FSMContext):
                     message.bot, chat_id=message.chat.id,
                     text=html_text,
                     message_thread_id=reply_kwargs.get('message_thread_id'),
-                    reply_parameters={"message_id": message.message_id}
+                    reply_parameters={"message_id": message.message_id, "allow_sending_without_reply": True}
                 )
                 if not sent_msg:
                     # MarkdownV2 fallback — supports $$...$$ LaTeX on any server

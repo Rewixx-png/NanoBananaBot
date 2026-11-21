@@ -1,6 +1,9 @@
 import asyncio
+import hmac
 import logging
 from aiohttp import web
+
+from config import FIGMA_BRIDGE_HOST, FIGMA_BRIDGE_PORT, FIGMA_BRIDGE_SECRET
 
 logger = logging.getLogger(__name__)
 
@@ -8,7 +11,11 @@ _pending: dict[str, dict] = {}
 _results: dict[str, str] = {}
 _result_events: dict[str, asyncio.Event] = {}
 
-BRIDGE_SECRET = 'nanohatani_figma_bridge'
+
+def _is_valid_secret(provided: object) -> bool:
+    if not FIGMA_BRIDGE_SECRET or not isinstance(provided, str):
+        return False
+    return hmac.compare_digest(provided, FIGMA_BRIDGE_SECRET)
 
 
 async def handle_poll(request: web.Request) -> web.Response:
@@ -16,7 +23,7 @@ async def handle_poll(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.json_response({'session_id': None})
-    if data.get('secret') != BRIDGE_SECRET:
+    if not _is_valid_secret(data.get('secret')):
         return web.Response(status=403)
     for sid, spec in list(_pending.items()):
         del _pending[sid]
@@ -30,7 +37,7 @@ async def handle_done(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.Response(status=400)
-    if data.get('secret') != BRIDGE_SECRET:
+    if not _is_valid_secret(data.get('secret')):
         return web.Response(status=403)
     sid = data.get('session_id')
     node_id = data.get('node_id', '')
@@ -57,7 +64,7 @@ async def enqueue_and_wait(session_id: str, spec: dict, timeout: float = 120.0) 
         _result_events.pop(session_id, None)
 
 
-async def start_bridge(host: str = '0.0.0.0', port: int = 7432) -> None:
+async def start_bridge(host: str = FIGMA_BRIDGE_HOST, port: int = FIGMA_BRIDGE_PORT) -> None:
     app = web.Application()
     app.router.add_post('/figma/poll', handle_poll)
     app.router.add_post('/figma/done', handle_done)

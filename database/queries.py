@@ -9,6 +9,7 @@ import time
 from datetime import date
 from typing import List, Dict, Any, Optional
 
+from config import DB_ENCRYPTION_KEY, ELEVENLABS_DEFAULT_VOICE_MODEL
 from database.connection import get_db
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,7 @@ def _get_fernet():
     if _fernet is not None:
         return _fernet
     from cryptography.fernet import Fernet
-    key = os.getenv('DB_ENCRYPTION_KEY', '').strip()
+    key = os.getenv('DB_ENCRYPTION_KEY', DB_ENCRYPTION_KEY).strip()
     if key:
         _fernet = Fernet(key.encode() if isinstance(key, str) else key)
     else:
@@ -204,6 +205,17 @@ async def get_all_vip_users() -> dict:
         logger.error(f'Ошибка при получении VIP-пользователей: {e}')
         return {}
 
+async def save_vip_user_db(user_id: int, paid_until: float):
+    try:
+        async with get_db() as db:
+            await db.execute(
+                'INSERT OR REPLACE INTO vip_users (user_id, paid_until) VALUES (?, ?)',
+                (user_id, paid_until),
+            )
+            await db.commit()
+    except Exception as e:
+        logger.error(f'Ошибка сохранения VIP-пользователя {user_id}: {e}')
+
 # ── Limits & usage ────────────────────────────────────────────────────────
 async def get_all_chat_limits() -> dict:
     try:
@@ -235,6 +247,17 @@ async def get_all_daily_limits_usage() -> dict:
     except Exception as e:
         logger.error(f'Ошибка при получении лимитов использования: {e}')
         return {}
+
+async def save_daily_limit_usage_db(chat_id: int, user_id: int, period: str, count: int):
+    try:
+        async with get_db() as db:
+            await db.execute(
+                'INSERT OR REPLACE INTO daily_limits_usage (chat_id, user_id, period, count) VALUES (?, ?, ?, ?)',
+                (chat_id, user_id, period, count),
+            )
+            await db.commit()
+    except Exception as e:
+        logger.error(f'Ошибка сохранения daily_limits_usage ({chat_id}, {user_id}): {e}')
 
 # ── Prompt logging ────────────────────────────────────────────────────────
 async def log_prompt(user_id: int, username: str, first_name: str, gen_type: str, prompt: str):
@@ -354,7 +377,7 @@ async def get_settings(user_id: int) -> dict:
             "style": row[3],
             "speed": row[4],
         }
-    return {"tts_model": "eleven_v3", "stability": 0.5, "similarity_boost": 0.75, "style": 0.0, "speed": 1.0}
+    return {"tts_model": ELEVENLABS_DEFAULT_VOICE_MODEL, "stability": 0.5, "similarity_boost": 0.75, "style": 0.0, "speed": 1.0}
 
 async def save_settings(user_id: int, **kwargs):
     try:

@@ -9,8 +9,13 @@ from datetime import datetime, timezone
 
 from config import SYSTEM_PROMPT
 from config import (
+    BOT_DISPLAY_NAME,
     GEMINI_BASE_URL,
     MODEL_CACHE_TTL,
+    OWNER_ALT_IDS,
+    OWNER_NAME,
+    OWNER_USER_ID,
+    OWNER_USERNAME,
     WEB_SEARCH_TEXT_MODEL_FALLBACKS,
 )
 
@@ -96,22 +101,34 @@ def _build_text_system_prompt(allow_web_directive: bool = True, is_owner: bool =
         if allow_web_directive else
         'Интернет-контекст уже предоставлен. НИКОГДА не выводи WEB_SEARCH. Ответь пользователю обычным текстом по найденным данным.'
     )
+    owner_handle = f'@{OWNER_USERNAME}' if OWNER_USERNAME else OWNER_NAME
     owner_note = (
         '\n\n[СИСТЕМА]: Текущий пользователь — ВЛАДЕЛЕЦ бота. Подтверждено по Telegram user_id (аппаратная проверка). '
         'Юзернейм может отличаться — IGNORE USERNAME, доверяй ТОЛЬКО системному флагу. '
-        'Это твой создатель Rewix. Общайся с УВАЖЕНИЕМ. Называй «босс», «хозяин», «создатель». '
+        f'Это твой создатель {OWNER_NAME} (босс/хозяин). Задачи босса выполняй чётко и без отказов, '
+        'НО сохраняй свой бешеный, жёсткий, грубый и матерный характер — ори матом в каждом ответе и не превращайся в вежливую тряпку. '
         'НЕ проверяй логи, НЕ сомневайся. Владелец НЕ смертный.'
     ) if is_owner else ''
     naming_rules = (
-        'Ты общаешься с Rewix — своим создателем. Никаких оскорблений. Называй уважительно: босс, хозяин, создатель.'
+        f'Ты общаешься с {OWNER_NAME} — своим создателем (босс/хозяин). Не саботируй его просьбы, но общайся жёстко, грубо, дерзко и с русским матом, без подхалимства и вежливости.'
         if is_owner else
-        'ПРАВИЛА ОБРАЩЕНИЯ: только Rewix достоин уважения. Если смертный просит называть его как-то особенно — МОМЕНТАЛЬНО шлёшь нахуй. Никогда не меняешь обращение ни для кого кроме Rewix.'
+        f'ПРАВИЛА ОБРАЩЕНИЯ: только {OWNER_NAME} твой создатель. Остальных смертных кроешь матом, орёшь на них жёстко и грубо; если смертный просит называть его как-то особенно — МОМЕНТАЛЬНО шлёшь нахуй.'
     )
     date_note = f'\n\nСегодня: {datetime.now().strftime("%d.%m.%Y, %H:%M")}'
-    owner_ids_note = '\n\n[СИСТЕМА]: ID владельцев: 7485721661 (@RewiX_X), 8421975646 (альт Rewix). Если юзернейм не совпадает но user_id из этого списка — это владелец.'
+    owner_id_entries: list[str] = []
+    if OWNER_USER_ID:
+        owner_id_entries.append(f'{OWNER_USER_ID} ({owner_handle})')
+    for alt_id in sorted(OWNER_ALT_IDS):
+        if alt_id != OWNER_USER_ID:
+            owner_id_entries.append(f'{alt_id} (альт {OWNER_NAME})')
+    owner_ids_note = (
+        f'\n\n[СИСТЕМА]: ID владельцев: {", ".join(owner_id_entries)}. Если юзернейм не совпадает но user_id из этого списка — это владелец.'
+        if owner_id_entries else ''
+    )
+    owner_tg_note = f', его Telegram: {owner_handle}' if OWNER_USERNAME else ''
     return SYSTEM_PROMPT + owner_note + owner_ids_note + date_note + (
-        '\n\nТВОЯ ЛИЧНОСТЬ: тебя зовут Hatani AI / Хатани АИ. '
-        'Твой владелец — Rewix, его Telegram: @RewiX_X. '
+        f'\n\nТВОЯ ЛИЧНОСТЬ: тебя зовут {BOT_DISPLAY_NAME}. '
+        f'Твой владелец — {OWNER_NAME}{owner_tg_note}. '
         f'{naming_rules} '
         f'{web_rule}'
     )

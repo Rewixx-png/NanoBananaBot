@@ -4,8 +4,9 @@ import logging
 import aiohttp
 from typing import Tuple, Optional
 
-from config import GEMINI_IMAGE_TIMEOUT
+from config import GEMINI_IMAGE_MODEL, GEMINI_IMAGE_TIMEOUT, GEMINI_MULTIMODAL_MODEL, GEMINI_PROMPT_MODELS
 from keys import load_keys
+from services.omniroute_service import analyze_images_with_omniroute, is_omniroute_configured
 from shared_types import (
     _guess_image_mime, _build_text_system_prompt,
     _gemini_url, _gemini_headers, gemini_post, gemini_text_of,
@@ -38,7 +39,7 @@ async def analyze_photo_with_gemini(image_bytes: bytes, prompt: str) -> str:
         'contents': [{'role': 'user', 'parts': parts}],
         'generationConfig': {'temperature': 1.0, 'thinkingConfig': {'thinkingLevel': 'minimal'}},
     }
-    data, _key, err = await gemini_post("models/gemini-3.5-flash:generateContent", payload, timeout=30.0)
+    data, _key, err = await gemini_post(f"models/{GEMINI_MULTIMODAL_MODEL}:generateContent", payload, timeout=30.0)
     if data is not None:
         try:
             return data['candidates'][0]['content']['parts'][0]['text']
@@ -51,7 +52,7 @@ async def analyze_photo_with_gemini(image_bytes: bytes, prompt: str) -> str:
     return 'Все ключи проебаны или сдохли, отъебись.'
 
 
-async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes]=None, model: str='gemini-3.1-flash-image-preview', images_bytes: list=None, temperature: float=1.0, state_data: dict = None) -> Tuple[Optional[bytes], Optional[str]]:
+async def generate_image_with_gemini(prompt: str, image_bytes: Optional[bytes]=None, model: str=GEMINI_IMAGE_MODEL, images_bytes: list=None, temperature: float=1.0, state_data: dict = None) -> Tuple[Optional[bytes], Optional[str]]:
     all_images = images_bytes if images_bytes else [image_bytes] if image_bytes else []
     parts = []
     for img in all_images:
@@ -124,25 +125,44 @@ async def generate_image_prompt(prompt: str, images_bytes: list, prev_prompts: l
     if prev_prompts:
         prev_note = ' Previously generated (make a DIFFERENT one): ' + ' | '.join((f'"{p}"' for p in prev_prompts[-3:]))
     user_text = f'''{('Two' if photo_count > 1 else 'One')} reference photo{('s are' if photo_count > 1 else ' is')} attached. User's idea: "{prompt}".{prev_note} Generate the optimal image generation prompt.'''
+    def _parse_prompt_pair(raw: str) -> Tuple[str, str]:
+        english, russian = '', ''
+        for line in raw.split('\n'):
+            if line.upper().startswith('ENGLISH:'):
+                english = line[8:].strip()
+            elif line.upper().startswith('RUSSIAN:'):
+                russian = line[8:].strip()
+        if not english:
+            english = raw.split('\n')[0][:300]
+        return (english, russian)
+
+    valid_imgs = [img for img in images_bytes if img]
+    if valid_imgs and is_omniroute_configured():
+        try:
+            raw = await analyze_images_with_omniroute(
+                valid_imgs,
+                prompt=user_text,
+                system_prompt=sys_text,
+                max_tokens=800,
+                timeout=45,
+            )
+            if raw:
+                english, russian = _parse_prompt_pair(raw.strip())
+                return (english, russian, None)
+        except Exception as exc:
+            logging.warning('OmniRoute generate_image_prompt failed, falling back to Gemini: %s: %s', type(exc).__name__, exc)
+
     parts = []
-    for img in images_bytes:
-        if img:
-            parts.append({'inlineData': {'mimeType': 'image/jpeg', 'data': base64.b64encode(img).decode()}})
+    for img in valid_imgs:
+        parts.append({'inlineData': {'mimeType': _guess_image_mime(img), 'data': base64.b64encode(img).decode()}})
     parts.append({'text': user_text})
-    for model_name in ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-preview', 'gemini-3.1-flash-lite-preview']:
+    for model_name in GEMINI_PROMPT_MODELS:
         payload = {'systemInstruction': {'parts': [{'text': sys_text}]}, 'contents': [{'parts': parts}], 'generationConfig': {'temperature': 0.95}}
         data, _key, err = await gemini_post(f"models/{model_name}:generateContent", payload, timeout=35.0)
         if data is not None:
             raw = gemini_text_of(data).strip()
             if raw:
-                english, russian = '', ''
-                for line in raw.split('\n'):
-                    if line.upper().startswith('ENGLISH:'):
-                        english = line[8:].strip()
-                    elif line.upper().startswith('RUSSIAN:'):
-                        russian = line[8:].strip()
-                if not english:
-                    english = raw.split('\n')[0][:300]
+                english, russian = _parse_prompt_pair(raw)
                 return (english, russian, None)
         if err and '404' in str(err):
             continue

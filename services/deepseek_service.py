@@ -9,13 +9,20 @@ from typing import Optional
 
 import aiohttp
 
-from config import DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+from config import (
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_CNY_TO_USD,
+    DEEPSEEK_KEY_COOLDOWN,
+    DEEPSEEK_MIN_BALANCE_USD,
+    DEEPSEEK_MODEL,
+)
 
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_BASE = DEEPSEEK_BASE_URL
 _dead_until: dict[str, float] = {}
-_COOLDOWN = 30.0
+_COOLDOWN = DEEPSEEK_KEY_COOLDOWN
 
 
 async def load_deepseek_keys() -> list[str]:
@@ -49,9 +56,8 @@ async def load_deepseek_keys() -> list[str]:
         # Skip keys with low/no balance (minimum $0.50 USD)
         if 'no balance' in (info or '').lower() or balance <= 0:
             continue
-        # Normalize: CNY → USD (approximate rate 7.2)
-        balance_usd = balance if currency == 'USD' else balance / 7.2
-        if balance_usd < 0.50:
+        balance_usd = balance if currency == 'USD' else balance / DEEPSEEK_CNY_TO_USD
+        if balance_usd < DEEPSEEK_MIN_BALANCE_USD:
             continue
         keys.append((balance_usd, key))
 
@@ -60,7 +66,7 @@ async def load_deepseek_keys() -> list[str]:
         logger.info(f"DeepSeek: loaded {len(keys)} keys from keyhunter (top balance: ${keys[0][0]:.2f})")
         return [k for _, k in keys]
 
-    env_key = _os.getenv("DEEPSEEK_API_KEY", "").strip()
+    env_key = _os.getenv("DEEPSEEK_API_KEY", DEEPSEEK_API_KEY).strip()
     if env_key and (env_key not in _dead_until or now >= _dead_until[env_key]):
         return [env_key]
     return []

@@ -5,6 +5,6 @@
   "main": "code.js",
   "ui": "ui.html",
   "networkAccess": {
-    "allowedDomains": ["http://94.156.179.21:7432"]
+    "allowedDomains": ["http://localhost:7432", "https://*"]
   }
 }

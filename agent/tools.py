@@ -3,21 +3,25 @@ import json
 import math
 import operator
 import os
+import shutil
+import tempfile
 from typing import Callable, TYPE_CHECKING
 
 import aiohttp
 
+from log_filter import mask_secrets
 from services.security_utils import is_safe_url
 
 if TYPE_CHECKING:
     from .workspace import AgentWorkspace
 
-from config import TELEGRAM_MEDIA_MAX_BYTES
+from config import BOT_LOG_PATH, TELEGRAM_MEDIA_MAX_BYTES
 _TG_MAX_BYTES = TELEGRAM_MEDIA_MAX_BYTES
+
 
 async def _tool_fetch_json(url: str) -> str:
     if not is_safe_url(url):
-        return f"fetch_json error: unsafe URL blocked"
+        return "fetch_json error: unsafe URL blocked"
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(url, timeout=aiohttp.ClientTimeout(total=15),
@@ -73,49 +77,88 @@ def _ast_eval(expr: str) -> str:
 
 
 async def _tool_read_bot_logs(lines: int = 100) -> str:
-    """Read the last N lines of the bot's own log file from the host."""
-    log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bot.log")
+    """Read the last N lines of the bot's own log file from the host (masked)."""
+    log_path = BOT_LOG_PATH
     if not os.path.exists(log_path):
-        return "bot.log not found."
+        return f"{os.path.basename(log_path)} not found."
     try:
+        n = max(1, min(int(lines or 100), 1000))
         with open(log_path, "r", errors="replace") as f:
             all_lines = f.readlines()
-        return "".join(all_lines[-lines:])[-3000:] or "(empty)"
+        raw = "".join(all_lines[-n:])[-3000:]
+        return mask_secrets(raw) if raw else "(empty)"
     except Exception as e:
         return f"Error reading bot.log: {e}"
 
 
-async def _tool_send_workspace_file(rel_path: str, caption: str, ws: "AgentWorkspace", send_cb: Callable) -> str:
-    """Read a binary file from workspace and send as document."""
+_EXT_MEDIA_TYPES = {
+    ".jpg": "photo",
+    ".jpeg": "photo",
+    ".png": "photo",
+    ".webp": "photo",
+    ".gif": "animation",
+    ".mp4": "video",
+    ".mov": "video",
+    ".webm": "video",
+    ".mkv": "video",
+    ".mp3": "audio",
+    ".wav": "audio",
+    ".flac": "audio",
+    ".m4a": "audio",
+    ".aac": "audio",
+    ".ogg": "voice",
+    ".opus": "voice",
+}
+_VALID_MEDIA_TYPES = {"document", "photo", "video", "audio", "voice", "animation"}
+
+
+def _resolve_workspace_media_type(filename: str, media_type: str = "auto") -> str:
+    requested = (media_type or "auto").strip().lower()
+    if requested in _VALID_MEDIA_TYPES:
+        return requested
+    ext = os.path.splitext(filename.lower())[1]
+    return _EXT_MEDIA_TYPES.get(ext, "document")
+
+
+async def _tool_send_workspace_file(
+    rel_path: str,
+    caption: str,
+    ws: "AgentWorkspace",
+    send_cb: Callable,
+    media_type: str = "auto",
+) -> str:
+    """Read a file (or directory -> zip) from workspace and send as document or media."""
     try:
         full = ws._safe_path(rel_path)
     except ValueError as e:
         return f"Access denied: {e}"
+    if not os.path.exists(full):
+        return f"File not found: {rel_path}"
     if os.path.isdir(full):
-        # Zip the directory and send
-        import shutil, tempfile
-        tmp = tempfile.mktemp(suffix='.zip')
-        shutil.make_archive(tmp[:-4], 'zip', full)
-        size = os.path.getsize(tmp)
-        if size > _TG_MAX_BYTES:
-            os.remove(tmp)
-            return f"Directory too large ({size // 1024 // 1024} MB > 48 MB)."
-        with open(tmp, "rb") as f:
-            data = f.read()
-        os.remove(tmp)
-        filename = os.path.basename(rel_path.rstrip('/')) + '.zip'
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_base = os.path.join(tmpdir, "archive")
+            archive_path = shutil.make_archive(archive_base, "zip", full)
+            size = os.path.getsize(archive_path)
+            if size > _TG_MAX_BYTES:
+                return f"Directory too large ({size // 1024 // 1024} MB > {_TG_MAX_BYTES // 1024 // 1024} MB)."
+            with open(archive_path, "rb") as f:
+                data = f.read()
+        filename = (os.path.basename(rel_path.rstrip("/")) or "workspace") + ".zip"
         await send_cb({"type": "document", "data": data,
                        "caption": (caption[:1024] or filename)[:1024], "filename": filename})
         return f"[ОТПРАВЛЕНО] Архив '{filename}' ({size // 1024} KB) отправлен."
     size = os.path.getsize(full)
     if size > _TG_MAX_BYTES:
-        return f"File too large ({size // 1024 // 1024} MB > 48 MB)."
+        return f"File too large ({size // 1024 // 1024} MB > {_TG_MAX_BYTES // 1024 // 1024} MB)."
     with open(full, "rb") as f:
         data = f.read()
     filename = os.path.basename(rel_path)
-    await send_cb({"type": "document", "data": data,
+    resolved_type = _resolve_workspace_media_type(filename, media_type)
+    await send_cb({"type": resolved_type, "data": data,
                    "caption": caption[:1024] or filename, "filename": filename})
-    return f"[ОТПРАВЛЕНО] Файл '{filename}' ({size // 1024} KB) отправлен."
+    return f"[ОТПРАВЛЕНО] '{filename}' ({size // 1024} KB, {resolved_type}) отправлен."
+
+
 async def _tool_create_file(filename: str, content: str, caption: str, send_cb: Callable) -> str:
     data = content.encode("utf-8")
     if len(data) > _TG_MAX_BYTES:

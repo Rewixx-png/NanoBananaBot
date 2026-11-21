@@ -1,11 +1,12 @@
 """Music generation command handler — /music.
 
-Two levels: pick a provider (Lyria by Google, or Suno), then a model of that
+Two levels: pick a provider (Suno or Lyria by Google), then a model of that
 provider, then that provider's own settings screen.
 """
 
 import asyncio
 import logging
+import re
 import uuid
 from html import escape
 
@@ -15,7 +16,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BufferedInputFile,
-    InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
 
@@ -32,30 +32,66 @@ from handlers.common import (
     _lyria_cfg_keyboard,
     _LYRIA_CFG_DEFAULTS,
 )
+from handlers.music_ui import (
+    field_input_keyboard,
+    field_input_text,
+    lyria_progress_text,
+    lyrics_collect_keyboard as _lyrics_collect_keyboard,
+    lyrics_collect_text as _lyrics_collect_text,
+    music_ask_idea_keyboard,
+    music_ask_idea_text,
+    music_edit_idea_text,
+    music_model_keyboard,
+    music_model_text,
+    music_provider_keyboard,
+    music_provider_text,
+    suno_cancel_keyboard as _suno_cancel_keyboard,
+    suno_meta_keyboard as _suno_meta_keyboard,
+    suno_meta_text,
+    suno_progress_text,
+    tg_icon,
+    track_tags_keyboard,
+    ui_button,
+    _cut,
+    _fmt_duration,
+)
 from services.audio_metadata import embed_audio_metadata
 from services.music_service import generate_music, MUSIC_MODELS
 from services.suno_service import SUNO_MODELS, generate_suno
 from state import pending_suno_configs, pending_lyria_configs
+from database.suno import get_suno_personas, get_suno_voices, save_suno_track
+from handlers.music_studio import (
+    _studio_awaiting,
+    drop_studio_user_state,
+    music_studio_router,
+)
+from handlers.music_studio_ui import (
+    suno_refs_keyboard,
+    suno_refs_text,
+    track_compact_keyboard,
+)
+from services.suno_service import boost_music_style
 
 
 logger = logging.getLogger(__name__)
 
 music_router = Router()
+music_router.include_router(music_studio_router)
 
 # Cooldown (per-user, 20 seconds)
 _cooldowns: dict[int, float] = {}
 _COOLDOWN = 20
 
-# Root request: request_id → {chat_id, user_id, prompt, message_thread_id, msg_id}
+# Root request: request_id -> {chat_id, user_id, prompt, message_thread_id, msg_id}
 _pending_music: dict[str, dict] = {}
 
-# Users typing a field value: (chat_id, user_id) → {request_id, field, msg_id}
+# Users typing a field value: (chat_id, user_id) -> {request_id, field, msg_id}
 _suno_awaiting_input: dict[tuple[int, int], dict] = {}
 _lyria_awaiting_input: dict[tuple[int, int], dict] = {}
 # Users typing the song idea after a bare /music, before a request exists.
 _music_awaiting_idea: dict[tuple[int, int], dict] = {}
 
-# Active Suno polls: request_id → {event: asyncio.Event, user_id: int}
+# Active Suno polls: request_id -> {event: asyncio.Event, user_id: int}
 _suno_running: dict[str, dict] = {}
 
 # Generated tracks waiting for the user to confirm metadata.
@@ -66,6 +102,7 @@ class SunoMetaState(StatesGroup):
     title = State()
     author = State()
     lyrics = State()
+
 
 PROVIDERS = {
     'suno': {
@@ -82,31 +119,11 @@ PROVIDERS = {
 
 
 def _provider_keyboard(request_id: str) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=f"{PROVIDERS[key]['label']}: {PROVIDERS[key]['desc']}",
-                              callback_data=f"musicprov:{request_id}:{key}")]
-        for key in ('suno', 'lyria')
-    ]
-    rows.append([InlineKeyboardButton(text='Изменить идею', callback_data=f'musicedit:{request_id}')])
-    rows.append([InlineKeyboardButton(text="Отмена", callback_data=f"musiccancel:{request_id}")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return music_provider_keyboard(request_id, PROVIDERS)
 
 
 def _model_keyboard(request_id: str, provider: str) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=f"{info['label']}: {info['desc']}",
-                              callback_data=f"musicsel:{request_id}:{provider}:{mk}")]
-        for mk, info in PROVIDERS[provider]['models'].items()
-    ]
-    rows.append([
-        InlineKeyboardButton(text='← Назад', callback_data=f"musicprovback:{request_id}"),
-        InlineKeyboardButton(text='Отмена', callback_data=f"musiccancel:{request_id}"),
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _task_header(data: dict) -> str:
-    return f"<b>Задача:</b> {escape(data.get('prompt', '')[:500])}\n\n"
+    return music_model_keyboard(request_id, provider, PROVIDERS[provider]['models'])
 
 
 def _drop_user_state(uid: int) -> None:
@@ -123,35 +140,30 @@ def _drop_user_state(uid: int) -> None:
             awaiting.pop(key, None)
     for key in [k for k in _music_awaiting_idea if k[1] == uid]:
         _music_awaiting_idea.pop(key, None)
+    drop_studio_user_state(uid)
 
 
 def _reply_kwargs(thread_id) -> dict:
     return {'message_thread_id': thread_id} if thread_id else {}
 
 
-def _suno_cancel_keyboard(request_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text='Отменить', callback_data=f'sunostop:{request_id}')
-    ]])
-
-
-_META_QUESTIONS = {
-    'title': '<b>Треки готовы.</b>\nИзменить название трека?',
-    'author': 'Изменить имя автора?',
-    'lyrics': 'Изменить метаданные текста?',
-}
 _META_PROMPTS = {
     'title': (
-        'Пришли новое название трека.\n'
-        'Одно название — для обоих вариантов, два через <code>|</code> — отдельно.'
+        f"{tg_icon('pencil', '✎')} <b>Название трека</b>\n\n"
+        'Пришли новое название.\n'
+        'Одно — для обоих вариантов, два через <code>|</code> — раздельно.\n'
+        '<i>/cancel — отменить</i>'
     ),
     'author': (
-        'Пришли новое имя автора.\n'
-        'Одно имя — для обоих вариантов, два через <code>|</code> — отдельно.'
+        f"{tg_icon('pencil', '✎')} <b>Имя автора</b>\n\n"
+        'Пришли имя исполнителя.\n'
+        'Одно — для обоих вариантов, два через <code>|</code> — раздельно.\n'
+        '<i>/cancel — отменить</i>'
     ),
     'lyrics': (
-        'Пришли новый текст песни одним сообщением.\n'
-        'Он попадёт в ID3-метаданные трека (USLT) и в сообщение с текстом.'
+        f"{tg_icon('pencil', '✎')} <b>Текст песни (теги USLT)</b>\n\n"
+        'Пришли текст одним сообщением — запишется прямо в ID3-метаданные MP3.\n'
+        '<i>/cancel — отменить</i>'
     ),
 }
 _META_STATES = {
@@ -160,13 +172,6 @@ _META_STATES = {
     'lyrics': SunoMetaState.lyrics,
 }
 _META_NEXT = {'title': 'author', 'author': 'lyrics', 'lyrics': None}
-
-
-def _suno_meta_keyboard(request_id: str, field: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text='Изменить', callback_data=f'sunometa:{request_id}:{field}:edit'),
-        InlineKeyboardButton(text='Оставить', callback_data=f'sunometa:{request_id}:{field}:keep'),
-    ]])
 
 
 def _split_meta_values(text: str, limit: int = 64) -> list[str]:
@@ -199,7 +204,7 @@ async def _edit_suno_meta_message(bot, meta: dict, text: str, keyboard=None) -> 
 async def _ask_suno_meta(bot, meta: dict, field: str) -> None:
     meta['stage'] = field
     await _edit_suno_meta_message(
-        bot, meta, _META_QUESTIONS[field],
+        bot, meta, suno_meta_text(meta, field),
         _suno_meta_keyboard(meta['request_id'], field),
     )
 
@@ -235,15 +240,32 @@ async def _send_suno_result(bot, meta: dict, state: FSMContext) -> None:
         parts = [f"<b>{escape(title)}</b>"]
         meta_parts = []
         if track.get('duration'):
-            meta_parts.append(f"{int(float(track['duration']))}с")
+            meta_parts.append(f"<code>{_fmt_duration(int(float(track['duration'])))}</code>")
         meta_parts.append(escape(str(meta.get('label') or 'Suno')))
         parts.append(' · '.join(meta_parts))
         if track.get('tags'):
-            parts.append(escape(str(track['tags'])[:220]))
+            parts.append(f"<i>{escape(_cut(str(track['tags']), 220))}</i>")
+
+        track_db_id = None
+        if track.get('task_id') and track.get('id'):
+            try:
+                track_db_id = await save_suno_track(
+                    meta['user_id'], meta['chat_id'],
+                    str(track['task_id']), str(track['id']),
+                    title=title, tags=str(track.get('tags') or ''),
+                    duration=float(track.get('duration') or 0),
+                    model=str(meta.get('model_id') or 'V6'),
+                    prompt=lyrics, audio_url=str(track.get('audio_url') or ''),
+                )
+            except Exception as db_err:
+                logger.warning(f"Suno track DB save failed: {db_err}")
 
         kwargs = {}
         if track.get('cover'):
             kwargs['thumbnail'] = BufferedInputFile(track['cover'], filename='cover.jpg')
+        tags_kb = track_compact_keyboard(track_db_id, track.get('tags', '')) if track_db_id else track_tags_keyboard(track.get('tags', ''))
+        if tags_kb:
+            kwargs['reply_markup'] = tags_kb
         try:
             await safe_send(
                 bot.send_audio,
@@ -283,9 +305,7 @@ async def _show_provider_screen(bot, request_id: str, uid: int) -> None:
     d = _pending_music.get(request_id)
     if not d:
         return
-    text = (_task_header(d) + "<b>Что делаем?</b>"
-            "\n\nSuno: песня с вокалом и текстом."
-            "\nLyria: инструментал.")
+    text = music_provider_text(d.get('prompt', ''))
     kwargs = _reply_kwargs(d.get('message_thread_id'))
     if d.get('msg_id'):
         try:
@@ -344,18 +364,12 @@ async def cmd_music(message: types.Message):
     reply_kwargs = _reply_kwargs(thread_id)
 
     if not prompt:
-        # Bare /music: take the idea as the next message, then offer providers.
         _music_awaiting_idea[(message.chat.id, uid)] = {'request_id': request_id, 'user_id': uid}
-        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text='Отмена', callback_data=f'musiccancel:{request_id}')
-        ]])
         sent = await safe_send(
             message.bot.send_message,
             chat_id=message.chat.id,
-            text=("<b>Что за трек?</b>\n\n"
-                  "Опиши жанр, настроение, инструменты или текст песни и пришли это сообщением.\n\n"
-                  "Например: <code>мрачный synthwave без вокала</code>"),
-            reply_markup=cancel_kb,
+            text=music_ask_idea_text(),
+            reply_markup=music_ask_idea_keyboard(request_id),
             parse_mode='HTML',
             **reply_kwargs,
         )
@@ -366,7 +380,7 @@ async def cmd_music(message: types.Message):
     sent = await safe_send(
         message.bot.send_message,
         chat_id=message.chat.id,
-        text=_task_header(_pending_music[request_id]) + "Через что делать?",
+        text=music_provider_text(prompt),
         reply_markup=_provider_keyboard(request_id),
         parse_mode='HTML',
         **reply_kwargs,
@@ -385,14 +399,26 @@ def _resolve(callback: types.CallbackQuery, request_id: str):
 
 @music_router.callback_query(F.data.startswith("musicprovback:"))
 async def music_provider_back_callback(callback: types.CallbackQuery):
-    """Back from the model list to the provider choice."""
+    """Back from the model list or idea editor to the provider choice."""
     request_id = callback.data.split(':', 1)[1]
-    if not _resolve(callback, request_id):
+    d = _resolve(callback, request_id)
+    if not d:
         await callback.answer("Запрос устарел. Отправь /music заново.", show_alert=True)
         return
+    _music_awaiting_idea.pop((d['chat_id'], d['user_id']), None)
     await callback.answer()
+    if not (d.get('prompt') or '').strip():
+        _music_awaiting_idea[(d['chat_id'], d['user_id'])] = {'request_id': request_id, 'user_id': d['user_id']}
+        try:
+            await callback.message.edit_text(
+                music_ask_idea_text(),
+                reply_markup=music_ask_idea_keyboard(request_id),
+                parse_mode='HTML',
+            )
+        except Exception:
+            pass
+        return
     await _show_provider_screen(callback.message.bot, request_id, callback.from_user.id)
-
 
 @music_router.callback_query(F.data.startswith("musiccancel:"))
 async def music_cancel_callback(callback: types.CallbackQuery):
@@ -430,11 +456,12 @@ async def music_edit_idea_callback(callback: types.CallbackQuery):
         'request_id': request_id, 'user_id': d['user_id'],
     }
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text='Отмена', callback_data=f'musiccancel:{request_id}')
+        ui_button('← Назад', callback_data=f'musicprovback:{request_id}'),
+        ui_button('Отмена', callback_data=f'musiccancel:{request_id}'),
     ]])
     try:
         await callback.message.edit_text(
-            "<b>Новое описание</b>\nПришли, что за трек.",
+            music_edit_idea_text(d.get('prompt', '')),
             reply_markup=keyboard,
             parse_mode='HTML',
         )
@@ -446,7 +473,8 @@ async def music_edit_idea_callback(callback: types.CallbackQuery):
 async def music_provider_callback(callback: types.CallbackQuery):
     """Provider picked — list that provider's models."""
     _, request_id, provider = callback.data.split(':', 2)
-    if not _resolve(callback, request_id):
+    d = _resolve(callback, request_id)
+    if not d:
         await callback.answer("Запрос устарел. Отправь /music заново.", show_alert=True)
         return
     if provider not in PROVIDERS:
@@ -455,7 +483,7 @@ async def music_provider_callback(callback: types.CallbackQuery):
     await callback.answer()
     try:
         await callback.message.edit_text(
-            f"Выбери модель <b>{escape(PROVIDERS[provider]['label'])}</b>:",
+            music_model_text(d.get('prompt', ''), PROVIDERS[provider]['label']),
             reply_markup=_model_keyboard(request_id, provider),
             parse_mode='HTML',
         )
@@ -492,35 +520,28 @@ async def music_model_callback(callback: types.CallbackQuery):
         pass
 
 
-# ── Suno settings screen ──────────────────────────────────────────────────
-# Fields the user types as text rather than picks from buttons.
+# ── Settings screens (Suno & Lyria) ──────────────────────────────────────
 _SUNO_TEXT_FIELDS = {
-    'style': 'Пришли <b>стиль</b>: жанр, инструменты, манеру. Идея уже учтена в описании.\n\nПример: <code>мрачный synthwave, аналоговые синты, без вокала</code>',
-    'lyrics': 'Пришли <b>текст песни</b> следующим сообщением.\n\nМожно с тегами структуры: <code>[Verse]</code>, <code>[Chorus]</code>, <code>[Bridge]</code>.',
-    'title': 'Пришли <b>название трека</b> следующим сообщением (до 80 символов).',
-    'neg': 'Пришли стили, которые <b>исключить</b>.\n\nПример: <code>heavy metal, drums, distorted guitar</code>',
+    'style': f"{tg_icon('pencil', '✎')} <b>Стиль</b>\nПришли жанр, инструменты и подачу.\n\n<i>Пример:</i> <code>мрачный synthwave, аналоговые синты, 118 bpm</code>",
+    'lyrics': f"{tg_icon('pencil', '✎')} <b>Текст песни</b>\nПришли текст с тегами <code>[Verse]</code>, <code>[Chorus]</code>, <code>[Bridge]</code>.",
+    'title': f"{tg_icon('pencil', '✎')} <b>Название трека</b>\nПришли название до 80 символов.",
+    'neg': f"{tg_icon('pencil', '✎')} <b>Исключить из звука</b>\nУкажи жанры или инструменты, которых не должно быть.\n\n<i>Пример:</i> <code>heavy metal, drums, distorted guitar</code>",
 }
 
 _LYRIA_TEXT_FIELDS = {
-    'style': 'Пришли <b>стиль</b> (жанр, инструменты) следующим сообщением.\n\nПример: <code>sovietwave, аналоговые синты, тёплый ламповый звук</code>',
-    'mood': 'Пришли <b>настроение</b> следующим сообщением.\n\nПример: <code>nostalgic and melancholic</code>',
-    'structure': 'Пришли <b>структуру</b> или текст следующим сообщением.\n\nПример: <code>[Verse]\\nгород спит\\n[Chorus]\\nмы горим</code>',
+    'style': f"{tg_icon('pencil', '✎')} <b>Стиль</b>\nПришли жанр и инструменты.\n\n<i>Пример:</i> <code>sovietwave, аналоговые синты, тёплая плёнка</code>",
+    'mood': f"{tg_icon('pencil', '✎')} <b>Настроение</b>\nПришли атмосферу трека.\n\n<i>Пример:</i> <code>nostalgic and melancholic</code>",
+    'structure': f"{tg_icon('pencil', '✎')} <b>Структура / текст</b>\nПришли секции или строки.\n\n<i>Пример:</i> <code>[Verse] город спит [Chorus] мы горим</code>",
 }
 
 _SUNO_NUMERIC_FIELDS = {'style_weight': float, 'weirdness': float, 'audio_weight': float,
                         'variety': int, 'duration': int}
 
-
-# Every settings callback is `<provider><suffix>:<request_id>:…`.
-_SETTINGS_SUFFIXES = ('cfg', 'input', 'back', 'cancel', 'gen', 'all', 'quick')
+_SETTINGS_SUFFIXES = ('cfg', 'input', 'inputback', 'clearfield', 'reset', 'back', 'cancel', 'gen', 'all', 'quick')
 
 
 async def _settings_guard(callback: types.CallbackQuery):
-    """Resolve the provider settings for this callback, answering errors itself.
-
-    The provider is part of the callback prefix (`sunocfg:` → `suno`), so one
-    handler set serves both providers instead of a closure per provider.
-    """
+    """Resolve the provider settings for this callback, answering errors itself."""
     prefix, _, rest = callback.data.partition(':')
     provider = next((p for p in _SETTINGS if prefix.startswith(p)), None)
     if provider is None or prefix[len(provider):] not in _SETTINGS_SUFFIXES:
@@ -544,9 +565,9 @@ async def _restore_model_screen(bot, request_id: str, provider: str) -> None:
     if not d:
         return
     _pending_music[request_id] = {k: v for k, v in d.items()
-                                  if k not in ('cfg', 'label', 'model', 'provider')}
+                                  if k not in ('cfg', 'label', 'model', 'provider', 'view')}
     await _edit_or_send(bot, d, request_id,
-                        _task_header(d) + f"Выбери модель <b>{escape(PROVIDERS[provider]['label'])}</b>:",
+                        music_model_text(d.get('prompt', ''), PROVIDERS[provider]['label']),
                         _model_keyboard(request_id, provider))
 
 
@@ -586,25 +607,6 @@ def _append_lyrics(buffer: str, chunk: str,
     return buffer + separator + addition, len(addition) < len(chunk)
 
 
-def _lyrics_collect_text(buffer: str) -> str:
-    count = len(buffer or '')
-    return (
-        "<b>Текст песни</b>\n"
-        "Пришли текст одним или несколькими сообщениями. Можно отправить .txt файлом.\n\n"
-        f"Собрано: {count} / {SUNO_LYRICS_MAX_CHARS} символов.\n"
-        "Когда закончишь, нажми «Готово»."
-    )
-
-
-def _lyrics_collect_keyboard(request_id: str, has_text: bool) -> InlineKeyboardMarkup:
-    row = [InlineKeyboardButton(text='Готово', callback_data=f'sunolyrdone:{request_id}')]
-    if has_text:
-        row.append(InlineKeyboardButton(text='Очистить', callback_data=f'sunolyrclear:{request_id}'))
-    rows = [row]
-    rows.append([InlineKeyboardButton(text='Назад', callback_data=f'sunolyrback:{request_id}')])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
 async def _send_lyrics(bot, chat_id: int, thread_id, title: str, lyrics: str) -> None:
     """Send the full lyrics separately from the audio caption."""
     text = (lyrics or '').strip()
@@ -615,14 +617,14 @@ async def _send_lyrics(bot, chat_id: int, thread_id, title: str, lyrics: str) ->
     safe_text = escape(text)
     reply_kwargs = _reply_kwargs(thread_id)
     if len(safe_title) + len(safe_text) <= 3800:
-        html = (f"<b>Текст песни: {safe_title}</b>\n"
+        html = (f"<b>Текст · {safe_title}</b>\n"
                 f"<blockquote expandable>{safe_text}</blockquote>")
         await safe_send(bot.send_message, chat_id=chat_id, text=html,
                         parse_mode='HTML', **reply_kwargs)
     else:
         document = BufferedInputFile(text.encode('utf-8'), filename='lyrics.txt')
         await safe_send(bot.send_document, chat_id=chat_id, document=document,
-                        caption=f"Текст песни: {title}"[:1024], **reply_kwargs)
+                        caption=f"Текст · {title}"[:1024], **reply_kwargs)
 
 
 _SETTINGS = {
@@ -686,14 +688,57 @@ async def music_settings_input_callback(callback: types.CallbackQuery):
     _SETTINGS[provider]['awaiting'][(d['chat_id'], d['user_id'])] = {
         'request_id': request_id, 'field': field, 'msg_id': d.get('msg_id'),
     }
-    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text='Отмена', callback_data=f'{provider}cancel:{request_id}')
-    ]])
+    current_val = str(d['cfg'].get(field) or '')
+    base_prompt = _SETTINGS[provider]['text_fields'].get(field, 'Пришли значение следующим сообщением:')
     await _edit_or_send(
         callback.message.bot, d, request_id,
-        _SETTINGS[provider]['text_fields'].get(field, 'Пришли значение следующим сообщением:'),
-        cancel_kb,
+        field_input_text(base_prompt, current_val),
+        field_input_keyboard(provider, request_id, field, bool(current_val.strip())),
     )
+
+
+@music_router.callback_query(F.data.regexp(r"^(suno|lyria)inputback:"))
+async def music_settings_input_back_callback(callback: types.CallbackQuery):
+    """Return from field input to settings without cancelling the request."""
+    provider, request_id, d = await _settings_guard(callback)
+    if not d:
+        return
+    _SETTINGS[provider]['awaiting'].pop((d['chat_id'], d['user_id']), None)
+    await callback.answer()
+    text, keyboard = _render_settings(provider, request_id)
+    await _edit_or_send(callback.message.bot, d, request_id, text, keyboard)
+
+
+@music_router.callback_query(F.data.regexp(r"^(suno|lyria)clearfield:"))
+async def music_settings_clear_field_callback(callback: types.CallbackQuery):
+    """Clear a single text field and return to settings."""
+    parts = callback.data.split(':', 2)
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    (_, _, field) = parts
+    provider, request_id, d = await _settings_guard(callback)
+    if not d:
+        return
+    _SETTINGS[provider]['awaiting'].pop((d['chat_id'], d['user_id']), None)
+    if field in d['cfg']:
+        d['cfg'][field] = ''
+    await callback.answer("Очищено")
+    text, keyboard = _render_settings(provider, request_id)
+    await _edit_or_send(callback.message.bot, d, request_id, text, keyboard)
+
+
+@music_router.callback_query(F.data.startswith("sunoreset:"))
+async def music_suno_reset_callback(callback: types.CallbackQuery):
+    """Reset all Suno settings back to defaults."""
+    provider, request_id, d = await _settings_guard(callback)
+    if not d:
+        return
+    _suno_awaiting_input.pop((d['chat_id'], d['user_id']), None)
+    d['cfg'] = dict(_SUNO_CFG_DEFAULTS)
+    await callback.answer("Настройки сброшены")
+    text, keyboard = _render_settings(provider, request_id)
+    await _edit_or_send(callback.message.bot, d, request_id, text, keyboard)
 
 
 @music_router.callback_query(F.data.regexp(r"^(suno|lyria)back:"))
@@ -745,6 +790,136 @@ async def music_suno_quick_callback(callback: types.CallbackQuery):
                         _suno_quick_text(request_id), _suno_quick_keyboard(request_id))
 
 
+
+@music_router.callback_query(F.data.startswith("sunoboost:"))
+async def music_suno_boost_callback(callback: types.CallbackQuery):
+    """Boost the current Suno style via POST /api/v1/style/generate."""
+    request_id = callback.data.split(':', 1)[1]
+    d = pending_suno_configs.get(request_id)
+    if not d or callback.from_user.id != d['user_id']:
+        await callback.answer("Запрос устарел. Открой /music заново.", show_alert=True)
+        return
+    base = (d['cfg'].get('style') or d.get('prompt') or '').strip()
+    if not base:
+        await callback.answer("Сначала задай стиль или идею.", show_alert=True)
+        return
+    await callback.answer("Усиливаю стиль…")
+    data, err = await boost_music_style(base)
+    if err or not data or not (data.get('result') or '').strip():
+        await callback.answer(f"Ошибка: {str(err or 'пусто')[:140]}", show_alert=True)
+        return
+    d['cfg']['style'] = str(data['result']).strip()[:1000]
+    text, kb = _render_settings('suno', request_id)
+    await _edit_or_send(callback.message.bot, d, request_id, text, kb)
+
+
+@music_router.callback_query(F.data.startswith("sunopersona:"))
+async def music_suno_persona_callback(callback: types.CallbackQuery):
+    """Pick a saved style Persona or custom Suno Voice for this generation."""
+    request_id = callback.data.split(':', 1)[1]
+    d = pending_suno_configs.get(request_id)
+    if not d or callback.from_user.id != d['user_id']:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    await callback.answer()
+    personas = await get_suno_personas(d['user_id'])
+    voices = await get_suno_voices(d['user_id'])
+    rows = []
+    if d['cfg'].get('persona_id'):
+        rows.append([ui_button("Убрать персону / голос", callback_data=f"sunosetp:{request_id}:clear", style="danger")])
+    for v in voices[:6]:
+        rows.append([ui_button(f"Голос · {_cut(v['name'], 26)}", callback_data=f"sunosetp:{request_id}:v:{v['id']}")])
+    for p in personas[:6]:
+        rows.append([ui_button(f"Персона · {_cut(p['name'], 26)}", callback_data=f"sunosetp:{request_id}:p:{p['id']}")])
+    rows.append([ui_button("← Все настройки", callback_data=f"sunoall:{request_id}")])
+    msg = (
+        f"{tg_icon('microphone', '🎙')} <b>Выбор персоны или голоса</b>\n\nВыбери профиль:"
+        if (personas or voices) else
+        f"{tg_icon('microphone', '🎙')} <b>Персоны и голоса</b>\n\nПока пусто. Создай персону из готового трека или обучи голос в «Suno Студия»."
+    )
+    await _edit_or_send(callback.message.bot, d, request_id, msg, InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@music_router.callback_query(F.data.startswith("sunosetp:"))
+async def music_suno_set_persona_callback(callback: types.CallbackQuery):
+    parts = callback.data.split(':', 4)
+    request_id = parts[1]
+    d = pending_suno_configs.get(request_id)
+    if not d or callback.from_user.id != d['user_id']:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    kind = parts[2]
+    if kind == 'clear':
+        d['cfg'].pop('persona_id', None)
+        d['cfg'].pop('persona_model', None)
+        d['cfg'].pop('persona_label', None)
+    elif kind == 'v' and len(parts) >= 4:
+        voices = await get_suno_voices(d['user_id'])
+        v = next((x for x in voices if str(x['id']) == parts[3]), None)
+        if v:
+            d['cfg']['persona_id'] = v['voice_id']
+            d['cfg']['persona_model'] = 'voice_persona'
+            d['cfg']['persona_label'] = f"Голос: {v['name']}"
+    elif kind == 'p' and len(parts) >= 4:
+        personas = await get_suno_personas(d['user_id'])
+        p = next((x for x in personas if str(x['id']) == parts[3]), None)
+        if p:
+            d['cfg']['persona_id'] = p['persona_id']
+            d['cfg']['persona_model'] = 'style_persona'
+            d['cfg']['persona_label'] = f"Персона: {p['name']}"
+    await callback.answer()
+    d['view'] = 'all'
+    text, kb = _render_settings('suno', request_id)
+    await _edit_or_send(callback.message.bot, d, request_id, text, kb)
+
+
+@music_router.callback_query(F.data.startswith("sunorefs:"))
+async def music_suno_refs_callback(callback: types.CallbackQuery):
+    request_id = callback.data.split(':', 1)[1]
+    d = pending_suno_configs.get(request_id)
+    if not d or callback.from_user.id != d['user_id']:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    _studio_awaiting.pop((d['chat_id'], d['user_id']), None)
+    await callback.answer()
+    await _edit_or_send(callback.message.bot, d, request_id, suno_refs_text(request_id, d), suno_refs_keyboard(request_id, d))
+
+
+@music_router.callback_query(F.data.startswith("sunoref:"))
+async def music_suno_ref_add_callback(callback: types.CallbackQuery):
+    _, request_id, ref_kind = callback.data.split(':', 2)
+    d = pending_suno_configs.get(request_id)
+    if not d or callback.from_user.id != d['user_id']:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    await callback.answer()
+    _studio_awaiting[(d['chat_id'], d['user_id'])] = {
+        'mode': 'suno_ref_upload', 'request_id': request_id, 'ref_kind': ref_kind,
+        'msg_id': d.get('msg_id'), 'thread_id': d.get('message_thread_id'),
+    }
+    hints = {
+        'image': "Пришли фото (jpeg/png/webp/bmp, до 10 МБ) или прямую ссылку.",
+        'video': "Пришли видео (mp4/mov/webm, до 100 МБ, до 241 сек) или ссылку.",
+        'audio': "Пришли аудио/голосовое (6 сек – 30 мин) или ссылку.",
+        'midi': "Пришли MIDI-файл (.mid/.midi, до 256 КБ) или ссылку.",
+    }
+    kb = InlineKeyboardMarkup(inline_keyboard=[[ui_button("← Референсы", callback_data=f"sunorefs:{request_id}")]])
+    await _edit_or_send(callback.message.bot, d, request_id, f"{tg_icon('attachment', '📎')} <b>Референс ({ref_kind})</b>\n\n{hints.get(ref_kind, 'Пришли файл:')}", kb)
+
+
+@music_router.callback_query(F.data.startswith("sunorefclear:"))
+async def music_suno_ref_clear_callback(callback: types.CallbackQuery):
+    request_id = callback.data.split(':', 1)[1]
+    d = pending_suno_configs.get(request_id)
+    if not d or callback.from_user.id != d['user_id']:
+        await callback.answer("Запрос устарел.", show_alert=True)
+        return
+    for k in ('image_urls', 'video_urls', 'audio_urls', 'midi_urls'):
+        d['cfg'].pop(k, None)
+    d['cfg']['custom_mode'] = '1'
+    await callback.answer("Референсы очищены")
+    await _edit_or_send(callback.message.bot, d, request_id, suno_refs_text(request_id, d), suno_refs_keyboard(request_id, d))
+
 def _suno_lyrics_guard(callback: types.CallbackQuery):
     request_id = callback.data.split(':', 1)[1]
     d = pending_suno_configs.get(request_id)
@@ -777,7 +952,7 @@ async def music_lyrics_clear_callback(callback: types.CallbackQuery):
         await callback.answer("Запрос устарел. Открой /music заново.", show_alert=True)
         return
     wait['buffer'] = ''
-    await callback.answer()
+    await callback.answer("Буфер очищен")
     await _edit_or_send(callback.message.bot, d, request_id,
                         _lyrics_collect_text(''), _lyrics_collect_keyboard(request_id, False))
 
@@ -882,10 +1057,13 @@ async def music_suno_meta_callback(callback: types.CallbackQuery, state: FSMCont
     if field not in _META_STATES or meta.get('stage') != field:
         await callback.answer('Этот шаг уже пройден.', show_alert=True)
         return
-    if action not in ('edit', 'keep'):
+    if action not in ('edit', 'keep', 'skip'):
         await callback.answer('Некорректная кнопка.', show_alert=True)
         return
     await callback.answer()
+    if action == 'skip':
+        await _send_suno_result(callback.message.bot, meta, state)
+        return
     if action == 'edit':
         await state.set_state(_META_STATES[field])
         await state.update_data(suno_meta_id=request_id)
@@ -925,18 +1103,23 @@ async def suno_generate_callback(callback: types.CallbackQuery, state: FSMContex
     _suno_running[request_id] = {'event': cancel_event, 'user_id': d['user_id']}
 
     async def _status(text: str):
+        m = re.search(r'\((\d+)с\)', text or '')
+        waited = int(m.group(1)) if m else 0
         try:
             await callback.message.edit_text(
-                text, reply_markup=_suno_cancel_keyboard(request_id),
+                suno_progress_text(d['label'], waited, text),
+                parse_mode='HTML',
+                reply_markup=_suno_cancel_keyboard(request_id),
             )
         except Exception:
             pass
 
     try:
         await callback.message.edit_text(
-            f"<b>Генерирую через {escape(d['label'])}...</b>\n\n"
-            "Suno обычно отдаёт два варианта за 1–3 минуты. Кнопка «Отменить» остановит ожидание.",
-            parse_mode="HTML", reply_markup=_suno_cancel_keyboard(request_id))
+            suno_progress_text(d['label'], 0),
+            parse_mode="HTML",
+            reply_markup=_suno_cancel_keyboard(request_id),
+        )
     except Exception:
         pass
 
@@ -972,6 +1155,7 @@ async def suno_generate_callback(callback: types.CallbackQuery, state: FSMContex
         'chat_id': d['chat_id'],
         'thread_id': d.get('message_thread_id'),
         'label': d['label'],
+        'model_id': SUNO_MODELS.get(d.get('model', ''), {}).get('id', 'V6'),
         'tracks': tracks,
         'msg_id': callback.message.message_id,
         'titles': None,
@@ -1000,13 +1184,10 @@ async def lyria_generate_callback(callback: types.CallbackQuery):
     _pending_music.pop(request_id, None)
 
     model_info = MUSIC_MODELS[d['model']]
-    # 'Lyria 3.5' -> 'Lyria 3.5' for the audio metadata
     plain_label = model_info['label'].split(' ', 1)[-1]
     try:
         await callback.message.edit_text(
-            f"<b>Генерирую музыку...</b>\n"
-            f"Модель: {escape(str(model_info['label']))}\n"
-            f"Промпт: {escape(d['prompt'][:300])}",
+            lyria_progress_text(str(model_info['label']), d['prompt']),
             parse_mode="HTML",
         )
     except Exception:
@@ -1038,10 +1219,11 @@ async def lyria_generate_callback(callback: types.CallbackQuery):
     except Exception:
         pass
 
+    caption = f"<b>{escape(plain_label)}</b>\n<i>{escape(_cut(d['prompt'], 140))}</i>"
     await safe_send(
         callback.message.bot.send_audio,
         chat_id=d['chat_id'],
-        caption="Музыка",
+        caption=caption,
         audio=BufferedInputFile(audio_bytes, filename=f"lyria_{d['model']}_{request_id}.mp3"),
         title=plain_label,
         performer='Hatani AI',

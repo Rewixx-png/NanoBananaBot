@@ -13,7 +13,7 @@ from aiogram.types import (
     Message,
 )
 
-from config import FULL_ACCESS_CHAT_ID
+from config import BOT2_USERNAME, FIGMA_API_BASE_URL, FULL_ACCESS_CHAT_ID
 from dual_bot import BOT1_DUAL_NAME, BOT2_DUAL_NAME, start_dual, stop_dual
 from services.upscale_service import MODE_LABELS, upscale_image
 from utils import check_membership, is_banned
@@ -229,7 +229,7 @@ async def cmd_figma(message: types.Message):
         import aiohttp as _aiohttp
         file_key = spec.get('file_key', '')
         node_id_enc = node_id.replace(':', '-').replace(';', '-')
-        render_url = f'https://api.figma.com/v1/images/{file_key}?ids={node_id}&format=png&scale=2' if file_key else None
+        render_url = f'{FIGMA_API_BASE_URL}/images/{file_key}?ids={node_id}&format=png&scale=2' if file_key else None
 
         png_bytes = None
         if render_url:
@@ -287,7 +287,8 @@ async def cmd_dual(message: Message):
         return
     from dual_bot import bot2_id
     if not bot2_id:
-        await message.reply("Второй бот (@HatabiAiibot) сейчас не подключён или токен не валиден.")
+        bot2_label = f" (@{BOT2_USERNAME})" if BOT2_USERNAME else ""
+        await message.reply(f"Второй бот{bot2_label} сейчас не подключён или токен не валиден.")
         return
     chat_id = message.chat.id
     thread_id = message.message_thread_id

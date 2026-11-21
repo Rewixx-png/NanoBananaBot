@@ -10,8 +10,21 @@ import tempfile
 import aiohttp
 from typing import Optional
 
-from config import SYSTEM_PROMPT, GEMINI_VIDEO_TIMEOUT, MAX_VIDEO_FRAMES, VIDEO_FPS, VIDEO_FRAME_SIZE
+from config import (
+    GEMINI_MULTIMODAL_MODEL,
+    GEMINI_VIDEO_TIMEOUT,
+    MAX_VIDEO_FRAMES,
+    OMNI_PROXY,
+    OMNI_VIDEO_MODEL,
+    REDIS_URL,
+    SYSTEM_PROMPT,
+    VEO_DEFAULT_MODEL,
+    VIDEO_FPS,
+    VIDEO_FRAME_SIZE,
+    VIDEO_VISION_MAX_FRAMES,
+)
 from keys import load_keys
+from services.omniroute_service import analyze_video_with_omniroute, is_omniroute_configured
 from services.security_utils import is_safe_url
 from shared_types import _models_cache, _MODELS_CACHE_TTL, _pretty_model_name, _gemini_url, _gemini_headers, gemini_post, gemini_text_of
 
@@ -55,19 +68,30 @@ async def generate_video_with_gemini(prompt: str, video_path: str) -> str:
     shutil.rmtree(temp_dir, ignore_errors=True)
     parts.append({'text': prompt if prompt else 'Что происходит на этом видео? (учитывай и визуальный ряд, и звук, если он есть)'})
     payload = {'systemInstruction': {'parts': [{'text': SYSTEM_PROMPT}]}, 'contents': [{'parts': parts}], 'generationConfig': {'temperature': 1.0, 'thinkingConfig': {'thinkingBudget': -1}}}
-    data, _key, err = await gemini_post("models/gemini-3.5-flash:generateContent", payload, timeout=GEMINI_VIDEO_TIMEOUT)
+    data, _key, err = await gemini_post(f"models/{GEMINI_MULTIMODAL_MODEL}:generateContent", payload, timeout=GEMINI_VIDEO_TIMEOUT)
     if data is not None:
         text = gemini_text_of(data)
         if text:
             return text
         return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
+    if is_omniroute_configured() and os.path.exists(video_path):
+        try:
+            with open(video_path, 'rb') as vf:
+                vid_bytes = vf.read()
+            return await analyze_video_with_omniroute(
+                vid_bytes,
+                prompt=prompt or 'Что происходит на этом видео?',
+                max_frames=VIDEO_VISION_MAX_FRAMES,
+            )
+        except Exception as fallback_err:
+            logger.warning('OmniRoute video fallback failed: %s: %s', type(fallback_err).__name__, fallback_err)
     if err == 'нет живых Gemini ключей':
         return 'Блять, ключи закончились, иди нахуй.'
     if err and err.startswith('HTTP 400:') and any(w in err.lower() for w in ('safety', 'prohibited', 'harm', 'block', 'policy', 'recitation')):
         return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
     return 'Все ключи проебаны или сдохли, отъебись.'
 
-async def start_veo_generation(prompt: str, model: str='veo-2.0-generate-001', image_bytes: bytes=None, state_data: dict = None) -> tuple:
+async def start_veo_generation(prompt: str, model: str=VEO_DEFAULT_MODEL, image_bytes: bytes=None, state_data: dict = None) -> tuple:
     prompt_text = prompt if prompt else 'A beautiful cinematic scene'
     instance = {'prompt': prompt_text}
     if image_bytes:
@@ -162,7 +186,7 @@ _omni_good_proxies: list = []  # прокси, через которые Google 
 
 async def _omni_proxy_list() -> list:
     """Прокси для обхода EEA-блока редактирования: OMNI_PROXY env или общий пул keyhunter в Redis."""
-    env_px = os.environ.get('OMNI_PROXY', '').strip()
+    env_px = os.environ.get('OMNI_PROXY', OMNI_PROXY).strip()
     if env_px:
         candidates = [p.strip() for p in env_px.split(',') if p.strip()]
         # Drop malformed entries (e.g. status text glued to the first proxy).
@@ -170,7 +194,7 @@ async def _omni_proxy_list() -> list:
     try:
         import random
         import redis.asyncio as aioredis
-        r = aioredis.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379'), socket_timeout=3, socket_connect_timeout=3)
+        r = aioredis.from_url(os.environ.get('REDIS_URL', REDIS_URL), socket_timeout=3, socket_connect_timeout=3)
         try:
             raw = await r.smembers('kh:proxies:valid')
         finally:
@@ -201,7 +225,7 @@ async def _sanitize_video_prompt(prompt: str) -> Optional[str]:
     for key in keys[:10]:
         try:
             async with aiohttp.ClientSession() as s:
-                async with s.post(_gemini_url('models/gemini-3.5-flash:generateContent'), json=payload, headers=_gemini_headers(key), timeout=aiohttp.ClientTimeout(total=30)) as r:
+                async with s.post(_gemini_url(f'models/{GEMINI_MULTIMODAL_MODEL}:generateContent'), json=payload, headers=_gemini_headers(key), timeout=aiohttp.ClientTimeout(total=30)) as r:
                     if r.status == 200:
                         data = await r.json()
                         return data['candidates'][0]['content']['parts'][0]['text'].strip()
@@ -217,7 +241,7 @@ async def generate_video_with_omni(
     video_bytes: bytes = None,
     aspect_ratio: str = '16:9',
     state_data: dict = None,
-    model: str = 'gemini-omni-1.1-flash',
+    model: str = OMNI_VIDEO_MODEL,
     _sanitized: bool = False,
 ) -> tuple:
     """Generate or edit a video via Gemini Omni Flash (Interactions API).
@@ -245,7 +269,7 @@ async def generate_video_with_omni(
         logger.warning(f'Omni Flash: не смог прочитать ключи из keyhunter DB: {type(e).__name__}: {e}')
     if not keys_with_ref:
         return (None, 'Нет Gemini ключей с доступом к Omni Flash: в keyhunter нет живых ключей с пометкой PAID.')
-    url = 'https://generativelanguage.googleapis.com/v1beta/interactions'
+    url = _gemini_url('interactions')
     # Build input array with type field per Omni API spec
     omni_input = []
     if image_bytes:

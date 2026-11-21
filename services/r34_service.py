@@ -5,6 +5,7 @@ import random
 import aiohttp
 from typing import List, Optional
 
+from config import FIRECRAWL_SCRAPE_URL, FIRECRAWL_SEARCH_URL
 from services.security_utils import is_safe_url
 
 logger = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ async def _firecrawl_search(query: str) -> List[str]:
     if not keys:
         return []
     key = keys[0]
-    url = 'https://api.firecrawl.dev/v2/search'
+    url = FIRECRAWL_SEARCH_URL
     payload = {
         'query': query,
         'limit': 15,
@@ -64,7 +65,7 @@ async def _scrape_page_for_images(session: aiohttp.ClientSession, url: str) -> L
     key = keys[0]
     try:
         async with session.post(
-            'https://api.firecrawl.dev/v2/scrape',
+            FIRECRAWL_SCRAPE_URL,
             json={'url': url, 'formats': ['markdown']},
             headers={'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'},
             timeout=aiohttp.ClientTimeout(total=15),

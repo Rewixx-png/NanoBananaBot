@@ -84,7 +84,7 @@ class _HTMLSanitizer(_HTMLParser):
             self.out.append(f'</{tag.lower()}>')
 
     def handle_data(self, data):
-        self.out.append(data)
+        self.out.append(_html.escape(data, quote=False))
 
     def handle_entityref(self, name):
         self.out.append(f'&{name};')

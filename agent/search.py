@@ -4,13 +4,22 @@ import asyncio
 import logging
 import re
 from typing import Optional
+from urllib.parse import urljoin
 
 import aiohttp
 
 from keys import load_firecrawl_keys, remove_key
-from services.gemini_image import analyze_photo_with_gemini
+from services.omniroute_service import analyze_image_with_omniroute
+from services.security_utils import is_safe_url
 
-from config import AGENT_SCRAPE_TIMEOUT, AGENT_SEARCH_TIMEOUT, TELEGRAM_MEDIA_MAX_BYTES
+from config import (
+    AGENT_SCRAPE_TIMEOUT,
+    AGENT_SEARCH_TIMEOUT,
+    FIRECRAWL_SCRAPE_URL,
+    FIRECRAWL_SEARCH_URL,
+    JINA_READER_BASE_URL,
+    TELEGRAM_MEDIA_MAX_BYTES,
+)
 logger = logging.getLogger(__name__)
 
 _SEARCH_TIMEOUT = AGENT_SEARCH_TIMEOUT
@@ -39,7 +48,6 @@ async def _fc_search(query: str) -> str:
                 return "\n\n".join(parts)
     except Exception as e:
         logger.warning(f"DDG search {query!r}: {e}")
-    # Fallback: Firecrawl
     last_err = ""
 
     # Fallback: Firecrawl if keys available
@@ -49,7 +57,7 @@ async def _fc_search(query: str) -> str:
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.post(
-                    "https://api.firecrawl.dev/v2/search",
+                    FIRECRAWL_SEARCH_URL,
                     json={"query": query[:500], "limit": 6,
                           "sources": [{"type": "web"}]},
                     headers=hdrs,
@@ -77,10 +85,12 @@ async def _fc_search(query: str) -> str:
 
 
 async def _fc_scrape(url: str) -> str:
+    if not is_safe_url(url):
+        return "Запрос к этому адресу запрещён (SSRF защита)."
     last_err = ""
 
     # Primary: Jina Reader (free, no key, handles JS-rendered pages)
-    jina_url = f"https://r.jina.ai/{url}"
+    jina_url = f"{JINA_READER_BASE_URL}/{url}"
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(
@@ -97,14 +107,13 @@ async def _fc_scrape(url: str) -> str:
         logger.warning(f"Jina Reader scrape {url!r}: {e}")
         last_err = f"Jina: {type(e).__name__}"
 
-
     # Last resort: Firecrawl if keys available
     keys = await load_firecrawl_keys()
     for key in keys:
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.post(
-                    "https://api.firecrawl.dev/v2/scrape",
+                    FIRECRAWL_SCRAPE_URL,
                     json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
                     timeout=aiohttp.ClientTimeout(total=_SCRAPE_TIMEOUT),
@@ -152,7 +161,7 @@ async def _search_image_urls(query: str) -> list[str]:
                 try:
                     async with aiohttp.ClientSession() as s:
                         async with s.post(
-                            "https://api.firecrawl.dev/v2/search",
+                            FIRECRAWL_SEARCH_URL,
                             json=payload, headers=headers,
                             timeout=aiohttp.ClientTimeout(total=_SEARCH_TIMEOUT),
                         ) as resp:
@@ -192,28 +201,49 @@ async def _search_image_urls(query: str) -> list[str]:
 
 
 async def _download_bytes(url: str, max_bytes: int = _TG_MAX_BYTES) -> Optional[bytes]:
+    current_url = url
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(
-                url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=aiohttp.ClientTimeout(total=20),
-            ) as resp:
-                if resp.status != 200:
+            for _ in range(4):
+                if not is_safe_url(current_url):
                     return None
-                data = await resp.read()
-                return data if len(data) <= max_bytes else None
+                async with s.get(
+                    current_url,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    if resp.status in (301, 302, 303, 307, 308):
+                        loc = resp.headers.get("Location")
+                        if not loc:
+                            return None
+                        current_url = urljoin(current_url, loc)
+                        continue
+                    if resp.status != 200:
+                        return None
+                    cl = resp.headers.get("Content-Length")
+                    if cl and cl.isdigit() and int(cl) > max_bytes:
+                        return None
+                    buf = bytearray()
+                    async for chunk in resp.content.iter_chunked(65536):
+                        buf.extend(chunk)
+                        if len(buf) > max_bytes:
+                            return None
+                    return bytes(buf)
+        return None
     except Exception:
         return None
 
 
 async def _image_is_relevant(img_bytes: bytes, description: str) -> bool:
-    """Ask Gemini if this image matches the description."""
+    """Ask OmniRoute vision if this image matches the description."""
     try:
-        answer = await analyze_photo_with_gemini(
+        answer = await analyze_image_with_omniroute(
             img_bytes,
             f"Does this image show or relate to: {description}? "
             "Reply with only YES or NO.",
+            max_tokens=256,
+            timeout=30,
         )
         return answer.strip().upper().startswith("YES")
     except Exception:

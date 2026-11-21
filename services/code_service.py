@@ -5,8 +5,9 @@ import re
 from typing import Dict, Any, List
 from urllib.parse import unquote
 
-from config import CODE_GEN_MAX_OUTPUT_TOKENS, CODE_GEN_MODELS, CODE_GEN_TIMEOUT
+from config import CODE_GEN_MAX_OUTPUT_TOKENS, CODE_GEN_MODELS, CODE_GEN_TIMEOUT, OMNIROUTE_AGENT_MODEL
 from keys import load_keys, strip_code_fences
+from services.omniroute_service import is_omniroute_configured, omniroute_text
 from shared_types import gemini_post
 
 
@@ -86,12 +87,29 @@ def _normalize_project_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def generate_project_with_gemini(prompt: str) -> Dict[str, Any]:
-    if not await load_keys():
-        return {'ok': False, 'error': 'Ключи сдохли.'}
     user_prompt = f'''User request:
 {prompt}
 
 Generate the deliverable as real files. Remember: ONLY JSON with project_name, summary, run_instructions, files.'''
+    has_gemini_keys = bool(await load_keys())
+    if not has_gemini_keys:
+        if is_omniroute_configured():
+            try:
+                raw = await omniroute_text(
+                    prompt=user_prompt,
+                    system_prompt=_PROJECT_GEN_SYSTEM_PROMPT,
+                    model=OMNIROUTE_AGENT_MODEL,
+                    max_tokens=16_000,
+                    temperature=0.25,
+                    timeout=CODE_GEN_TIMEOUT,
+                )
+                project = _normalize_project_payload(_extract_project_json(raw))
+                logging.info("Project gen: success via OmniRoute (%s), files=%d", OMNIROUTE_AGENT_MODEL, len(project['files']))
+                return project
+            except Exception as exc:
+                logging.warning("Project gen via OmniRoute failed: %s: %s", type(exc).__name__, exc)
+                return {'ok': False, 'error': f'OmniRoute: {type(exc).__name__}: {exc}'}
+        return {'ok': False, 'error': 'Ключи сдохли.'}
     last_error = ''
     for model_name in CODE_GEN_MODELS:
         gen_config: Dict[str, Any] = {'temperature': 0.25, 'maxOutputTokens': CODE_GEN_MAX_OUTPUT_TOKENS, 'responseMimeType': 'application/json'}

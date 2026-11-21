@@ -1,3 +1,5 @@
+import asyncio
+import html
 import time
 import logging
 from datetime import date
@@ -19,6 +21,10 @@ from database import (
     set_chat_limit_db,
     get_user_stats,
     get_recent_prompts,
+)
+from database.queries import (
+    save_vip_user_db,
+    save_daily_limit_usage_db,
 )
 
 admin_router = Router()
@@ -131,7 +137,9 @@ async def handle_stats(callback: types.CallbackQuery):
             user_totals[uid][t] += s['count']
     sorted_users = sorted(user_totals.items(), key=lambda x: sum((x[1][k] for k in ['image', 'video', 'text', 'code'])), reverse=True)
     for (uid, data) in sorted_users:
-        un = f"@{data['username']}" if data['username'] else f"<a href='tg://user?id={uid}'>{data['name']}</a>"
+        safe_name = html.escape(str(data['name'] or 'Аноним'))
+        safe_username = html.escape(str(data['username'] or ''))
+        un = f"@{safe_username}" if safe_username else f"<a href='tg://user?id={uid}'>{safe_name}</a>"
         total = sum((data[k] for k in ['image', 'video', 'text', 'code']))
         line = f'{un} (<code>{uid}</code>)\n'
         line += f"  Всего: {total} (Картинки: {data['image']}, Видео: {data['video']}, Текст: {data['text']}, Код: {data['code']})"
@@ -163,8 +171,10 @@ async def cmd_prompts(message: types.Message):
     for p in prompts:
         import datetime
         dt = datetime.datetime.fromtimestamp(p['created_at']).strftime('%H:%M:%S')
-        un = f"@{p['username']}" if p['username'] else f"{p['first_name']}"
-        lines.append(f"[{dt}] {un} ({p['user_id']}) - <b>{p['gen_type']}</b>:\n<pre>{p['prompt'][:300]}</pre>")
+        un = html.escape(f"@{p['username']}" if p['username'] else f"{p['first_name']}")
+        safe_gen_type = html.escape(str(p['gen_type'] or ''))
+        safe_prompt = html.escape(str(p['prompt'] or '')[:300])
+        lines.append(f"[{dt}] {un} ({p['user_id']}) - <b>{safe_gen_type}</b>:\n<pre>{safe_prompt}</pre>")
     text = '\n\n'.join(lines)[:4000]
     await message.reply(text, parse_mode='HTML')
 
@@ -185,7 +195,9 @@ async def cmd_vip(message: types.Message):
     if not target_id:
         await message.reply('Ответь на сообщение пользователя или укажи /vip <user_id>')
         return
-    paid_unlimited_until[target_id] = time.time() + 86400
+    paid_until = time.time() + 86400
+    paid_unlimited_until[target_id] = paid_until
+    await save_vip_user_db(target_id, paid_until)
     await message.reply(f'Пользователь {target_id} получил безлимит на 24 часа.')
 
 def _check_daily_limit(user_id: int, chat_id: int) -> tuple:
@@ -199,4 +211,9 @@ def _check_daily_limit(user_id: int, chat_id: int) -> tuple:
         return (False, 0)
     entry['count'] = count + 1
     daily_gen_limits[chat_id, user_id] = entry
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(save_daily_limit_usage_db(chat_id, user_id, period_id, entry['count']))
+    except RuntimeError:
+        pass
     return (True, req_limit - entry['count'])

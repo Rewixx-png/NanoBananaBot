@@ -792,10 +792,10 @@ class UxContractsTest(unittest.TestCase):
                 asyncio.run(cmd_music(cast(Any, message)))
 
             self.assertIn((-100, 5), _music_awaiting_idea)
-            # Only a cancel button — the provider list waits for the idea.
+            # Studio hub and cancel — the provider list waits for the idea.
             callbacks = [b.callback_data for row in sent["reply_markup"].inline_keyboard for b in row]
             request_id = list(_pending_music)[0]
-            self.assertEqual(callbacks, [f"musiccancel:{request_id}"])
+            self.assertEqual(callbacks, [f"ss:hub:{request_id}", f"musiccancel:{request_id}"])
             self.assertTrue(all(not c.startswith("musicprov:") for c in callbacks))
         finally:
             _music_awaiting_idea.pop((-100, 5), None)
@@ -1421,8 +1421,9 @@ class UxContractsTest(unittest.TestCase):
 
         self.assertEqual(result, "groq fallback")
 
-    def test_primary_agent_uses_deepseek_tool_call_round_trip(self):
+    def test_primary_agent_uses_omniroute_tool_call_round_trip(self):
         import agent.loop as agent_loop
+        from config import OMNIROUTE_AGENT_MODEL
 
         tool_response = {
             "choices": [{
@@ -1440,12 +1441,12 @@ class UxContractsTest(unittest.TestCase):
         final_response = {
             "choices": [{"finish_reason": "stop", "message": {"content": "done"}}],
         }
-        deepseek = AsyncMock(side_effect=[tool_response, final_response])
-        sonnet = AsyncMock(return_value=None)
+        omni = AsyncMock(side_effect=[tool_response, final_response])
+        deepseek = AsyncMock(return_value=None)
         contents = [{"role": "user", "parts": [{"text": "do work"}]}]
         with (
+            patch.object(agent_loop, "omniroute_chat", omni),
             patch.object(agent_loop, "deepseek_chat", deepseek, create=True),
-            patch.object(agent_loop, "openrouter_chat", sonnet, create=True),
         ):
             first = asyncio.run(agent_loop._sonnet_call(contents, is_owner=False))
             contents.extend([
@@ -1459,15 +1460,15 @@ class UxContractsTest(unittest.TestCase):
         function_call = first["content"]["parts"][0]["functionCall"]
         self.assertEqual(function_call, {"name": "think", "args": {"thought": "plan"}})
         self.assertEqual(second["content"]["parts"][0]["text"], "done")
-        sent_messages = deepseek.await_args_list[1].kwargs["messages"]
+        sent_messages = omni.await_args_list[1].kwargs["messages"]
         assistant_message = next(message for message in sent_messages if message["role"] == "assistant")
         tool_message = next(message for message in sent_messages if message["role"] == "tool")
         tool_call = assistant_message["tool_calls"][0]
         self.assertEqual(__import__("json").loads(tool_call["function"]["arguments"]), {"thought": "plan"})
         self.assertEqual(tool_message["tool_call_id"], tool_call["id"])
-        self.assertIn("deepseek-v4-flash", deepseek.await_args.kwargs["model"])
-        self.assertTrue(deepseek.await_args.kwargs["tools"])
-        sonnet.assert_not_awaited()
+        self.assertEqual(omni.await_args.kwargs["model"], OMNIROUTE_AGENT_MODEL)
+        self.assertTrue(omni.await_args.kwargs["tools"])
+        deepseek.assert_not_awaited()
 
     def test_run_agent_does_not_require_gemini_keys(self):
         import agent.loop as agent_loop
@@ -1599,20 +1600,21 @@ class UxContractsTest(unittest.TestCase):
         self.assertIn("ls -la", joined)
 
 
-    def test_agent_intent_classifier_uses_deepseek(self):
+    def test_agent_intent_classifier_uses_omniroute(self):
         import agent.loop as agent_loop
+        from config import OMNIROUTE_AGENT_MODEL
 
+        omni = AsyncMock(return_value="false")
         deepseek = AsyncMock(return_value="false")
-        sonnet = AsyncMock(return_value="false")
         with (
+            patch.object(agent_loop, "omniroute_text", omni),
             patch.object(agent_loop, "deepseek_text", deepseek, create=True),
-            patch.object(agent_loop, "generate_text_with_openrouter", sonnet, create=True),
         ):
             result = asyncio.run(agent_loop.classify_agent_intent("как твои дела"))
 
         self.assertFalse(result)
-        self.assertIn("deepseek-v4-flash", deepseek.await_args.kwargs["model"])
-        sonnet.assert_not_awaited()
+        self.assertEqual(omni.await_args.kwargs["model"], OMNIROUTE_AGENT_MODEL)
+        deepseek.assert_not_awaited()
 
 
     def test_regular_chat_prompt_is_structured(self):
@@ -1867,7 +1869,7 @@ class UxContractsTest(unittest.TestCase):
         status = SimpleNamespace(delete=AsyncMock())
         message = SimpleNamespace(reply=AsyncMock(return_value=status))
         vision = AsyncMock(return_value="На фото кот")
-        with patch.object(media_in, "analyze_image_with_openrouter", vision, create=True):
+        with patch.object(media_in, "analyze_image_with_omniroute", vision):
             result = asyncio.run(media_in._analyze_photo_with_status(
                 cast(Any, message),
                 b"image",
@@ -1888,7 +1890,7 @@ class UxContractsTest(unittest.TestCase):
         message = SimpleNamespace(reply=AsyncMock(return_value=status))
         vision = AsyncMock(side_effect=RuntimeError("vision down"))
         with (
-            patch.object(media_in, "analyze_image_with_openrouter", vision, create=True),
+            patch.object(media_in, "analyze_image_with_omniroute", vision),
             self.assertRaisesRegex(RuntimeError, "vision down"),
         ):
             asyncio.run(media_in._analyze_photo_with_status(

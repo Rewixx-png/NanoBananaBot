@@ -19,9 +19,11 @@ from typing import Optional, Tuple
 import numpy as np
 from PIL import Image, ImageOps
 
+from config import UPSCALE_MODEL_DIR
+
 logger = logging.getLogger(__name__)
 
-MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "upscale"
+MODEL_DIR = Path(UPSCALE_MODEL_DIR)
 MODEL_FILES = {
     "anime": "RealESRGAN_x4plus_anime_6B.pth",
     "photo": "RealESRGAN_x2plus.pth",

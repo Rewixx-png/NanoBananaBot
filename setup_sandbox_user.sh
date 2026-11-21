@@ -3,7 +3,7 @@
 # Run ONCE on the host: sudo ./setup_sandbox_user.sh
 set -euo pipefail
 
-SANDBOX_USER="hatani"
+SANDBOX_USER="${AGENT_SANDBOX_USER:-hatani}"
 
 echo "=== Setting up sandbox user: $SANDBOX_USER ==="
 

@@ -4,8 +4,11 @@ import logging
 import aiohttp
 from typing import Tuple, Optional
 
+from config import GEMINI_MULTIMODAL_MODEL
 from keys import load_keys, remove_key
 from shared_types import _models_cache, _MODELS_CACHE_TTL, _pretty_model_name, _build_text_system_prompt, _gemini_url, _gemini_headers, gemini_post, gemini_text_of
+
+logger = logging.getLogger(__name__)
 
 
 # ── Audio service implementation ──────────────────────────────────────────
@@ -24,7 +27,7 @@ async def analyze_voice_with_gemini(audio_bytes: bytes, mime_type: str, prompt: 
         'contents': [{'role': 'user', 'parts': parts}],
         'generationConfig': {'temperature': 1.0, 'thinkingConfig': {'thinkingLevel': 'minimal'}},
     }
-    data, key, err = await gemini_post("models/gemini-3.5-flash:generateContent", payload, timeout=30)
+    data, key, err = await gemini_post(f"models/{GEMINI_MULTIMODAL_MODEL}:generateContent", payload, timeout=30)
     if data:
         text = gemini_text_of(data)
         if not text:
@@ -34,8 +37,10 @@ async def analyze_voice_with_gemini(audio_bytes: bytes, mime_type: str, prompt: 
         err_lower = err.lower()
         if any(w in err_lower for w in ('safety', 'prohibited', 'harm', 'block', 'policy', 'recitation')):
             return 'Ебать, гугл зацензурил эту хуйню, я нихуя не отвечу.'
-        logging.warning(f'Ошибка аудио Gemini: {err}')
+        logger.warning(f'Ошибка аудио Gemini: {err}')
     return 'Все ключи проебаны или сдохли, отъебись.'
+
+
 async def fetch_gemini_tts_models() -> list:
     cache_key = 'gemini_tts'
     now = __import__('time').time()
@@ -60,8 +65,10 @@ async def fetch_gemini_tts_models() -> list:
                     _models_cache[cache_key] = {'ts': now, 'data': result}
                     return result
         except Exception as e:
-            logging.warning(f'fetch_gemini_tts_models: {e}')
+            logger.warning(f'fetch_gemini_tts_models: {e}')
     return []
+
+
 def _split_text(text: str, max_chars: int = 800) -> list:
     import re
     sentences = re.split(r'(?<=[.!?\n])\s+', text)
@@ -83,6 +90,8 @@ def _split_text(text: str, max_chars: int = 800) -> list:
     if current_chunk:
         chunks.append(" ".join(current_chunk))
     return chunks
+
+
 async def generate_tts_with_gemini(text: str, model: str, voice_name: str, temperature: float=1.0, language_code: str='ru-RU', scene: str='', style: str='', pace: str='', accent: str='', _is_chunk: bool=False) -> Tuple[Optional[bytes], Optional[str]]:
     import wave
     import io
@@ -111,7 +120,6 @@ async def generate_tts_with_gemini(text: str, model: str, voice_name: str, tempe
             return (None, "Не удалось сгенерировать части аудио.")
         pcm_data = b"".join(pcm_chunks)
         import tempfile
-        import subprocess
         import os
         (fd, temp_wav) = tempfile.mkstemp(suffix='.wav')
         os.close(fd)
@@ -245,7 +253,6 @@ async def generate_tts_with_gemini(text: str, model: str, voice_name: str, tempe
                     if _is_chunk:
                         return (pcm_data, None)
                     import tempfile
-                    import subprocess
                     import os
                     (fd, temp_wav) = tempfile.mkstemp(suffix='.wav')
                     os.close(fd)
@@ -284,4 +291,3 @@ async def generate_tts_with_gemini(text: str, model: str, voice_name: str, tempe
                 continue
             break
     return (None, f'Все API ключи исчерпаны или недоступны. Последняя ошибка: {last_err}')
-

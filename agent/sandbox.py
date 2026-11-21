@@ -11,8 +11,15 @@ from typing import Callable, TYPE_CHECKING
 
 import aiohttp
 
-from keys import load_keys, remove_key
+from config import (
+    AGENT_ANALYSIS_MAX_BYTES,
+    GEMINI_MULTIMODAL_MODEL,
+    PLAYWRIGHT_BROWSERS_PATH,
+)
 from keys import get_live_keys as _nk_get_live, mark_cooldown as _nk_cooldown
+from services.omniroute_service import analyze_image_with_omniroute
+from services.security_utils import is_safe_url
+from shared_types import _gemini_headers, _gemini_url
 
 if TYPE_CHECKING:
     from .workspace import AgentWorkspace
@@ -40,7 +47,7 @@ def _snip_output(text: str, max_lines: int = 80, head: int = 40, tail: int = 30)
 def _mask_cookies(text: str) -> str:
     """Mask Netscape cookie values in command output."""
     masked = _COOKIE_MASK_RE.sub(r'\1[***MASKED***]', text)
-    # Also mask bare long tokens that look like session tokens (>40 chars, no spaces)
+    # Also mask bare long tokens that look like session tokens (>60 chars, no spaces)
     masked = re.sub(r'(?<!\w)([A-Za-z0-9+/=_\-]{60,})(?!\w)', '[***TOKEN***]', masked)
     return masked
 
@@ -119,50 +126,26 @@ async def _tool_analyze_image(
     question: str,
     ws: "AgentWorkspace",
 ) -> str:
-    """Send workspace image to Gemini vision and return its response."""
-    import base64, mimetypes
-    safe_path = os.path.join(ws.host_path, os.path.basename(path))
+    """Send workspace image to OmniRoute vision and return its response."""
+    try:
+        safe_path = ws._safe_path(path)
+    except ValueError as e:
+        return f"Доступ запрещён: {e}"
     if not os.path.exists(safe_path) or not os.path.isfile(safe_path):
         return f"Файл не найден: {path}"
     with open(safe_path, "rb") as f:
         img_bytes = f.read()
-    if len(img_bytes) > 20 * 1024 * 1024:
-        return "Файл слишком большой (>20MB) для анализа."
-    mime = mimetypes.guess_type(safe_path)[0] or "image/jpeg"
-    b64 = base64.b64encode(img_bytes).decode()
-    keys = await load_keys()
-    if not keys:
-        return "Нет Gemini ключей."
-    payload = {
-        "contents": [{"parts": [
-            {"text": question or "Подробно опиши что на этом изображении."},
-            {"inlineData": {"mimeType": mime, "data": b64}},
-        ]}],
-        "generationConfig": {"temperature": 0.4, "mediaResolution": "MEDIA_RESOLUTION_HIGH"},
-    }
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
-    last_err = ""
-    for key in keys:
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(
-                    url, json=payload,
-                    headers={"Content-Type": "application/json", "x-goog-api-key": key},
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        _cands = data.get("candidates", [])
-                        parts = (_cands[0].get("content", {}).get("parts", []) if _cands else [])
-                        return " ".join(p.get("text", "") for p in parts).strip() or "Нет ответа."
-                    if resp.status in (429, 403):
-                        await remove_key(key, resp.status)
-                        last_err = f"HTTP {resp.status}"
-                        continue
-        except Exception as e:
-            logger.warning(f"analyze_image: {e}")
-            last_err = f"{type(e).__name__}: {e}"
-    return f"Gemini не ответил. Последняя ошибка: {last_err}" if last_err else "Gemini не ответил."
+    if len(img_bytes) > AGENT_ANALYSIS_MAX_BYTES:
+        max_mb = AGENT_ANALYSIS_MAX_BYTES // (1024 * 1024)
+        return f"Файл слишком большой (>{max_mb}MB) для анализа."
+    try:
+        return await analyze_image_with_omniroute(
+            img_bytes,
+            question or "Подробно опиши что на этом изображении.",
+        )
+    except Exception as e:
+        logger.warning("analyze_image: %s: %s", type(e).__name__, e)
+        return f"Vision не ответил: {type(e).__name__}: {e}"
 
 
 async def _tool_analyze_audio(
@@ -171,14 +154,18 @@ async def _tool_analyze_audio(
     ws: "AgentWorkspace",
 ) -> str:
     """Send workspace audio to Gemini for quality analysis."""
-    import base64, mimetypes
-    safe_path = os.path.join(ws.host_path, os.path.basename(path))
+    import base64
+    try:
+        safe_path = ws._safe_path(path)
+    except ValueError as e:
+        return f"Доступ запрещён: {e}"
     if not os.path.exists(safe_path) or not os.path.isfile(safe_path):
         return f"Файл не найден: {path}"
     with open(safe_path, "rb") as f:
         audio_bytes = f.read()
-    if len(audio_bytes) > 20 * 1024 * 1024:
-        return "Файл слишком большой (>20MB) для анализа."
+    if len(audio_bytes) > AGENT_ANALYSIS_MAX_BYTES:
+        max_mb = AGENT_ANALYSIS_MAX_BYTES // (1024 * 1024)
+        return f"Файл слишком большой (>{max_mb}MB) для анализа."
     ext = os.path.splitext(safe_path)[1].lower().lstrip(".")
     mime_map = {"mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg",
                 "flac": "audio/flac", "m4a": "audio/mp4", "aac": "audio/aac"}
@@ -194,14 +181,14 @@ async def _tool_analyze_audio(
         ]}],
         "generationConfig": {"temperature": 0.4},
     }
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+    url = _gemini_url(f"models/{GEMINI_MULTIMODAL_MODEL}:generateContent")
     last_err = ""
     for key in keys[:5]:
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.post(
                     url, json=payload,
-                    headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                    headers=_gemini_headers(key),
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
                     if resp.status == 200:
@@ -231,6 +218,9 @@ async def _tool_playwright_browse(
     import json as _json
     import html as _html
 
+    if not is_safe_url(url):
+        return "Запрос к этому адресу запрещён (SSRF защита)."
+
     params_json = _json.dumps({
         "url": url, "action": action,
         "selector": selector, "value": value, "js_code": js_code,
@@ -244,7 +234,7 @@ sel     = params["selector"]
 val     = params["value"]
 js_code = params["js_code"]
 
-os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", {PLAYWRIGHT_BROWSERS_PATH!r})
 
 from playwright.sync_api import sync_playwright
 with sync_playwright() as p:

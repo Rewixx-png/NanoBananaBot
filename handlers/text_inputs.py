@@ -181,12 +181,14 @@ async def handle_suno_input(message: types.Message, reply_kwargs: dict) -> bool:
                 parse_mode='HTML',
             )
         except Exception:
-            await message.bot.send_message(
+            sent = await message.bot.send_message(
                 chat_id=d['chat_id'],
                 text=text,
                 reply_markup=keyboard,
                 parse_mode='HTML',
             )
+            if sent:
+                d['msg_id'] = sent.message_id
     return True
 
 
@@ -201,7 +203,7 @@ async def handle_lyria_input(message: types.Message, reply_kwargs: dict) -> bool
     msg_id: int = wait['msg_id']
     d = pending_lyria_configs.get(request_id)
     if d:
-        d['cfg'][field] = message.text.strip()
+        d['cfg'][field] = (message.text or '').strip()
         try:
             await message.delete()
         except Exception:
@@ -215,12 +217,14 @@ async def handle_lyria_input(message: types.Message, reply_kwargs: dict) -> bool
                 parse_mode='HTML',
             )
         except Exception:
-            await message.bot.send_message(
+            sent = await message.bot.send_message(
                 chat_id=d['chat_id'],
                 text=_lyria_cfg_text(request_id),
                 reply_markup=_lyria_cfg_keyboard(request_id),
                 parse_mode='HTML',
             )
+            if sent:
+                d['msg_id'] = sent.message_id
     return True
 
 

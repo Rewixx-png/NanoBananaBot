@@ -2,7 +2,7 @@ import asyncio
 import logging
 from services.deepseek_service import deepseek_text
 
-from config import DEEPSEEK_MODEL, GEMINI_TEXT_TIMEOUT, MAX_HISTORY_MESSAGES
+from config import DEEPSEEK_MODEL, GEMINI_MULTIMODAL_MODEL, GEMINI_TEXT_TIMEOUT, MAX_HISTORY_MESSAGES
 from database import get_history, save_history
 from services.web_search import search_web_with_firecrawl, _extract_search_query, _fallback_web_answer
 # ── Shared helpers moved to shared_types.py ───────────────────────────────
@@ -219,7 +219,7 @@ async def translate_to_english(prompt: str) -> str:
         'contents': [{'parts': [{'text': f'Translate this image generation prompt to English for an AI image generator. Return ONLY the translated prompt, no explanations:\n{prompt}'}]}],
         'generationConfig': {'temperature': 0.1, 'thinkingConfig': {'thinkingBudget': 0}},
     }
-    data, _key, _err = await gemini_post("models/gemini-3.5-flash:generateContent", payload, timeout=30.0)
+    data, _key, _err = await gemini_post(f"models/{GEMINI_MULTIMODAL_MODEL}:generateContent", payload, timeout=30.0)
     if data is not None:
         translated = gemini_text_of(data).strip()
         if translated:

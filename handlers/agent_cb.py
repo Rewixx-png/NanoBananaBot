@@ -9,41 +9,58 @@ import logging
 from aiogram import types
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
-from handlers.common import safe_send
+from config import ADMIN_IDS
+from handlers.common import _clean_plain_reply, format_telegram_html, safe_send, send_rich_message
 
 logger = logging.getLogger(__name__)
 
+_ADMIN_MTYPES = {
+    "tg_pin", "tg_unpin", "tg_delete",
+    "tg_set_chat_title", "tg_set_chat_description", "tg_set_chat_photo",
+    "tg_invite_link", "tg_export_link",
+    "tg_create_forum_topic", "tg_close_forum_topic", "tg_approve_join",
+}
+
 
 async def send_agent_callback(media: dict, /, *, message: types.Message, reply_kwargs: dict) -> None:
-    """Dispatch a single agent `media` payload to the appropriate Telegram action.
-
-    Parameters
-    ----------
-    media : dict
-        Agent-side payload with at least a ``"type"`` key.
-    message : types.Message
-        The original incoming Telegram message (used for chat-id, bot, reply-to, etc.).
-    reply_kwargs : dict
-        Extra kwargs forwarded to every send (e.g. ``message_thread_id`` for forums).
-    """
+    """Dispatch a single agent `media` payload to the appropriate Telegram action."""
     mtype = media.get("type", "document")
     kw = {"reply_to_message_id": message.message_id, **reply_kwargs}
+
+    if mtype in _ADMIN_MTYPES and message.chat.type != "private":
+        user_id = message.from_user.id if message.from_user else 0
+        if user_id not in ADMIN_IDS:
+            try:
+                _req = await message.bot.get_chat_member(message.chat.id, user_id)
+                is_chat_admin = _req.status in ("administrator", "creator")
+            except Exception as _e:
+                logger.warning(f"admin check failed for {mtype}: {_e}")
+                is_chat_admin = False
+            if not is_chat_admin:
+                await safe_send(message.bot.send_message, chat_id=message.chat.id,
+                    text="Эту команду могут выполнять только администраторы.", **kw)
+                return
 
     if mtype == "text":
         text_body = (media.get("text") or "")[:4000]
         parse_mode = media.get("parse_mode")
+        if parse_mode is None:
+            sent = await send_rich_message(
+                message.bot,
+                chat_id=message.chat.id,
+                text=text_body,
+                message_thread_id=reply_kwargs.get("message_thread_id"),
+                reply_parameters={"message_id": message.message_id, "allow_sending_without_reply": True},
+            )
+            if sent is not None:
+                return
         await safe_send(message.bot.send_message, chat_id=message.chat.id, text=text_body,
                         parse_mode=parse_mode, **kw)
         return
 
     if mtype == "inline_buttons":
-        from utils import clean_html
-        _TG_TAGS = ['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del',
-                    'code', 'pre', 'blockquote', 'tg-spoiler', 'tg-emoji']
         raw_text = (media.get("text") or "Выбери:")[:4000]
-        text_body = clean_html(raw_text, tags=_TG_TAGS,
-            attributes={'pre': [], 'code': ['class'], 'tg-emoji': ['emoji-id'],
-                        'blockquote': ['expandable']}, strip=True)
+        text_body = format_telegram_html(raw_text)[:4000]
         rows = media.get("buttons", [])
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=btn.get("text", "?")[:64], url=btn.get("url", ""))
@@ -115,21 +132,6 @@ async def send_agent_callback(media: dict, /, *, message: types.Message, reply_k
             logger.warning(f"tg_forward failed: {_e}")
         return
 
-
-    _ADMIN_MTYPES = {"tg_pin", "tg_unpin", "tg_set_chat_title", "tg_invite_link"}
-    if mtype in _ADMIN_MTYPES and message.chat.type != "private":
-        try:
-            _req = await message.bot.get_chat_member(message.chat.id, message.from_user.id)
-            if _req.status not in ("administrator", "creator"):
-                await safe_send(message.bot.send_message, chat_id=message.chat.id,
-                    text="Эту команду могут выполнять только администраторы.", **kw)
-                return
-        except Exception:
-            pass
-
-
-
-
     if mtype == "tg_chat_action":
         try:
             await message.bot.send_chat_action(chat_id=message.chat.id,
@@ -137,7 +139,6 @@ async def send_agent_callback(media: dict, /, *, message: types.Message, reply_k
         except Exception as _e:
             logger.warning(f"tg_chat_action failed: {_e}")
         return
-
 
     if mtype == "tg_unpin":
         try:
@@ -225,10 +226,6 @@ async def send_agent_callback(media: dict, /, *, message: types.Message, reply_k
             logger.warning(f"tg_send_venue failed: {_e}")
         return
 
-
-
-
-
     if mtype == "tg_create_forum_topic":
         try:
             t = await message.bot.create_forum_topic(chat_id=message.chat.id,
@@ -280,9 +277,8 @@ async def send_agent_callback(media: dict, /, *, message: types.Message, reply_k
 
     if mtype == "tg_set_chat_photo":
         try:
-            from aiogram.types import BufferedInputFile as _BIF
-            photo_buf = _BIF(media.get("data", b""),
-                             filename=media.get("filename", "photo.jpg"))
+            photo_buf = BufferedInputFile(media.get("data", b""),
+                                          filename=media.get("filename", "photo.jpg"))
             await message.bot.set_chat_photo(chat_id=message.chat.id, photo=photo_buf)
             await safe_send(message.bot.send_message, chat_id=message.chat.id,
                             text="Аватарка беседы обновлена.", **kw)
@@ -291,7 +287,6 @@ async def send_agent_callback(media: dict, /, *, message: types.Message, reply_k
             await safe_send(message.bot.send_message, chat_id=message.chat.id,
                             text="Не удалось сменить аватарку.", **kw)
         return
-
 
     if mtype == "tg_send_sticker":
         try:
@@ -322,21 +317,41 @@ async def send_agent_callback(media: dict, /, *, message: types.Message, reply_k
         try:
             await message.bot.edit_message_text(chat_id=message.chat.id,
                 message_id=media.get("message_id"),
-                text=media.get("text","")[:4096], parse_mode='HTML')
+                text=format_telegram_html(media.get("text", ""))[:4096], parse_mode='HTML')
         except Exception as _e:
             logger.warning(f"tg_edit_message failed: {_e}")
         return
 
-    # Fallback: binary file send (photo / video / audio / document)
+    # Fallback: binary file send (photo / video / animation / audio / voice / document)
     data = media.get("data", b"")
-    caption = (media.get("caption") or "")[:1024]
+    raw_caption = media.get("caption") or ""
+    formatted_caption = format_telegram_html(raw_caption) if raw_caption else ""
+    use_html_caption = bool(formatted_caption and len(formatted_caption) <= 1024)
+    caption = formatted_caption if use_html_caption else _clean_plain_reply(raw_caption)[:1024]
+    cap_kw = {**kw, "parse_mode": "HTML"} if use_html_caption else kw
     filename = media.get("filename") or "file"
-    buf = BufferedInputFile(data, filename=filename)
+
+    async def _send_binary(send_fn, media_field: str):
+        buf = BufferedInputFile(data, filename=filename)
+        try:
+            await safe_send(send_fn, chat_id=message.chat.id, caption=caption, **{media_field: buf, **cap_kw})
+        except Exception as cap_err:
+            if not use_html_caption:
+                raise
+            logger.warning(f"HTML caption failed for {mtype}, retrying plain: {cap_err}")
+            plain_cap = _clean_plain_reply(raw_caption)[:1024]
+            buf_retry = BufferedInputFile(data, filename=filename)
+            await safe_send(send_fn, chat_id=message.chat.id, caption=plain_cap, **{media_field: buf_retry, **kw})
+
     if mtype == "photo":
-        await safe_send(message.bot.send_photo, chat_id=message.chat.id, photo=buf, caption=caption, **kw)
+        await _send_binary(message.bot.send_photo, "photo")
     elif mtype == "video":
-        await safe_send(message.bot.send_video, chat_id=message.chat.id, video=buf, caption=caption, **kw)
+        await _send_binary(message.bot.send_video, "video")
+    elif mtype == "animation":
+        await _send_binary(message.bot.send_animation, "animation")
     elif mtype == "audio":
-        await safe_send(message.bot.send_audio, chat_id=message.chat.id, audio=buf, caption=caption, **kw)
+        await _send_binary(message.bot.send_audio, "audio")
+    elif mtype == "voice":
+        await _send_binary(message.bot.send_voice, "voice")
     else:
-        await safe_send(message.bot.send_document, chat_id=message.chat.id, document=buf, caption=caption, **kw)
+        await _send_binary(message.bot.send_document, "document")

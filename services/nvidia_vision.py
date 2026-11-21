@@ -18,10 +18,12 @@ from typing import Optional
 
 import aiohttp
 
+from config import NVIDIA_VISION_BASE_URL, NVIDIA_VISION_MODEL
+
 logger = logging.getLogger(__name__)
 
-NVIDIA_BASE = "https://integrate.api.nvidia.com/v1"
-DEFAULT_MODEL = "meta/llama-3.2-90b-vision-instruct"
+NVIDIA_BASE = NVIDIA_VISION_BASE_URL
+DEFAULT_MODEL = NVIDIA_VISION_MODEL
 
 # --- Key cache with validation ---
 

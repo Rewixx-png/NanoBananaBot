@@ -27,6 +27,7 @@ from database.voice import (
     add_voice, get_voices, get_voice_by_id, delete_voice,
     get_settings, save_settings,
 )
+from config import AUTO_VOICE_CAPTION, OWNER_USER_ID
 from utils import check_membership
 from handlers.common import _track_user, safe_send
 
@@ -188,16 +189,16 @@ def is_voice_auto(chat_id: int) -> bool:
 
 @voice_router.message(Command("voice_on"))
 async def cmd_voice_on(message: Message):
-    if message.from_user.id != 7485721661:
+    if not OWNER_USER_ID or message.from_user.id != OWNER_USER_ID:
         await message.reply("Только владелец может включить авто-озвучку.", **_reply_kwargs(message))
         return
     _voice_auto_chats.add(message.chat.id)
-    await message.reply("Авто-озвучка Hu Tao включена. Ответы будут озвучиваться.", **_reply_kwargs(message))
+    await message.reply(f"Авто-озвучка {AUTO_VOICE_CAPTION} включена. Ответы будут озвучиваться.", **_reply_kwargs(message))
 
 
 @voice_router.message(Command("voice_off"))
 async def cmd_voice_off(message: Message):
-    if message.from_user.id != 7485721661:
+    if not OWNER_USER_ID or message.from_user.id != OWNER_USER_ID:
         await message.reply("Только владелец может выключить.", **_reply_kwargs(message))
         return
     _voice_auto_chats.discard(message.chat.id)

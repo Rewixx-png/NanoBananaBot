@@ -1,20 +1,24 @@
-const BRIDGE_URL = 'http://94.156.179.21:7432';
-const BRIDGE_SECRET = 'nanohatani_figma_bridge';
+// Configure bridge_url and bridge_secret in figma.clientStorage before running.
+let BRIDGE_URL = '';
+let BRIDGE_SECRET = '';
 const POLL_INTERVAL = 2500;
+
+async function loadBridgeConfig() {
+  BRIDGE_URL = (await figma.clientStorage.getAsync('bridge_url')) || '';
+  BRIDGE_SECRET = (await figma.clientStorage.getAsync('bridge_secret')) || '';
+}
 
 figma.showUI(__html__, { visible: false, width: 0, height: 0 });
 
-figma.ui.onmessage = async (msg) => {
-  if (msg.type === 'poll-result' && msg.session_id) {
-    await buildDesign(msg.spec, msg.session_id);
-  }
-};
-
 function schedulePoll() {
   setTimeout(() => {
+    if (!BRIDGE_URL || !BRIDGE_SECRET) {
+      schedulePoll();
+      return;
+    }
     figma.ui.postMessage({
       type: 'poll',
-      url: BRIDGE_URL + '/figma/poll',
+      url: BRIDGE_URL.replace(/\/+$/, '') + '/figma/poll',
       secret: BRIDGE_SECRET,
     });
   }, POLL_INTERVAL);
@@ -149,4 +153,4 @@ async function buildDesign(spec, session_id) {
   }
 }
 
-schedulePoll();
+loadBridgeConfig().then(() => schedulePoll());

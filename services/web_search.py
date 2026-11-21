@@ -3,20 +3,37 @@ import json
 import logging
 import re
 import aiohttp
+from datetime import datetime
 from typing import Tuple
 
-from keys import load_keys, load_firecrawl_keys, remove_key, strip_code_fences
+from config import (
+    BOT_USERNAMES,
+    DEEPSEEK_MODEL,
+    FIRECRAWL_SCRAPE_URL,
+    FIRECRAWL_SEARCH_URL,
+    JINA_READER_BASE_URL,
+)
+from keys import load_firecrawl_keys, remove_key, strip_code_fences
 from services.deepseek_service import deepseek_text
-from shared_types import _TEXT_MODEL_FALLBACKS, _WEB_SEARCH_DIRECTIVE, _gemini_headers, _gemini_url, _thinking_config
-
+from services.security_utils import is_safe_url
+from shared_types import _WEB_SEARCH_DIRECTIVE
 
 
 # ── Web search implementation ─────────────────────────────────────────────
 _FIRECRAWL_DEAD_KEY_STATUSES = {401, 402}
 _FIRECRAWL_TRANSIENT_STATUSES = {408, 429, 500, 502, 503, 504}
+
+
+def _strip_bot_mentions(text: str, repl: str = '') -> str:
+    if not BOT_USERNAMES:
+        return text
+    pattern = r'@(?:' + '|'.join(re.escape(u.lstrip('@')) for u in BOT_USERNAMES if u) + r')\b'
+    return re.sub(pattern, repl, text, flags=re.IGNORECASE)
+
+
 def _clean_web_query(prompt: str) -> str:
     cleaned = re.sub(r'^\[Контекст — ты написал ранее: «.*?»\]\s*', '', prompt.strip(), flags=re.DOTALL).strip()
-    cleaned = re.sub(r'@(?:HataniAiBot|HatabiAiibot)\b', '', cleaned, flags=re.IGNORECASE).strip()
+    cleaned = _strip_bot_mentions(cleaned, '').strip()
     # Strip trigger verbs at the start
     cleaned = re.sub(
         r'^(поищи(те)?|найди(те)?|загугли(те)?|погугли(те)?|ищи|поиск|найди|поисковый запрос)[,:\s]+',
@@ -38,7 +55,7 @@ def _clean_web_query(prompt: str) -> str:
     cleaned = cleaned.strip(',:;-— ')
     lowered = cleaned.lower()
     if any(word in lowered for word in ['gemini', 'гемини', 'джемини']) and any(word in lowered for word in ['нового', 'новости', 'обнов', 'latest', 'release']):
-        return 'site:gemini.google/release-notes Gemini release updates latest Google AI 2026'
+        return f'site:gemini.google/release-notes Gemini release updates latest Google AI {datetime.now().year}'
     return cleaned or prompt.strip()
 
 
@@ -58,7 +75,7 @@ def _dedupe_texts(items: list[str]) -> list[str]:
 
 
 def _extract_search_targets(text: str) -> list[str]:
-    cleaned = re.sub(r'@(?:HataniAiBot|HatabiAiibot)\b', ' ', text or '', flags=re.IGNORECASE)
+    cleaned = _strip_bot_mentions(text or '', ' ')
     candidates = []
     for quoted in re.findall(r'["«“]([^"»”]{3,80})["»”]', cleaned):
         if re.search(r'[A-Za-zА-Яа-яЁё0-9]', quoted):
@@ -122,8 +139,6 @@ def _web_query_variants(query: str) -> list[str]:
     return _dedupe_texts(variants)[:18]
 
 
-
-
 def _web_context_quality(query: str, context: str) -> tuple[int, str]:
     body = (context or '').casefold()
     if len(body.strip()) < 250:
@@ -176,7 +191,7 @@ async def _extract_search_query(user_message: str) -> str:
     )
     q = await deepseek_text(
         user_message, system_prompt=system,
-        model=_TEXT_MODEL_FALLBACKS[0], temperature=0.3, max_tokens=40, timeout=8,
+        model=DEEPSEEK_MODEL, temperature=0.3, max_tokens=40, timeout=8,
     )
     if q:
         q = re.sub(r'\s+', ' ', q).strip()
@@ -203,9 +218,6 @@ def _parse_query_plan(raw: str) -> list[str]:
 async def _plan_firecrawl_queries(user_request: str, seed_query: str) -> list[str]:
     source = user_request.strip() or seed_query.strip()
     fallback = _dedupe_texts(_web_query_variants(source) + _web_query_variants(seed_query))[:18]
-    keys = await load_keys()
-    if not keys:
-        return fallback
     system = (
         'Ты планировщик веб-поиска Firecrawl. Получишь сырой запрос пользователя и начальный смысл. '
         'Составь 8-12 точных поисковых запросов для Firecrawl, чтобы найти достоверную инфу по разным площадкам. '
@@ -221,40 +233,22 @@ async def _plan_firecrawl_queries(user_request: str, seed_query: str) -> list[st
         f'Цели/ники: {", ".join(_extract_search_targets(source) or _extract_search_targets(seed_query)) or "не выделены"}\n'
         f'Базовые варианты: {json.dumps(fallback, ensure_ascii=False)}'
     )
-    contents = [{'role': 'user', 'parts': [{'text': user_text}]}]
-    dead_keys: set[str] = set()
-    for model_name in _TEXT_MODEL_FALLBACKS:
-        gen_config = {
-            'temperature': 0.2,
-            'maxOutputTokens': 512,
-            'responseMimeType': 'application/json',
-            'thinkingConfig': _thinking_config(model_name, 'minimal'),
-        }
-        payload = {'systemInstruction': {'parts': [{'text': system}]}, 'contents': contents, 'generationConfig': gen_config}
-        for key in keys:
-            if key in dead_keys:
-                continue
-            url = _gemini_url(f"models/{model_name}:generateContent")
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, json=payload, headers=_gemini_headers(key), timeout=aiohttp.ClientTimeout(total=12)) as resp:
-                        if resp.status == 404:
-                            break
-                        if resp.status == 200:
-                            data = await resp.json()
-                            raw = data['candidates'][0]['content']['parts'][0]['text']
-                            planned = [_protect_search_targets(q, source) for q in _parse_query_plan(raw)]
-                            planned = _dedupe_texts(planned + fallback)[:18]
-                            if planned:
-                                return planned
-                        elif resp.status in [429, 403]:
-                            dead_keys.add(key)
-                            await remove_key(key, resp.status)
-                        else:
-                            body = await resp.text()
-                            logging.warning(f'Firecrawl query planner [{model_name}] HTTP {resp.status}: {body[:200]}')
-            except Exception as e:
-                logging.warning(f'Firecrawl query planner [{model_name}] failed: {type(e).__name__}: {e}')
+    try:
+        raw = await deepseek_text(
+            user_text,
+            system_prompt=system,
+            model=DEEPSEEK_MODEL,
+            temperature=0.2,
+            max_tokens=512,
+            timeout=12,
+        )
+        if raw:
+            planned = [_protect_search_targets(q, source) for q in _parse_query_plan(raw)]
+            planned = _dedupe_texts(planned + fallback)[:18]
+            if planned:
+                return planned
+    except Exception as e:
+        logging.warning(f'Firecrawl query planner failed: {type(e).__name__}: {e}')
     return fallback
 
 
@@ -268,7 +262,9 @@ def _clean_web_snippet(text: str) -> str:
 
 
 async def _firecrawl_scrape_url(url: str, keys: list[str]) -> str:
-    endpoint = 'https://api.firecrawl.dev/v2/scrape'
+    if not is_safe_url(url):
+        return ''
+    endpoint = FIRECRAWL_SCRAPE_URL
     payload = {
         'url': url,
         'formats': ['markdown'],
@@ -277,7 +273,7 @@ async def _firecrawl_scrape_url(url: str, keys: list[str]) -> str:
         'maxAge': 4 * 60 * 60 * 1000,
         'storeInCache': True,
     }
-    for key in keys:
+    for key in (keys or []):
         headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
         try:
             async with aiohttp.ClientSession() as session:
@@ -285,7 +281,9 @@ async def _firecrawl_scrape_url(url: str, keys: list[str]) -> str:
                     if resp.status == 200:
                         data = await resp.json()
                         d = data.get('data') or data
-                        return (d.get('markdown') or d.get('content') or '').strip()
+                        text = (d.get('markdown') or d.get('content') or '').strip()
+                        if text:
+                            return text
                     if resp.status in _FIRECRAWL_DEAD_KEY_STATUSES:
                         await remove_key(key, resp.status)
                         continue
@@ -296,6 +294,21 @@ async def _firecrawl_scrape_url(url: str, keys: list[str]) -> str:
                     logging.warning(f'Firecrawl scrape request HTTP {resp.status} for {url}: {body[:300]}')
         except Exception as e:
             logging.warning(f'Firecrawl scrape {url}: {type(e).__name__}')
+
+    # Fallback: Jina Reader (free, no key needed)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f'{JINA_READER_BASE_URL}/{url}',
+                headers={'Accept': 'text/plain', 'X-Return-Format': 'markdown', 'User-Agent': 'Mozilla/5.0'},
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                if resp.status == 200:
+                    text = (await resp.text()).strip()
+                    if len(text) > 200:
+                        return text
+    except Exception as e:
+        logging.debug(f'Jina scrape fallback {url}: {type(e).__name__}')
     return ''
 
 
@@ -313,9 +326,7 @@ def _extract_links_from_markdown(md: str) -> list[str]:
 
 
 async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str='') -> Tuple[str, bool]:
-    keys = await load_firecrawl_keys()
-    if not keys:
-        return ('', False)
+    initial_keys = await load_firecrawl_keys()
 
     async def _st(text: str):
         if status_cb:
@@ -325,9 +336,6 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
                 pass
 
     async def _refine_queries(contexts: list[str], attempted: list[str]) -> list[str]:
-        keys2 = await load_keys()
-        if not keys2:
-            return []
         source = raw_request or query
         context_digest = '\n---\n'.join(_clean_web_snippet(c[:1800]) for c in contexts[-4:] if c)[:6000]
         system = (
@@ -341,35 +349,26 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
             f'Уже пробовали: {json.dumps(attempted[-12:], ensure_ascii=False)}\n'
             f'Найденные фрагменты:\n{context_digest}'
         )
-        contents = [{'role': 'user', 'parts': [{'text': user_text}]}]
-        dead_keys2: set[str] = set()
-        for model_name in _TEXT_MODEL_FALLBACKS:
-            gen_config = {'temperature': 0.35, 'maxOutputTokens': 512, 'responseMimeType': 'application/json', 'thinkingConfig': _thinking_config(model_name, 'minimal')}
-            payload = {'systemInstruction': {'parts': [{'text': system}]}, 'contents': contents, 'generationConfig': gen_config}
-            for key in keys2:
-                if key in dead_keys2:
-                    continue
-                url = _gemini_url(f"models/{model_name}:generateContent")
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(url, json=payload, headers=_gemini_headers(key), timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                            if resp.status == 404:
-                                break
-                            if resp.status == 200:
-                                data = await resp.json()
-                                raw = data['candidates'][0]['content']['parts'][0]['text']
-                                refined = [_protect_search_targets(q, source) for q in _parse_query_plan(raw)]
-                                return [q for q in _dedupe_texts(refined) if q.casefold() not in {a.casefold() for a in attempted}][:8]
-                            if resp.status in [429, 403]:
-                                dead_keys2.add(key)
-                                await remove_key(key, resp.status)
-                except Exception as e:
-                    logging.warning(f'Firecrawl query refiner [{model_name}] failed: {type(e).__name__}: {e}')
+        try:
+            raw = await deepseek_text(
+                user_text,
+                system_prompt=system,
+                model=DEEPSEEK_MODEL,
+                temperature=0.35,
+                max_tokens=512,
+                timeout=15,
+            )
+            if raw:
+                refined = [_protect_search_targets(q, source) for q in _parse_query_plan(raw)]
+                return [q for q in _dedupe_texts(refined) if q.casefold() not in {a.casefold() for a in attempted}][:8]
+        except Exception as e:
+            logging.warning(f'Firecrawl query refiner failed: {type(e).__name__}: {e}')
         return []
 
     async def _run_query(search_query: str) -> Tuple[str, bool]:
         raw_results = []
         api_available = False
+        query_keys: list[str] = []
 
         # Primary: DuckDuckGo (free, no key)
         try:
@@ -395,7 +394,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
                 payload = {'query': search_query[:500], 'limit': 8, 'sources': [{'type': 'web'}]}
                 try:
                     async with aiohttp.ClientSession() as session:
-                        async with session.post('https://api.firecrawl.dev/v2/search', json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                        async with session.post(FIRECRAWL_SEARCH_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                             if resp.status == 200:
                                 api_available = True
                                 data = await resp.json()
@@ -418,7 +417,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
             return ('', api_available)
 
         await _st(f'Читаю страниц: {len(top_urls)}...')
-        scrape_keys = await load_firecrawl_keys() or query_keys
+        scrape_keys = await load_firecrawl_keys() or query_keys or initial_keys
         scraped_pages = await asyncio.gather(*[_firecrawl_scrape_url(u, scrape_keys) for u in top_urls], return_exceptions=True)
 
         parts = []
@@ -477,7 +476,7 @@ async def search_web_with_firecrawl(query: str, status_cb=None, raw_request: str
             return ('', api_available)
         return ('\n\n---\n\n'.join(parts), api_available)
 
-    any_available = False
+    any_available = bool(initial_keys)
     best_context = ''
     weak_contexts = []
     relevant_contexts = []
@@ -603,7 +602,7 @@ async def synthesize_web_answer(prompt: str, web_context: str) -> str:
     user_text = f'Запрос пользователя: {clean_query}\n\nFirecrawl-контекст:\n{web_context[:14000]}'
     answer = await deepseek_text(
         user_text, system_prompt=system,
-        model=_TEXT_MODEL_FALLBACKS[0], temperature=0.3, max_tokens=800, timeout=25,
+        model=DEEPSEEK_MODEL, temperature=0.3, max_tokens=800, timeout=25,
     )
     if answer and not answer.upper().startswith(_WEB_SEARCH_DIRECTIVE):
         return answer

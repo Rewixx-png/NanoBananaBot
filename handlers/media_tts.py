@@ -20,11 +20,11 @@ from handlers.common import (
     _tts_cfg_text,
     _tts_cfg_keyboard,
 )
+from config import TTS_COOLDOWN_SECONDS
 from handlers.media_gen import media_router, TTS_MODELS
 
 
 _tts_awaiting_input: dict = {}
-TTS_COOLDOWN_SECONDS = 10
 
 def _tts_model_keyboard(request_id: str) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=label, callback_data=f'ttssel:{request_id}:{model_id}')] for (model_id, (label, _)) in TTS_MODELS.items()]

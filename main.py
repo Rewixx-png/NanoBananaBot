@@ -1,19 +1,21 @@
 import asyncio
+import html
 import logging
+from logging.handlers import RotatingFileHandler
 import signal
 import sys
 import time
 from aiogram import Bot, Dispatcher, BaseMiddleware
 
-
 from aiogram.types import TelegramObject, Message, CallbackQuery
-from config import BOT_TOKEN, BANNED_USER_IDS
+from config import BOT_LOG_PATH, BOT_TOKEN, BANNED_USER_IDS, FIGMA_BRIDGE_HOST, FIGMA_BRIDGE_PORT
 from database import init_db, get_all_pending_gens, delete_pending_gen, get_banned_users_db, get_all_chat_limits, get_all_vip_users, get_all_daily_limits_usage
 from handlers import router, refresh_models
 from handlers.core import PUBLIC_COMMANDS
 from handlers.common import callback_has_access
 from state import banned_user_ids, chat_custom_limits, paid_unlimited_until, daily_gen_limits
 from typing import Callable, Any, Awaitable
+
 
 class BanMiddleware(BaseMiddleware):
 
@@ -26,6 +28,7 @@ class BanMiddleware(BaseMiddleware):
         if user_id and (user_id in BANNED_USER_IDS or user_id in banned_user_ids):
             return
         return await handler(event, data)
+
 
 class CallbackAccessMiddleware(BaseMiddleware):
     _SAFE_EXACT = {
@@ -60,6 +63,7 @@ class CallbackAccessMiddleware(BaseMiddleware):
             )
         return result
 
+
 class DualHistoryMiddleware(BaseMiddleware):
 
     async def __call__(self, handler: Callable[[TelegramObject, dict], Awaitable[Any]], event: TelegramObject, data: dict) -> Any:
@@ -92,20 +96,31 @@ class DualHistoryMiddleware(BaseMiddleware):
                 chat_context_buffer[event.chat.id] = buf[-MAX_HISTORY_MESSAGES:]
         return await handler(event, data)
 
+
 if not logging.root.handlers:
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.FileHandler('bot.log'), logging.StreamHandler(sys.stdout)])
-# Apply API key masking to file handler
-from log_filter import APIKeyMaskingFilter
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            RotatingFileHandler(BOT_LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8'),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+# Apply API key masking to ALL handlers (file + console/docker logs)
+from log_filter import APIKeyMaskingFilter, mask_secrets
+_mask_filter = APIKeyMaskingFilter()
 for h in logging.root.handlers:
-    if isinstance(h, logging.FileHandler):
-        h.addFilter(APIKeyMaskingFilter())
+    h.addFilter(_mask_filter)
+
 logger = logging.getLogger(__name__)
 bot_instance = None
 dp_instance = None
 
+
 def signal_handler(signum, frame):
     logger.info(f'Получен сигнал {signum}, начинаю graceful shutdown...')
     sys.exit(0)
+
 
 async def resume_pending_generations(bot: Bot):
     from services.video_service import poll_veo_operation
@@ -170,7 +185,6 @@ async def resume_pending_generations(bot: Bot):
             await delete_pending_gen(gen_id)
 
 
-
 async def on_startup(bot: Bot):
     try:
         await bot.set_my_commands(PUBLIC_COMMANDS)
@@ -196,6 +210,7 @@ async def on_startup(bot: Bot):
     asyncio.create_task(resume_pending_generations(bot))
     asyncio.create_task(refresh_models())
 
+
 async def on_shutdown():
     logger.info('Начинаю остановку бота...')
     from dual_bot import bot2
@@ -212,6 +227,7 @@ async def on_shutdown():
     except Exception as e:
         logger.warning(f"Error closing ElevenLabs: {e}")
     logger.info('Бот успешно остановлен')
+
 
 async def _nano_keys_sync_loop():
     from config import NANO_KEY_SYNC_INTERVAL
@@ -251,12 +267,13 @@ async def main():
         async def _owner_error_handler(error_event):
             exception = error_event.exception
             import traceback as _tb
-            tb = ''.join(_tb.format_exception(type(exception), exception, exception.__traceback__))[-2000:]
+            tb = mask_secrets(''.join(_tb.format_exception(type(exception), exception, exception.__traceback__))[-2000:])
+            exc_text = html.escape(mask_secrets(f"{type(exception).__name__}: {exception}"))
             try:
                 await bot_instance.send_message(
                     OWNER_USER_ID,
-                    f"❌ <b>УПАЛО:</b> <code>{type(exception).__name__}: {exception}</code>\n"
-                    f"<pre>{tb[:1500]}</pre>",
+                    f"❌ <b>УПАЛО:</b> <code>{exc_text}</code>\n"
+                    f"<pre>{html.escape(tb[:1500])}</pre>",
                     parse_mode='HTML',
                 )
             except Exception:
@@ -288,14 +305,15 @@ async def main():
         from figma_bridge import start_bridge
         polling_tasks = [
             dp_instance.start_polling(bot_instance),
-            start_bridge(),
+            start_bridge(host=FIGMA_BRIDGE_HOST, port=FIGMA_BRIDGE_PORT),
             _nano_keys_sync_loop(),
         ]
         if has_bot2:
             polling_tasks.append(dp2.start_polling(bot2))
             logger.info('Оба бота запущены и готовы к работе!')
         else:
-            logger.info('Основной бот (@HataniAiBot) запущен и готов к работе (Bot2 отключен)!')
+            bot_label = f'@{me.username}' if getattr(me, 'username', None) else 'основной бот'
+            logger.info(f'Основной бот ({bot_label}) запущен и готов к работе (Bot2 отключен)!')
 
         await asyncio.gather(*polling_tasks)
     except Exception as e:
@@ -303,6 +321,7 @@ async def main():
         raise
     finally:
         await on_shutdown()
+
 
 if __name__ == '__main__':
     try:

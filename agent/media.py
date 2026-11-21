@@ -12,17 +12,46 @@ from urllib.parse import urlparse
 import aiohttp
 
 from services.gemini_image import generate_image_with_gemini
+from services.omniroute_service import is_omniroute_configured, omniroute_text
 from services.openai_service import generate_image_with_gpt
 from services.audio_service import generate_tts_with_gemini
-from keys import load_keys, load_openai_keys
+from shared_types import gemini_post, gemini_text_of
+from keys import load_openai_keys
 
-from config import AGENT_VIDEO_DOWNLOAD_TIMEOUT, TELEGRAM_MEDIA_MAX_BYTES
+from config import (
+    AGENT_VIDEO_DOWNLOAD_TIMEOUT,
+    GEMINI_MULTIMODAL_MODEL,
+    GEMINI_TTS_MODEL,
+    OPENAI_BASE_URL,
+    OPENAI_IMAGE_MODEL,
+    TELEGRAM_MEDIA_MAX_BYTES,
+    get_cookie_path,
+)
 from .search import _fc_search, _fc_scrape, _search_image_urls, _download_bytes, _image_is_relevant
 
 logger = logging.getLogger(__name__)
 
 _VDL_TIMEOUT = AGENT_VIDEO_DOWNLOAD_TIMEOUT
 _TG_MAX_BYTES = TELEGRAM_MEDIA_MAX_BYTES
+
+
+async def _helper_llm_text(prompt: str, max_tokens: int = 100, temperature: float = 0.3, timeout: int = 20) -> str:
+    """Short auxiliary LLM call for agent media tools via OmniRoute with Gemini fallback."""
+    if is_omniroute_configured():
+        try:
+            text = await omniroute_text(prompt, max_tokens=max_tokens, temperature=temperature, timeout=timeout)
+            if text:
+                return text.strip()
+        except Exception as exc:
+            logger.debug("OmniRoute helper LLM fallback: %s: %s", type(exc).__name__, exc)
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
+    }
+    data, _key, _err = await gemini_post(f"models/{GEMINI_MULTIMODAL_MODEL}:generateContent", payload, timeout=float(timeout))
+    if data:
+        return gemini_text_of(data).strip()
+    return ""
 
 
 async def _tool_search_image(
@@ -32,7 +61,6 @@ async def _tool_search_image(
     status_cb: Callable,
 ) -> str:
     """Autonomous image search: formulate query → find URLs → evaluate → retry."""
-    keys = await load_keys()
     search_desc = description or query
     tried_queries: list[str] = []
     max_rounds = 3
@@ -48,33 +76,15 @@ async def _tool_search_image(
         if rnd == 0:
             current_query = query
         else:
-            # Ask Gemini to suggest a better image search query
-            if keys:
-                payload = {
-                    "contents": [{"parts": [{"text":
-                        f"Generate a better Google Images search query to find: '{search_desc}'. "
-                        f"Previous failed queries: {tried_queries}. "
-                        "Return ONLY the query string, no explanations."
-                    }]}],
-                    "generationConfig": {"temperature": 0.5, "maxOutputTokens": 30},
-                }
-                url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
-                try:
-                    async with aiohttp.ClientSession() as s:
-                        async with s.post(
-                            url, json=payload,
-                            headers={"Content-Type": "application/json", "x-goog-api-key": keys[0]},
-                            timeout=aiohttp.ClientTimeout(total=10),
-                        ) as resp:
-                            if resp.status == 200:
-                                data = await resp.json()
-                                current_query = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                            else:
-                                current_query = f"{query} hd high quality"
-                except Exception:
-                    current_query = f"{query} hd high quality"
-            else:
-                current_query = f"{query} hd"
+            refined = await _helper_llm_text(
+                f"Generate a better Google Images search query to find: '{search_desc}'. "
+                f"Previous failed queries: {tried_queries}. "
+                "Return ONLY the query string, no explanations.",
+                max_tokens=256,
+                temperature=0.5,
+                timeout=20,
+            )
+            current_query = refined or f"{query} hd high quality"
 
         tried_queries.append(current_query)
         await _st(f"Ищу картинку: «{current_query}» (попытка {rnd + 1}/{max_rounds})")
@@ -117,7 +127,7 @@ async def _tool_generate_image(prompt: str, send_cb: Callable, provider: str = "
     use_gpt = provider.lower() in _GPT_PROVIDERS or model in _GPT_MODELS or model.startswith("openai/")
 
     if use_gpt:
-        gpt_model = model if model else "gpt-image-2"
+        gpt_model = model if model else OPENAI_IMAGE_MODEL
         img_bytes, err = await generate_image_with_gpt(prompt, model=gpt_model)
         used_provider = f"OpenAI ({gpt_model})"
         if not img_bytes:
@@ -144,7 +154,7 @@ async def _tool_list_image_models() -> str:
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(
-                "https://api.openai.com/v1/models",
+                f"{OPENAI_BASE_URL}/models",
                 headers={"Authorization": f"Bearer {keys[0]}"},
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
@@ -172,25 +182,11 @@ async def _tool_download_image(url: str, caption: str, send_cb: Callable) -> str
     return "Image downloaded and sent."
 
 
-_COOKIE_FILES = {
-    "youtube.com": "/root/cookies/youtube.txt",
-    "youtu.be":    "/root/cookies/youtube.txt",
-    "tiktok.com":  "/root/cookies/tiktok.txt",
-    "instagram.com": "/root/cookies/instagram.txt",
-    "x.com":       "/root/cookies/x.txt",
-    "twitter.com": "/root/cookies/x.txt",
-    "reddit.com":  "/root/cookies/reddit.txt",
-}
-
 def _cookies_for_url(url: str) -> list[str]:
     """Return --cookies flag list for the given URL domain, if cookie file exists."""
-    try:
-        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
-    except Exception:
-        return []
-    for domain, path in _COOKIE_FILES.items():
-        if (hostname == domain or hostname.endswith("." + domain)) and os.path.exists(path):
-            return ["--cookies", path]
+    path = get_cookie_path(url)
+    if path and os.path.exists(path):
+        return ["--cookies", path]
     return []
 
 
@@ -304,7 +300,6 @@ async def _tool_search_video(
     query: str, description: str, creator: str, send_cb: Callable, status_cb: Callable
 ) -> str:
     """Autonomous video search with optional creator verification."""
-    keys = await load_keys()
     max_rounds = 3
     tried_queries: list[str] = []
 
@@ -316,32 +311,15 @@ async def _tool_search_video(
         if rnd == 0:
             current_query = query
         else:
-            if keys:
-                creator_hint = f" specifically from creator '{creator}'" if creator else ""
-                payload = {
-                    "contents": [{"parts": [{"text":
-                        f"Give a better YouTube/TikTok search query to find: '{description or query}'{creator_hint}. "
-                        f"Previous failed: {tried_queries}. Return ONLY the query string."
-                    }]}],
-                    "generationConfig": {"temperature": 0.5, "maxOutputTokens": 30},
-                }
-                url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
-                try:
-                    async with aiohttp.ClientSession() as s:
-                        async with s.post(
-                            url, json=payload,
-                            headers={"Content-Type": "application/json", "x-goog-api-key": keys[0]},
-                            timeout=aiohttp.ClientTimeout(total=10),
-                        ) as resp:
-                            if resp.status == 200:
-                                data = await resp.json()
-                                current_query = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                            else:
-                                current_query = f"{query} {creator} official".strip()
-                except Exception:
-                    current_query = f"{query} {creator}".strip()
-            else:
-                current_query = f"{query} {creator}".strip()
+            creator_hint = f" specifically from creator '{creator}'" if creator else ""
+            refined = await _helper_llm_text(
+                f"Give a better YouTube/TikTok search query to find: '{description or query}'{creator_hint}. "
+                f"Previous failed: {tried_queries}. Return ONLY the query string.",
+                max_tokens=256,
+                temperature=0.5,
+                timeout=20,
+            )
+            current_query = refined or f"{query} {creator} official".strip()
 
         tried_queries.append(current_query)
         await _st(f"Ищу видео: «{current_query}» (попытка {rnd + 1}/{max_rounds})")
@@ -377,7 +355,7 @@ async def _tool_search_video(
 
 async def _tool_tts(text: str, voice: str, lang: str, send_cb: Callable) -> str:
     audio, err = await generate_tts_with_gemini(
-        text, model="gemini-3.8-flash-tts",
+        text, model=GEMINI_TTS_MODEL,
         voice_name=voice or "Kore", language_code=lang or "ru-RU",
     )
     if err or not audio:
@@ -407,24 +385,10 @@ async def _tool_qr_code(text: str, caption: str, send_cb: Callable) -> str:
 
 
 async def _tool_translate(text: str, target_lang: str) -> str:
-    keys = await load_keys()
-    if not keys:
-        return "No Gemini keys."
-    payload = {
-        "contents": [{"parts": [{"text":
-            f"Translate to {target_lang}. Return ONLY the translation:\n\n{text[:3000]}"
-        }]}],
-        "generationConfig": {"temperature": 0.1},
-    }
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(url, json=payload,
-                             headers={"Content-Type": "application/json", "x-goog-api-key": keys[0]},
-                             timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                return f"Translate API error: {resp.status}"
-    except Exception as e:
-        return f"Translate failed: {e}"
+    translated = await _helper_llm_text(
+        f"Translate to {target_lang}. Return ONLY the translation:\n\n{text[:3000]}",
+        max_tokens=2000,
+        temperature=0.1,
+        timeout=30,
+    )
+    return translated or "Translate failed: no provider response."

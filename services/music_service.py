@@ -4,6 +4,7 @@ import asyncio as _asyncio
 import base64
 import logging
 from typing import Tuple, Optional
+from config import MUSIC_TIMEOUT
 from keys import load_keys
 
 from shared_types import gemini_post
@@ -87,7 +88,7 @@ async def generate_music(
             ],
         }
 
-        data, used_key, err = await gemini_post(f"models/{model_id}:generateContent", payload, timeout=120)
+        data, used_key, err = await gemini_post(f"models/{model_id}:generateContent", payload, timeout=MUSIC_TIMEOUT)
         if data:
             candidates = data.get("candidates", [])
             if not candidates:

@@ -4,18 +4,26 @@ Agent orchestration loop — _sonnet_call, _execute_tool, run_agent, classify_ag
 Supporting modules: workspace, safety, search, media, sandbox, tools, tg_api, prompts.
 """
 import asyncio
+import ipaddress
+import json
 import logging
 import html
 import os
 import re
+import socket
 from typing import Any, Callable, Optional, Tuple
-
+from urllib.parse import urlparse
 
 from services.code_service import generate_project_with_gemini
+from services.security_utils import is_safe_url
 
-from services.deepseek_service import (
-    _gemini_contents_to_openai_messages, _gemini_tools_to_openai, _openai_response_to_gemini,
-    deepseek_chat, deepseek_text,
+from services.omniroute_service import (
+    analyze_image_with_omniroute,
+    gemini_contents_to_openai_messages,
+    gemini_tools_to_openai,
+    omniroute_chat,
+    omniroute_text,
+    openai_response_to_gemini,
 )
 logger = logging.getLogger(__name__)
 
@@ -26,8 +34,9 @@ from config import (
     AGENT_PROJECT_TIMEOUT,
     AGENT_SONNET_MAX_TOKENS,
     AGENT_SONNET_TIMEOUT,
-    DEEPSEEK_MODEL,
     NEWS_EMOJI_IDS,
+    OMNIROUTE_AGENT_MODEL,
+    get_cookie_path,
 )
 
 _E = NEWS_EMOJI_IDS
@@ -49,10 +58,55 @@ from .media import (
     _tool_tts, _tool_qr_code, _tool_translate,
 )
 
-
-
-
 from .prompts import _TOOLS, _build_system
+
+
+async def _run_exec(cmd: list[str], timeout: float) -> Tuple[int, str, str]:
+    """Run external binary asynchronously with a hard timeout."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return (
+            proc.returncode if proc.returncode is not None else -1,
+            stdout_b.decode(errors="replace"),
+            stderr_b.decode(errors="replace"),
+        )
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        await proc.wait()
+        raise
+
+
+def _resolve_safe_host(url: str) -> Optional[Tuple[str, int, str]]:
+    """Validate URL via central SSRF policy and return (host, port, ip) for pinning."""
+    if not is_safe_url(url):
+        return None
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return None
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return None
+    for *_, sockaddr in infos:
+        ip_str = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        return (host, port, str(ip))
+    return None
 
 
 async def _sonnet_call(contents: list, is_owner: bool = False) -> dict:
@@ -62,46 +116,52 @@ async def _sonnet_call(contents: list, is_owner: bool = False) -> dict:
         contents = [contents[0]] + contents[-30:]
 
     system = _build_system(is_owner)
-    tools = _gemini_tools_to_openai(_TOOLS)
-    messages = _gemini_contents_to_openai_messages(contents)
+    tools = gemini_tools_to_openai(_TOOLS)
+    messages = gemini_contents_to_openai_messages(contents)
 
     for attempt in range(3):
         started = _t.monotonic()
         try:
-            data = await deepseek_chat(
+            data = await omniroute_chat(
                 messages=messages,
                 system_prompt=system,
-                model=DEEPSEEK_MODEL,
+                model=OMNIROUTE_AGENT_MODEL,
                 max_tokens=AGENT_SONNET_MAX_TOKENS,
                 tools=tools,
                 timeout=AGENT_SONNET_TIMEOUT,
             )
             if not data:
-                raise RuntimeError('DeepSeek не ответил (все ключи недоступны)')
+                raise RuntimeError(f'OmniRoute ({OMNIROUTE_AGENT_MODEL}) не ответил')
         except Exception as error:
             errors.append(f"{type(error).__name__}: {error}")
             if attempt < 2:
                 await asyncio.sleep(2)
             continue
 
-        logger.info(f"agent: DeepSeek V4 raw finish={data.get('choices',[{}])[0].get('finish_reason','?')} has_tools={bool(data.get('choices',[{}])[0].get('message',{}).get('tool_calls'))}")
-        result = _openai_response_to_gemini(data)
+        choice = (data.get("choices") or [{}])[0]
+        logger.info(
+            "agent: OmniRoute %s raw finish=%s has_tools=%s",
+            OMNIROUTE_AGENT_MODEL,
+            choice.get("finish_reason", "?"),
+            bool((choice.get("message") or {}).get("tool_calls")),
+        )
+        result = openai_response_to_gemini(data)
         elapsed = _t.monotonic() - started
         function_calls = [part.get("functionCall") for part in result.get("content", {}).get("parts", []) if "functionCall" in part]
         text = " ".join(part.get("text", "") for part in result.get("content", {}).get("parts", []) if "text" in part).strip()
         if function_calls:
-            logger.info(f"agent: DeepSeek V4 tool calls [{elapsed:.1f}s]: {[call['name'] for call in function_calls]}")
+            logger.info("agent: OmniRoute %s tool calls [%.1fs]: %s", OMNIROUTE_AGENT_MODEL, elapsed, [call['name'] for call in function_calls])
             return result
         if text:
-            logger.info(f"agent: DeepSeek V4 text [{elapsed:.1f}s] ({len(text)} chars)")
+            logger.info("agent: OmniRoute %s text [%.1fs] (%d chars)", OMNIROUTE_AGENT_MODEL, elapsed, len(text))
             return result
-        errors.append(f"DeepSeek: пустой ответ (finish={data.get('choices',[{}])[0].get('finish_reason','?')})")
+        errors.append(f"OmniRoute {OMNIROUTE_AGENT_MODEL}: пустой ответ (finish={choice.get('finish_reason', '?')})")
 
     first = errors[0][:300] if errors else "неизвестная ошибка"
     rest = f" + ещё {len(errors) - 1}" if len(errors) > 1 else ""
-    return {"_error": f"DeepSeek V4: {first}{rest}"}
+    return {"_error": f"OmniRoute ({OMNIROUTE_AGENT_MODEL}): {first}{rest}"}
 
- # ── Execute one tool ─────────────────────────────────────────────
+# ── Execute one tool ─────────────────────────────────────────────
 
 
 async def _execute_tool(
@@ -176,19 +236,18 @@ async def _execute_tool(
             return result
     if name == "fetch_tiktok_profile":
         username = args.get("username", "").lstrip("@").strip()
-        if not username:
-            return "Укажи username.", None
-        import subprocess, json as _json
-        cookie_path = "/root/cookies/tiktok.txt"
+        if not username or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", username):
+            return "Укажи корректный TikTok username.", None
+        cookie_path = get_cookie_path("tiktok.com")
+        cookie_args = ["--cookies", cookie_path] if cookie_path and os.path.exists(cookie_path) else []
         try:
-            # Use yt-dlp to get profile playlist metadata
-            result = subprocess.run(
-                ["yt-dlp", "--cookies", cookie_path, "--dump-json", "--flat-playlist",
+            rc, stdout, stderr = await _run_exec(
+                ["yt-dlp", *cookie_args, "--dump-json", "--flat-playlist",
                  "--playlist-end", "1", f"https://www.tiktok.com/@{username}"],
-                capture_output=True, text=True, timeout=180
+                timeout=180,
             )
-            if result.returncode == 0 and result.stdout.strip():
-                first = _json.loads(result.stdout.strip().splitlines()[0])
+            if rc == 0 and stdout.strip():
+                first = json.loads(stdout.strip().splitlines()[0])
                 channel = first.get("channel") or first.get("uploader", username)
                 count = first.get("channel_follower_count") or "?"
                 return (f"TikTok @{username}:\n"
@@ -197,14 +256,16 @@ async def _execute_tool(
                         f"Видео: {first.get('playlist_count','?')}\n"
                         f"Bio: {first.get('description','—')}"), None
             # Fallback: scrape via curl with cookies
-            curl = subprocess.run(
-                ["curl", "-s", "-b", cookie_path, "--user-agent",
-                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-                 f"https://www.tiktok.com/api/user/detail/?uniqueId={username}&aid=1988"],
-                capture_output=True, text=True, timeout=15
-            )
-            if curl.returncode == 0:
-                data = _json.loads(curl.stdout)
+            curl_cmd = ["curl", "-s"]
+            if cookie_path and os.path.exists(cookie_path):
+                curl_cmd += ["-b", cookie_path]
+            curl_cmd += [
+                "--user-agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+                f"https://www.tiktok.com/api/user/detail/?uniqueId={username}&aid=1988",
+            ]
+            c_rc, c_out, _ = await _run_exec(curl_cmd, timeout=15)
+            if c_rc == 0 and c_out.strip():
+                data = json.loads(c_out)
                 user = data.get("userInfo", {}).get("user", {})
                 stats = data.get("userInfo", {}).get("stats", {})
                 return (f"TikTok @{username} (через API):\n"
@@ -213,7 +274,9 @@ async def _execute_tool(
                         f"Лайки: {stats.get('heartCount','?')}\n"
                         f"Видео: {stats.get('videoCount','?')}\n"
                         f"Bio: {user.get('signature','—')}"), None
-            return f"Не смог получить данные профиля @{username}: {result.stderr[:200]}", None
+            return f"Не смог получить данные профиля @{username}: {stderr[:200]}", None
+        except asyncio.TimeoutError:
+            return f"Таймаут при получении профиля @{username}.", None
         except Exception as e:
             return f"Ошибка fetch_tiktok_profile: {e}", None
 
@@ -221,46 +284,10 @@ async def _execute_tool(
         url = args.get("url", "")
         if not url:
             return "Укажи URL.", None
-        # SSRF guard: block private/loopback/link-local targets
-        import socket as _sock, ipaddress as _ipa
-        def _ssrf_resolve(u: str):
-            from urllib.parse import urlparse as _up2
-            p2 = _up2(u)
-            if p2.scheme not in ("http", "https") or not p2.hostname:
-                return None
-            port = p2.port or (443 if p2.scheme == "https" else 80)
-            _BLK2 = [_ipa.ip_network(n) for n in (
-                "127.0.0.0/8", "::1/128", "0.0.0.0/8",
-                "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-                "169.254.0.0/16", "fd00::/8", "fc00::/8",
-                "fe80::/10", "100.64.0.0/10",
-            )]
-            try:
-                safe_ip = None
-                for *_, sa in _sock.getaddrinfo(p2.hostname, None):
-                    ip = _ipa.ip_address(sa[0])
-                    if any(ip in net for net in _BLK2 if ip.version == net.version):
-                        return None
-                    safe_ip = sa[0]
-                return (p2.hostname, port, safe_ip)
-            except Exception:
-                return None
-        resolved = _ssrf_resolve(url)
+        resolved = _resolve_safe_host(url)
         if not resolved:
             return "Запрос к этому адресу запрещён (SSRF защита).", None
-        cookie_path_map = {
-            "youtube.com": "/root/cookies/youtube.txt",
-            "youtu.be": "/root/cookies/youtube.txt",
-            "tiktok.com": "/root/cookies/tiktok.txt",
-            "instagram.com": "/root/cookies/instagram.txt",
-            "x.com": "/root/cookies/x.txt",
-            "twitter.com": "/root/cookies/x.txt",
-            "reddit.com": "/root/cookies/reddit.txt",
-        }
-        from urllib.parse import urlparse
-        host = (urlparse(url).hostname or "").lower()
-        cookie_file = next((v for k, v in cookie_path_map.items() if k in host), None)
-        import subprocess
+        cookie_file = get_cookie_path(url)
         _host, _port, _safe_ip = resolved
         cmd = ["curl", "-s", "--max-time", "15", "--max-redirs", "0",
                "--resolve", f"{_host}:{_port}:{_safe_ip}",
@@ -269,15 +296,16 @@ async def _execute_tool(
             cmd += ["-b", cookie_file]
         cmd.append(url)
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-            out = result.stdout[:6000]
+            _, stdout, _ = await _run_exec(cmd, timeout=20)
+            out = stdout[:6000]
             if args.get("output_format") == "json":
-                import json as _j
                 try:
-                    _j.loads(out)  # validate
+                    json.loads(out)
                 except Exception:
                     pass
             return out or "Пустой ответ.", None
+        except asyncio.TimeoutError:
+            return "fetch_with_cookies error: timeout", None
         except Exception as e:
             return f"fetch_with_cookies error: {e}", None
 
@@ -317,9 +345,8 @@ async def _execute_tool(
         return await _tool_tts(args.get("text", ""), args.get("voice", "Kore"), args.get("language", "ru-RU"), _send), None
 
     if name == "run_python":
-        import html as _html
         code = args.get("code", "")
-        safe_code = _html.escape(code[:300])
+        safe_code = html.escape(code[:300])
         await _st(f"Запускаю Python в sandbox:\n<pre><code class=\"language-python\">{safe_code}{'…' if len(code) > 300 else ''}</code></pre>")
         return await _tool_run_python(code, ws, _st), None
 
@@ -330,15 +357,14 @@ async def _execute_tool(
         ), None
 
     if name == "analyze_image":
-        await _st("Анализирую изображение через Gemini...")
+        await _st("Анализирую изображение...")
         return await _tool_analyze_image(
             path=args.get("path", ""), question=args.get("question", ""), ws=ws
         ), None
 
     if name == "run_shell":
-        import html as _html
         cmd = args.get("command", "")
-        safe_cmd = _html.escape(cmd[:300])
+        safe_cmd = html.escape(cmd[:300])
         await _st(f"Выполняю команду в sandbox:\n<pre><code class=\"language-bash\">{safe_cmd}</code></pre>")
         return await _tool_run_shell(cmd, ws, _st), None
 
@@ -361,13 +387,11 @@ async def _execute_tool(
     if name == "read_bot_logs":
         if not is_owner:
             return "Недостаточно прав. Это действие доступно только администраторам.", None
-        import html as _html
         log_text = await _tool_read_bot_logs(args.get("lines", 100))
-        # Показываем в статус-сообщении — обрезаем хвост для отображения
         display = log_text[-2500:] if len(log_text) > 2500 else log_text
-        safe_log = _html.escape(display)
+        safe_log = html.escape(display)
         await _st(f"<b>Логи бота:</b>\n<pre><code>{safe_log}</code></pre>")
-        return log_text, None  # агент видит полный текст
+        return log_text, None
 
     if name == "read_file":
         return ws.read(args.get("path", "")), None
@@ -390,7 +414,11 @@ async def _execute_tool(
     if name == "send_workspace_file":
         await _st(f"Отправляю файл из workspace: {args.get('path', '')}...")
         return await _tool_send_workspace_file(
-            args.get("path", ""), args.get("caption", ""), ws, _send
+            args.get("path", ""),
+            args.get("caption", ""),
+            ws,
+            _send,
+            media_type=args.get("media_type", "auto"),
         ), None
 
     if name == "create_file":
@@ -403,17 +431,24 @@ async def _execute_tool(
     if name == "vision":
         path = args.get("path", "")
         prompt = args.get("prompt", "Опиши это изображение.")
-        import os as _os2
-        if not path or not _os2.path.isfile(path):
-            return f"Файл не найден: {path}. Используй путь из workspace.", None
-        await _st("Анализирую изображение через NVIDIA Vision...")
+        if not path:
+            return "Укажи путь к файлу в workspace.", None
         try:
-            with open(path, "rb") as f:
+            safe_path = ws._safe_path(path)
+        except ValueError as e:
+            return f"Доступ запрещён: {e}", None
+        if not os.path.isfile(safe_path):
+            return f"Файл не найден: {path}. Используй путь внутри workspace.", None
+        await _st("Анализирую изображение...")
+        try:
+            with open(safe_path, "rb") as f:
                 img_bytes = f.read()
         except Exception as e:
             return f"Не могу прочитать файл: {e}", None
-        from services.nvidia_vision import analyze_image
-        result = await analyze_image(img_bytes, prompt)
+        try:
+            result = await analyze_image_with_omniroute(img_bytes, prompt)
+        except Exception as e:
+            return f"Vision ошибка: {type(e).__name__}: {e}", None
         if result:
             return result, None
         return "Vision анализ не дал результата.", None
@@ -502,7 +537,6 @@ async def run_agent(
         lines.append(f"<i>Работаю · {duration}</i>")
         return "\n".join(lines)
 
-    # Gemini Pro Agent drives every agent step, including tool calls.
     for step in range(AGENT_MAX_STEPS):
         await _st(_fmt_status(last_tool, last_args))
 
@@ -512,7 +546,6 @@ async def run_agent(
             }]})
 
         candidate = await _sonnet_call(contents, is_owner=is_owner)
-
 
         if candidate.get("_error"):
             return f"Модели недоступны: {candidate['_error']}", None
@@ -557,43 +590,24 @@ async def run_agent(
 
 
 async def classify_agent_intent(prompt: str) -> bool:
-    """Returns True if this request should go through the agent loop.
-    Uses Gemini Pro Agent to understand ambiguous intent; explicit triggers stay local."""
+    """Semantically decide via OmniRoute whether a request needs agent tools (no keyword matching)."""
     system = (
-        "You decide if a Telegram message needs the AI agent tools.\n\n"
-        "Answer TRUE when the user wants to:\n"
-        "- Execute or run anything (code, commands, server ops, stress tests)\n"
-        "- Search the internet, find info, news, social media profiles\n"
-        "- Find, download, or generate images or videos\n"
-        "- Make calculations, charts, QR codes, translations\n"
-        "- Generate text-to-speech audio\n"
-        "- Create a project/website/code AND needs web research first\n"
-        "- Do anything requiring external tools or execution\n"
-        "- Archive, zip, encrypt, compress files\n"
-        "- Work with attached files/images (save, convert, pack, encrypt)\n"
-        "- Any file manipulation: rename, move, convert, pack, send\n\n"
-        "Answer TRUE for 'continue searching' follow-ups:\n"
-        "- 'продолжай', 'ищи дальше', 'найди больше', 'копай глубже', 'осинт', 'деанон'\n"
-        "- 'continue', 'search more', 'find more', 'dig deeper', 'keep going'\n"
-        "- Any request to research further on a topic that was already discussed\n\n"
-        "Answer FALSE when the user:\n"
-        "- Asks a simple question answerable from knowledge\n"
-        "- Asks a follow-up question about already sent media (not about searching more)\n"
-        "- Wants casual chat or a simple text reply\n"
-        "- Wants a pure code project with no research needed\n\n"
+        "You decide semantically whether a Telegram message requires AI agent tools or media/file actions.\n\n"
+        "Answer TRUE when the user's intent requires:\n"
+        "- Running code, shell commands, calculations, browser automation, or server operations\n"
+        "- Searching the internet, checking fresh facts, news, links, or social media profiles\n"
+        "- Creating, editing, converting, packing, or sending files/code/HTML/archives/documents\n"
+        "- Finding, downloading, generating, or editing images, videos, audio, voice, charts, or QR codes\n"
+        "- Performing Telegram chat actions (polls, reactions, avatar changes, moderation, etc.)\n"
+        "- Continuing a previous search, investigation, or file task\n\n"
+        "Answer FALSE when the user only wants casual chat or a direct text answer from knowledge.\n\n"
         "Reply with ONLY one word: true or false"
     )
-    agent_triggers = [
-        'search', 'find', 'generate', 'create', 'make', 'draw', 'send', 'download',
-        'convert', 'продолжай', 'ищи дальше', 'скинь', 'дай', 'переведи',
-    ]
-    if any(t in prompt.lower() for t in agent_triggers):
-        return True
     try:
-        text = await deepseek_text(
+        text = await omniroute_text(
             prompt=prompt[:800],
             system_prompt=system,
-            model=DEEPSEEK_MODEL,
+            model=OMNIROUTE_AGENT_MODEL,
             max_tokens=AGENT_CLASSIFY_MAX_TOKENS,
             timeout=AGENT_CLASSIFY_TIMEOUT,
         )
@@ -603,3 +617,34 @@ async def classify_agent_intent(prompt: str) -> bool:
         logger.warning(f"Agent intent classification failed: {type(error).__name__}: {error}")
         return False
     return text.strip().lower().startswith("true")
+
+
+async def classify_media_mode(prompt: str, filename: str = "") -> str:
+    """Semantically classify an attached image/video request: 'vision' (inspect/describe) vs 'agent' (process/edit/act)."""
+    clean_prompt = (prompt or "").strip()
+    if not clean_prompt:
+        return "vision"
+    system = (
+        "The user attached an image or video file to a Telegram message. Decide what they want done with it.\n\n"
+        "Answer VISION when the user only wants to look at, describe, explain, read text from, translate text on, "
+        "identify, rate, or answer questions about the attached image/video.\n\n"
+        "Answer AGENT when the user wants to perform an action or tool operation on or using the file: "
+        "edit, crop, resize, convert format, extract frames/audio, apply filters, compress, archive/zip, "
+        "send back as a file/document/sticker/gif, set as chat/bot avatar, run Python/ffmpeg on it, "
+        "or do web search / multi-step work.\n\n"
+        "Reply with ONLY one word: vision or agent"
+    )
+    user_msg = f"Filename: {filename or 'media'}\nUser request: {clean_prompt[:800]}"
+    try:
+        text = await omniroute_text(
+            prompt=user_msg,
+            system_prompt=system,
+            model=OMNIROUTE_AGENT_MODEL,
+            max_tokens=AGENT_CLASSIFY_MAX_TOKENS,
+            timeout=AGENT_CLASSIFY_TIMEOUT,
+        )
+        if text and text.strip().lower().startswith("agent"):
+            return "agent"
+    except Exception as error:
+        logger.warning(f"Media mode classification failed: {type(error).__name__}: {error}")
+    return "vision"

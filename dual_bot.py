@@ -6,7 +6,16 @@ import aiohttp
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Message
 from aiogram.exceptions import TelegramRetryAfter
-from config import BOT_TOKEN_2, DUAL_HISTORY_SIZE, BANNED_USER_IDS, TELEGRAM_API_URL, TELEGRAM_API_IS_LOCAL, DEEPSEEK_MODEL
+from config import (
+    BANNED_USER_IDS,
+    BOT2_USERNAME,
+    BOT_TOKEN_2,
+    DEEPSEEK_MODEL,
+    DUAL_HISTORY_SIZE,
+    FIRECRAWL_SEARCH_URL,
+    TELEGRAM_API_IS_LOCAL,
+    TELEGRAM_API_URL,
+)
 from keys import load_firecrawl_keys, remove_key
 from state import dual_histories, dual_tasks
 from aiogram.client.telegram import TelegramAPIServer
@@ -105,7 +114,8 @@ async def init_bot2() -> bool:
         logger.info(f"Bot2 инициализирован: @{me.username} (id={bot2_id})")
         return True
     except Exception as e:
-        logger.warning(f"Не удалось инициализировать Bot2 (@HatabiAiibot): {e}")
+        bot2_label = f" (@{BOT2_USERNAME})" if BOT2_USERNAME else ""
+        logger.warning(f"Не удалось инициализировать Bot2{bot2_label}: {e}")
         bot2_id = None
         return False
 
@@ -119,7 +129,7 @@ def add_dual_message(chat_id: int, name: str, text: str):
 
 
 async def _search_web(query: str) -> str:
-    url = "https://api.firecrawl.dev/v2/search"
+    url = FIRECRAWL_SEARCH_URL
     payload = {
         "query": query,
         "limit": 3,

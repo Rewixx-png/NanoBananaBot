@@ -5,7 +5,7 @@ import logging
 import aiohttp
 from typing import Tuple, Optional, List, Dict, Any
 
-from config import OPENAI_TIMEOUT
+from config import OPENAI_BASE_URL, OPENAI_IMAGE_FALLBACK_MODEL, OPENAI_IMAGE_MODEL, OPENAI_TIMEOUT
 from keys import load_openai_keys, remove_key
 from services.openrouter import generate_image_with_openrouter
 
@@ -41,7 +41,7 @@ async def parse_openai_image_response(resp) -> Tuple[Optional[bytes], Optional[s
 async def generate_image_with_gpt(
     prompt: str,
     image_bytes: Optional[bytes] = None,
-    model: str = 'gpt-image-2',
+    model: str = OPENAI_IMAGE_MODEL,
     images_bytes: Optional[List[bytes]] = None,
     state_data: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[bytes], Optional[str]]:
@@ -76,7 +76,7 @@ async def generate_image_with_gpt(
                     else:
                         for img in all_ref_images:
                             form.add_field('image[]', img, filename='input.jpg', content_type='image/jpeg')
-                    async with session.post('https://api.openai.com/v1/images/edits', data=form, headers=headers, timeout=request_timeout) as resp:
+                    async with session.post(f'{OPENAI_BASE_URL}/images/edits', data=form, headers=headers, timeout=request_timeout) as resp:
                         logging.info(f"edits endpoint status={resp.status}, model={model}, ref_images={len(all_ref_images)}, key_prefix={api_key[:16]}")
                         if resp.status != 200:
                             err_body = await resp.text()
@@ -84,7 +84,7 @@ async def generate_image_with_gpt(
                         (result, error) = await parse_openai_image_response(resp)
                 else:
                     payload = {'model': model, 'prompt': prompt_text}
-                    async with session.post('https://api.openai.com/v1/images/generations', json=payload, headers={**headers, 'Content-Type': 'application/json'}, timeout=request_timeout) as resp:
+                    async with session.post(f'{OPENAI_BASE_URL}/images/generations', json=payload, headers={**headers, 'Content-Type': 'application/json'}, timeout=request_timeout) as resp:
                         (result, error) = await parse_openai_image_response(resp)
                 if result:
                     return (result, None)
@@ -94,28 +94,28 @@ async def generate_image_with_gpt(
                     if 'safety' in lowered_err or 'rejected by' in lowered_err or 'censorship' in lowered_err or 'moderation' in lowered_err:
                         logging.warning(f'Запрос заблокирован цензурой OpenAI на ключе {api_key[:12]}. Прерываю цикл.')
                         return (None, error)
-                    elif 'access to model' in lowered_err and model != 'gpt-image-1.5':
+                    elif 'access to model' in lowered_err and model != OPENAI_IMAGE_FALLBACK_MODEL:
                         logging.info(f'Ключ {api_key[:12]} нет доступа к {model}')
                         if all_ref_images:
                             try:
                                 fb_form = aiohttp.FormData()
-                                fb_form.add_field('model', 'gpt-image-2')
+                                fb_form.add_field('model', OPENAI_IMAGE_MODEL)
                                 fb_form.add_field('prompt', prompt_text)
                                 fb_form.add_field('quality', 'high')
                                 fb_form.add_field('image', all_ref_images[0], filename='image.jpg', content_type='image/jpeg')
-                                async with session.post('https://api.openai.com/v1/images/edits', data=fb_form, headers=headers, timeout=request_timeout) as fb_resp:
-                                    logging.info(f'edits fallback gpt-image-2 status={fb_resp.status}')
+                                async with session.post(f'{OPENAI_BASE_URL}/images/edits', data=fb_form, headers=headers, timeout=request_timeout) as fb_resp:
+                                    logging.info(f'edits fallback {OPENAI_IMAGE_MODEL} status={fb_resp.status}')
                                     (fb_result, fb_error) = await parse_openai_image_response(fb_resp)
                                     if fb_result:
-                                        logging.info(f'edits gpt-image-2 сработал на ключе {api_key[:12]}')
+                                        logging.info(f'edits {OPENAI_IMAGE_MODEL} сработал на ключе {api_key[:12]}')
                                         return (fb_result, None)
                                     last_error = fb_error
                             except Exception as _fe:
                                 logging.warning(f'edits fallback failed: {_fe}')
                         else:
                             try:
-                                fallback_payload = {'model': 'gpt-image-1.5', 'prompt': prompt_text}
-                                async with session.post('https://api.openai.com/v1/images/generations', json=fallback_payload, headers={**headers, 'Content-Type': 'application/json'}, timeout=request_timeout) as fb_resp:
+                                fallback_payload = {'model': OPENAI_IMAGE_FALLBACK_MODEL, 'prompt': prompt_text}
+                                async with session.post(f'{OPENAI_BASE_URL}/images/generations', json=fallback_payload, headers={**headers, 'Content-Type': 'application/json'}, timeout=request_timeout) as fb_resp:
                                     (fb_result, fb_error) = await parse_openai_image_response(fb_resp)
                                     if fb_result:
                                         return (fb_result, None)
@@ -161,7 +161,7 @@ async def fetch_openai_image_models() -> list:
     for key in api_keys:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get('https://api.openai.com/v1/models', headers={'Authorization': f'Bearer {key}'}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(f'{OPENAI_BASE_URL}/models', headers={'Authorization': f'Bearer {key}'}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
                         continue
                     data = await resp.json()

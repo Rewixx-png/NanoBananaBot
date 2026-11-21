@@ -5,6 +5,8 @@ python-dotenv==1.2.2
 playwright==1.60.0
 qrcode==8.2
 Pillow
+numpy
+ddgs
 cryptography>=41.0.0
 yt-dlp
 redis>=5.0.0
